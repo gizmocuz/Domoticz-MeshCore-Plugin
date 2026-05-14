@@ -4017,10 +4017,19 @@ Larger = more reliable routing but smaller mesh diameter.">Path hash size</label
                 // transceiver and can briefly drop the local link. Doing TX
                 // power / path hash / flood scope ahead means we're not
                 // racing against a re-tune. Radio goes last.
-                if (p.flood_scope !== undefined) await _sendDeviceCmd(`!flood_scope ${p.flood_scope}`);
-                if (p.path_hash_mode)            await _sendDeviceCmd(`!set_path_hash_mode ${p.path_hash_mode}`);
-                if (p.tx_power)                  await _sendDeviceCmd(`!set_tx_power ${p.tx_power}`);
-                await _sendDeviceCmd(`!set_radio ${p.freq} ${p.bw} ${p.sf} ${p.cr}`);
+                // Space the writes apart: each !-command is delivered via the
+                // Mesh Send device's sValue. Domoticz only stores the latest
+                // sValue, and the plugin's onDeviceModified reads it at
+                // callback time. If we write four values back-to-back, all
+                // callbacks see the *last* value and the dedup drops the
+                // earlier commands. A short delay between writes ensures each
+                // sValue is observed before the next overwrites it.
+                const _step = (cmd) => new Promise(r =>
+                    setTimeout(async () => { await _sendDeviceCmd(cmd); r(); }, 600));
+                if (p.flood_scope !== undefined) await _step(`!flood_scope ${p.flood_scope}`);
+                if (p.path_hash_mode)            await _step(`!set_path_hash_mode ${p.path_hash_mode}`);
+                if (p.tx_power)                  await _step(`!set_tx_power ${p.tx_power}`);
+                await _step(`!set_radio ${p.freq} ${p.bw} ${p.sf} ${p.cr}`);
                 setTimeout(async () => { await _loadDeviceMap(); _renderSelfPanel(); }, 1500);
                 return;
             }
