@@ -4,6 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>MeshCore Dashboard</title>
+    <link rel="stylesheet" href="/font-awesome/css/all.min.css">
     <style>
         :root {
             --bg: #1e1f26;
@@ -26,6 +27,7 @@
             color: var(--text);
             padding: 20px;
             min-height: 100vh;
+            color-scheme: dark;   /* makes default form controls (checkbox, etc.) render with dark theme */
         }
 
         header {
@@ -74,7 +76,7 @@
             gap: 0;
         }
         #self-section {
-            flex: 0 0 400px;
+            flex: 0 0 300px;
         }
         #layout-divider {
             flex: 0 0 1px;
@@ -125,25 +127,66 @@
             background: var(--surface);
             border: 1px solid var(--border);
             border-radius: var(--radius);
-            overflow: hidden;
+            overflow: visible;
+            position: relative;
         }
         .node-header {
-            display: flex;
-            align-items: center;
-            justify-content: space-between;
             padding: 14px 18px;
+            padding-right: 96px;  /* leave room for the floating badge */
             border-bottom: 1px solid var(--border);
         }
         .node-name { font-weight: 600; font-size: 1rem; }
 
-        .badge {
-            font-size: 0.7rem;
-            font-weight: 700;
-            text-transform: uppercase;
-            letter-spacing: 0.06em;
-            border-radius: 20px;
-            padding: 3px 10px;
+        /* Floating badge — top-right overlay, doesn't affect card layout */
+        .node-badge {
+            position: absolute;
+            top: 10px;
+            right: 12px;
+            z-index: 2;
+            pointer-events: auto;
         }
+
+        /* Floating favorite toggle — bottom-right overlay on contact cards */
+        .fav-toggle {
+            position: absolute;
+            bottom: 8px;
+            right: 10px;
+            z-index: 2;
+            background: transparent;
+            border: none;
+            color: var(--muted);
+            font-size: 1rem;
+            cursor: pointer;
+            padding: 4px 6px;
+            border-radius: 4px;
+            transition: color 0.12s, background 0.12s;
+        }
+        .fav-toggle:hover  { color: var(--yellow); background: rgba(240, 168, 50, 0.08); }
+        .fav-toggle.active { color: var(--yellow); }
+        /* List-view favorite indicator in front of the name */
+        .row-fav {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            width: 14px;
+            color: var(--yellow);
+            font-size: 0.9rem;
+            margin-right: 6px;
+        }
+        .row-fav.empty { visibility: hidden; }
+
+        .badge {
+            font-size: 1rem;
+            line-height: 1;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            width: 24px;
+            height: 24px;
+            border-radius: 50%;
+            box-shadow: 0 1px 4px rgba(0, 0, 0, 0.35);
+        }
+        .badge i { font-size: 1rem; }
         .badge.online  { background: #1a3d2b; color: var(--green); }
         .badge.offline { background: #3d1a1a; color: var(--red); }
         .badge.unknown { background: #2e2e2e; color: var(--muted); }
@@ -158,6 +201,360 @@
         .metric { display: flex; flex-direction: column; gap: 2px; }
         .metric a { text-decoration: none; color: inherit; display: contents; }
         .metric a:hover .metric-value { color: var(--accent); }
+
+        /* Last Seen: full-width single-line row "LAST SEEN: 2026-05-13 19:55:06" */
+        .metric[data-key="last_seen"] {
+            grid-column: 1 / -1;
+            flex-direction: row;
+            align-items: baseline;
+            gap: 6px;
+        }
+        .metric[data-key="last_seen"] .metric-label::after { content: ":"; }
+        .metric[data-key="last_seen"] .metric-value { font-size: 0.82rem; }
+
+        /* Clickable contact cards — visual cue */
+        #contacts-grid .node-card { cursor: pointer; transition: border-color 0.15s, transform 0.1s; }
+        #contacts-grid .node-card:hover { border-color: var(--accent); }
+        #contacts-grid .node-card.compose-selected {
+            border-color: var(--accent);
+            box-shadow: 0 0 0 1px var(--accent);
+        }
+
+        /* Firmware info line shown under the self-node name */
+        .fw-info {
+            font-size: 0.7rem;
+            color: var(--muted);
+            margin-top: 4px;
+            font-family: -apple-system, "Segoe UI", monospace;
+        }
+
+        /* Direct-neighbour badge ("hops == 0") */
+        .direct-chip {
+            display: inline-flex;
+            align-items: center;
+            gap: 4px;
+            font-size: 0.62rem;
+            font-weight: 700;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            background: #1a3d2b;
+            color: var(--green);
+            border-radius: 4px;
+            padding: 2px 6px;
+            margin-top: 4px;
+        }
+        .direct-chip i { font-size: 0.7rem; }
+        .row-direct {
+            display: inline-flex;
+            align-items: center;
+            color: var(--green);
+            font-size: 0.85rem;
+            margin-left: 8px;
+        }
+
+        /* Contact type chip (shown under node name in card header) */
+        .type-chip {
+            display: inline-block;
+            font-size: 0.65rem;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            border-radius: 4px;
+            padding: 2px 7px;
+            margin-top: 4px;
+        }
+        .type-chip.type-1 { background: #1a2e3d; color: var(--accent); }
+        .type-chip.type-2 { background: #3d2a1a; color: #f0a832; }
+        .type-chip.type-3 { background: #1a3d2b; color: var(--green); }
+        .type-chip.type-4 { background: #3d1a3d; color: #d090e0; }
+        .type-chip.type-0 { background: #2e2e2e; color: var(--muted); }
+
+        /* Group headings between online/offline + per-type sections */
+        .contact-group-title {
+            font-size: 0.68rem;
+            font-weight: 700;
+            text-transform: uppercase;
+            letter-spacing: 0.08em;
+            color: var(--muted);
+            margin: 14px 0 8px;
+            width: 100%;
+        }
+        .contact-group-title:first-child { margin-top: 0; }
+
+        /* Contacts toolbar: view-toggle + type-filter + name-search on right */
+        .contacts-header {
+            display: flex;
+            align-items: baseline;
+            justify-content: space-between;
+            gap: 14px;
+            margin: 0 0 12px;
+            padding-bottom: 8px;
+            border-bottom: 1px solid var(--border);
+        }
+        .contacts-header .section-title {
+            margin: 0;
+            padding: 0;
+            border: none;
+        }
+        #contacts-count {
+            color: var(--text);
+            font-weight: 500;
+            margin-left: 6px;
+            opacity: 0.7;
+        }
+        #contacts-toolbar {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+        #contacts-toolbar select,
+        #contacts-toolbar input {
+            background: var(--surface);
+            border: 1px solid var(--border);
+            color: var(--text);
+            border-radius: 6px;
+            padding: 5px 10px;
+            font-size: 0.82rem;
+            outline: none;
+            min-width: 0;
+        }
+        #contacts-toolbar input[type="search"] { width: 180px; }
+        #contacts-toolbar input:focus,
+        #contacts-toolbar select:focus { border-color: var(--accent); }
+        #contacts-toolbar .search-wrap {
+            position: relative;
+            display: flex;
+            align-items: center;
+        }
+        #contacts-toolbar .search-wrap i {
+            position: absolute;
+            left: 9px;
+            color: var(--muted);
+            font-size: 0.8rem;
+            pointer-events: none;
+        }
+        #contacts-toolbar .search-wrap input { padding-left: 28px; }
+
+        .view-toggle {
+            display: flex;
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: 6px;
+            overflow: hidden;
+        }
+        .view-btn {
+            background: transparent;
+            border: none;
+            color: var(--muted);
+            font-size: 0.95rem;
+            padding: 5px 11px;
+            cursor: pointer;
+            transition: background 0.15s, color 0.15s;
+        }
+        .view-btn:hover { color: var(--text); }
+        .view-btn.active { background: var(--border); color: var(--accent); }
+
+        /* Generic icon button in the contacts toolbar (e.g. manual_add_contacts toggle) */
+        .toolbar-icon-btn {
+            background: var(--surface);
+            border: 1px solid var(--border);
+            color: var(--muted);
+            border-radius: 6px;
+            padding: 5px 11px;
+            cursor: pointer;
+            font-size: 0.95rem;
+            transition: background 0.15s, color 0.15s;
+        }
+        .toolbar-icon-btn:hover { color: var(--text); }
+        .toolbar-icon-btn.active { color: var(--yellow); }       /* manual-add = ON (block auto-add) */
+        .toolbar-icon-btn.inactive { color: var(--green); }      /* manual-add = OFF (auto-add) */
+
+        /* List view */
+        #contacts-list {
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: var(--radius);
+            overflow: hidden;
+        }
+        /* Shared grid template for header + body rows so columns line up.
+           cols: [checkbox] [status-dot] [name] [type] [last-seen wider] [snr] [hops] [trash] */
+        .contact-row,
+        .contact-row-header {
+            display: grid;
+            grid-template-columns: 24px 18px 1fr 110px 170px 70px 60px 40px;
+            align-items: center;
+            gap: 12px;
+            padding: 10px 14px;
+            border-bottom: 1px solid var(--border);
+            font-size: 0.85rem;
+        }
+        .contact-row-header {
+            background: var(--bg);
+            color: var(--muted);
+            font-size: 0.72rem;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            font-weight: 700;
+            cursor: default;
+        }
+        .contact-row-header .row-bulk-actions {
+            grid-column: 3 / -1;
+            display: flex;
+            justify-content: flex-end;
+            align-items: center;
+            gap: 8px;
+            text-transform: none;
+            font-weight: 500;
+            font-size: 0.78rem;
+            color: var(--text);
+        }
+        .contact-row-header .row-bulk-actions .selected-count { color: var(--muted); font-size: 0.74rem; }
+        .contact-row-header .row-bulk-actions button {
+            background: var(--surface);
+            border: 1px solid var(--border);
+            color: var(--muted);
+            border-radius: 5px;
+            padding: 4px 10px;
+            font-size: 0.78rem;
+            cursor: pointer;
+            transition: color 0.1s, border-color 0.1s, background 0.1s;
+        }
+        .contact-row-header .row-bulk-actions button.danger:hover {
+            color: var(--red); border-color: var(--red); background: rgba(224, 85, 85, 0.08);
+        }
+        .contact-row-header .row-bulk-actions button:disabled {
+            opacity: 0.4; cursor: not-allowed;
+        }
+        .contact-row { cursor: pointer; transition: background 0.1s; }
+        .contact-row:last-child { border-bottom: none; }
+        .contact-row:hover { background: rgba(255, 255, 255, 0.03); }
+        .contact-row.compose-selected { background: rgba(78, 154, 241, 0.08); }
+        .contact-row.row-selected     { background: rgba(224, 85, 85, 0.08); }
+        /* Custom icon-based checkbox (Domoticz host CSS sometimes hides native ones). */
+        .row-check { display: flex; align-items: center; justify-content: center; }
+        .row-check-box {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            width: 18px;
+            height: 18px;
+            cursor: pointer;
+            color: var(--muted);
+            font-size: 1.05rem;
+            transition: color 0.12s;
+        }
+        .row-check-box:hover            { color: var(--text); }
+        .row-check-box.checked          { color: var(--accent); }
+        .row-check-box.indeterminate    { color: var(--accent); }
+        .contact-row .row-status {
+            width: 10px; height: 10px; border-radius: 50%;
+        }
+        .contact-row .row-status.online  { background: var(--green); }
+        .contact-row .row-status.offline { background: var(--red); }
+        .contact-row .row-name { font-weight: 500; color: var(--text); }
+        .contact-row .row-name .row-pk {
+            font-size: 0.7rem; color: var(--muted); margin-left: 8px; font-family: monospace;
+        }
+        .contact-row .row-type { font-size: 0.72rem; color: var(--muted); text-transform: uppercase; letter-spacing: 0.05em; }
+        .contact-row .row-meta { color: var(--muted); font-size: 0.78rem; }
+        .contact-row .row-snr  { color: var(--text); font-variant-numeric: tabular-nums; text-align: right; }
+        .contact-row .row-hops { color: var(--muted); text-align: right; }
+        .contact-row .row-remove {
+            background: transparent;
+            border: none;
+            color: var(--red);
+            font-size: 0.9rem;
+            cursor: pointer;
+            padding: 6px 8px;
+            border-radius: 4px;
+            transition: background 0.1s;
+        }
+        .contact-row .row-remove:hover { background: rgba(224, 85, 85, 0.15); }
+
+        .contacts-empty {
+            padding: 18px;
+            text-align: center;
+            color: var(--muted);
+            font-size: 0.88rem;
+        }
+
+        /* Settings panel inside the connected-node card */
+        .node-settings {
+            border-top: 1px solid var(--border);
+            padding: 12px 18px 14px;
+        }
+        .node-settings-header {
+            font-size: 0.68rem;
+            font-weight: 700;
+            text-transform: uppercase;
+            letter-spacing: 0.08em;
+            color: var(--muted);
+            margin: 0 0 10px;
+        }
+        .settings-row {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 10px;
+            margin-bottom: 7px;
+        }
+        .settings-row:last-child { margin-bottom: 0; }
+        .settings-label {
+            font-size: 0.78rem;
+            color: var(--text);
+        }
+        .settings-options {
+            display: flex;
+            background: var(--bg);
+            border: 1px solid var(--border);
+            border-radius: 5px;
+            overflow: hidden;
+        }
+        .settings-btn {
+            background: transparent;
+            border: none;
+            color: var(--muted);
+            font-size: 0.72rem;
+            padding: 3px 9px;
+            cursor: pointer;
+            transition: background 0.1s, color 0.1s;
+        }
+        .settings-btn:hover { color: var(--text); }
+        .settings-btn.active {
+            background: var(--accent);
+            color: #fff;
+        }
+
+        /* Flood-scope text-input row */
+        .settings-text-wrap {
+            display: flex;
+            align-items: center;
+            gap: 4px;
+        }
+        .settings-text {
+            background: var(--bg);
+            border: 1px solid var(--border);
+            border-radius: 5px;
+            color: var(--text);
+            font-size: 0.78rem;
+            padding: 3px 8px;
+            width: 130px;
+            outline: none;
+            transition: border-color 0.15s, box-shadow 0.4s;
+        }
+        .settings-text:focus { border-color: var(--accent); }
+        .settings-text.saved { box-shadow: 0 0 0 2px rgba(76, 175, 125, 0.5); }
+        .settings-btn-save {
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: 5px;
+            color: var(--muted);
+            font-size: 0.78rem;
+            padding: 3px 8px;
+            cursor: pointer;
+            transition: color 0.1s, border-color 0.1s;
+        }
+        .settings-btn-save:hover { color: var(--green); border-color: var(--green); }
 
         .metric-label {
             font-size: 0.68rem;
@@ -515,8 +912,21 @@
         <div id="layout-divider"></div>
 
         <section id="contacts-section" style="display:none">
-            <h2 class="section-title">Contacts</h2>
+            <div class="contacts-header">
+                <h2 class="section-title">Contacts <span id="contacts-count"></span></h2>
+                <div id="contacts-toolbar">
+                    <div class="view-toggle" role="tablist" title="View mode">
+                        <button id="view-cards" class="view-btn active" title="Card view"><i class="fa-solid fa-grip"></i></button>
+                        <button id="view-list"  class="view-btn"        title="List view"><i class="fa-solid fa-list"></i></button>
+                    </div>
+                    <div class="search-wrap">
+                        <i class="fa-solid fa-magnifying-glass"></i>
+                        <input id="filter-name" type="search" placeholder="Filter by name, type...">
+                    </div>
+                </div>
+            </div>
             <div id="contacts-grid"></div>
+            <div id="contacts-list" style="display:none"></div>
         </section>
     </div>
 
@@ -703,6 +1113,20 @@
             return slot.Status === "On" || slot.Data === "On";           // live API
         }
 
+        // Contact type names (from meshcore: CONTACT_TYPENAMES = NONE/CLI/REP/ROOM/SENS)
+        const TYPE_LABELS = { 0: "", 1: "Contact", 2: "Repeater", 3: "Room Server", 4: "Sensor" };
+
+        function _isFavorite(name) {
+            return !!(_deviceMap && Array.isArray(_deviceMap.favorites) && _deviceMap.favorites.includes(name));
+        }
+
+        function _typeChipHtml(type) {
+            const t = Number(type) || 0;
+            const label = TYPE_LABELS[t];
+            if (!label) return "";
+            return `<span class="type-chip type-${t}">${label}</span>`;
+        }
+
         // Render a complete node card from a slots map.
         // slots values can be either JSON snapshot objects or live API device objects.
         function renderNode(nodeName, slots, isSelf) {
@@ -711,14 +1135,38 @@
 
             let badgeHtml;
             if (isSelf) {
-                badgeHtml = `<span class="badge self">Connected</span>`;
+                badgeHtml = `<span class="badge self" title="Connected"><i class="fa-solid fa-plug-circle-check"></i></span>`;
             } else if (statusSlot) {
                 const online = _slotOnline(statusSlot);
                 badgeHtml = online
-                    ? `<a href="${deviceUrl(statusIdx)}" target="_top" style="text-decoration:none"><span class="badge online">Online</span></a>`
-                    : `<a href="${deviceUrl(statusIdx)}" target="_top" style="text-decoration:none"><span class="badge offline">Offline</span></a>`;
+                    ? `<a href="${deviceUrl(statusIdx)}" target="_top" style="text-decoration:none"><span class="badge online" title="Online"><i class="fa-solid fa-circle-check"></i></span></a>`
+                    : `<a href="${deviceUrl(statusIdx)}" target="_top" style="text-decoration:none"><span class="badge offline" title="Offline"><i class="fa-solid fa-circle-xmark"></i></span></a>`;
             } else {
-                badgeHtml = `<span class="badge unknown">unknown</span>`;
+                badgeHtml = `<span class="badge unknown" title="Unknown"><i class="fa-solid fa-circle-question"></i></span>`;
+            }
+
+            const typeChip = isSelf ? "" : _typeChipHtml(slots.type);
+
+            // Direct-neighbour chip — shows when hops == 0 (no intermediate repeater).
+            // hops slot value may be "0", "0 hops", or empty/null.
+            let directChip = "";
+            if (!isSelf && slots.hops) {
+                const hopsRaw = _slotValue(slots.hops).replace(/\s*hops?$/i, "").trim();
+                if (hopsRaw === "0") directChip = `<span class="direct-chip" title="Heard directly (no repeater)"><i class="fa-solid fa-tower-broadcast"></i> Direct</span>`;
+            }
+
+            // Firmware info on the self-node card (from send_device_query)
+            let fwLine = "";
+            if (isSelf && _deviceMap && _deviceMap.device_info && Object.keys(_deviceMap.device_info).length) {
+                const di = _deviceMap.device_info;
+                const fwVer = di["fw ver"];
+                const fwBuild = di.fw_build || "";
+                const model = di.model || "";
+                const bits = [];
+                if (fwVer != null) bits.push(`FW v${fwVer}`);
+                if (fwBuild) bits.push(fwBuild);
+                if (model) bits.push(model);
+                if (bits.length) fwLine = `<div class="fw-info">${escHtml(bits.join("  "))}</div>`;
             }
 
             const metrics = isSelf ? SELF_METRICS : NODE_METRICS;
@@ -748,14 +1196,157 @@
                 }
             }
 
+            const settingsHtml = isSelf ? _renderNodeSettings() : "";
+            const favHtml = isSelf ? "" : (() => {
+                const fav = _isFavorite(nodeName);
+                const icon = fav ? "fa-solid fa-star" : "fa-regular fa-star";
+                return `<button class="fav-toggle ${fav ? "active" : ""}" data-node="${escHtml(nodeName)}" title="${fav ? "Remove from favorites" : "Mark as favorite"}"><i class="${icon}"></i></button>`;
+            })();
+
             return `
         <div class="node-card" data-node="${escHtml(nodeName)}">
           <div class="node-header">
-            <span class="node-name">${escHtml(nodeName)}</span>
+            <div class="node-name">${escHtml(nodeName)}</div>
+            ${typeChip}
+            ${directChip}
+            ${fwLine}
             <span class="node-badge" data-node="${escHtml(nodeName)}">${badgeHtml}</span>
           </div>
           <div class="node-metrics">${metricsHtml}</div>
+          ${settingsHtml}
+          ${favHtml}
         </div>`;
+        }
+
+        // ── Self-node settings panel (rendered at the bottom of the connected card) ──
+
+        const _SETTINGS_DEFS = [
+            { key: "manual_add",     label: "Auto-add contacts",   options: [{v: 0, l: "On"},  {v: 1, l: "Off"}] },
+            { key: "telemetry_base", label: "Telemetry: base",     options: [{v: 0, l: "Off"}, {v: 1, l: "Public"}, {v: 2, l: "Always"}] },
+            { key: "telemetry_env",  label: "Telemetry: env",      options: [{v: 0, l: "Off"}, {v: 1, l: "Public"}, {v: 2, l: "Always"}] },
+            { key: "telemetry_loc",  label: "Telemetry: location", options: [{v: 0, l: "Off"}, {v: 1, l: "Public"}, {v: 2, l: "Always"}] },
+            { key: "adv_loc_policy", label: "Advert location",     options: [{v: 0, l: "Never"}, {v: 1, l: "Share"}] },
+        ];
+
+        function _currentSettingValue(key) {
+            if (!_deviceMap) return null;
+            if (key === "manual_add")     return _deviceMap.manual_add_contacts ? 1 : 0;
+            if (key === "telemetry_base") return Number(_deviceMap.telemetry_mode_base) || 0;
+            if (key === "telemetry_env")  return Number(_deviceMap.telemetry_mode_env) || 0;
+            if (key === "telemetry_loc")  return Number(_deviceMap.telemetry_mode_loc) || 0;
+            if (key === "adv_loc_policy") return Number(_deviceMap.adv_loc_policy) || 0;
+            return null;
+        }
+
+        function _renderNodeSettings() {
+            const rows = _SETTINGS_DEFS.map(def => {
+                const cur = _currentSettingValue(def.key);
+                const opts = def.options.map(o =>
+                    `<button class="settings-btn ${o.v === cur ? "active" : ""}" data-key="${def.key}" data-val="${o.v}">${escHtml(o.l)}</button>`
+                ).join("");
+                return `<div class="settings-row">
+                    <span class="settings-label">${escHtml(def.label)}</span>
+                    <div class="settings-options">${opts}</div>
+                </div>`;
+            }).join("");
+            const scopeVal = (_deviceMap && _deviceMap.default_flood_scope) || "";
+            const scopeRow = `<div class="settings-row">
+                <span class="settings-label" title="Default flood scope tag — empty = global flood. e.g. #nl or #europe.">Default flood scope</span>
+                <div class="settings-text-wrap">
+                    <input id="settings-flood-scope" class="settings-text" type="text"
+                           value="${escHtml(scopeVal)}" placeholder="(global)" maxlength="31">
+                    <button class="settings-btn-save" data-key="flood_scope" title="Save flood scope">
+                        <i class="fa-solid fa-check"></i>
+                    </button>
+                </div>
+            </div>`;
+            return `<div class="node-settings">
+                <div class="node-settings-header">Node Settings</div>
+                ${rows}
+                ${scopeRow}
+            </div>`;
+        }
+
+        async function _applyNodeSetting(key, val) {
+            const sendIdx = _deviceMap && _deviceMap.send_idx;
+            if (!sendIdx) { alert("Cannot save: Mesh Send device not found."); return; }
+            // Map dashboard key → plugin command syntax
+            let cmd;
+            if (key === "manual_add") {
+                cmd = `!manual_add ${val ? "on" : "off"}`;
+            } else {
+                cmd = `!set ${key} ${val}`;
+            }
+            try {
+                const url = `/json.htm?type=command&param=udevice&idx=${sendIdx}&nvalue=0&svalue=${encodeURIComponent(cmd)}`;
+                const r = await fetch(url, { method: "GET" });
+                if (!r.ok) throw new Error(`HTTP ${r.status}`);
+                // Optimistic update so the active highlight moves immediately
+                if (_deviceMap) {
+                    if (key === "manual_add")          _deviceMap.manual_add_contacts = !!val;
+                    else if (key === "telemetry_base") _deviceMap.telemetry_mode_base = val;
+                    else if (key === "telemetry_env")  _deviceMap.telemetry_mode_env  = val;
+                    else if (key === "telemetry_loc")  _deviceMap.telemetry_mode_loc  = val;
+                    else if (key === "adv_loc_policy") _deviceMap.adv_loc_policy      = val;
+                }
+                // Re-render the active highlights without losing the rest
+                document.querySelectorAll(`.settings-btn[data-key="${key}"]`).forEach(b => {
+                    b.classList.toggle("active", Number(b.dataset.val) === Number(val));
+                });
+            } catch (err) {
+                alert(`Failed to save setting: ${err.message}`);
+            }
+        }
+
+        function _initNodeSettings() {
+            const root = document.getElementById("self-grid");
+            if (!root || root._settingsBound) return;
+            root._settingsBound = true;
+            root.addEventListener("click", (ev) => {
+                const btn = ev.target.closest(".settings-btn");
+                if (btn) {
+                    ev.preventDefault();
+                    _applyNodeSetting(btn.dataset.key, Number(btn.dataset.val));
+                    return;
+                }
+                const saveBtn = ev.target.closest(".settings-btn-save");
+                if (saveBtn && saveBtn.dataset.key === "flood_scope") {
+                    ev.preventDefault();
+                    _saveFloodScope();
+                }
+            });
+            // Enter inside the flood-scope input also saves
+            root.addEventListener("keydown", (ev) => {
+                if (ev.target.id === "settings-flood-scope" && ev.key === "Enter") {
+                    ev.preventDefault();
+                    _saveFloodScope();
+                }
+            });
+        }
+
+        async function _saveFloodScope() {
+            const input = document.getElementById("settings-flood-scope");
+            if (!input) return;
+            const sendIdx = _deviceMap && _deviceMap.send_idx;
+            if (!sendIdx) { alert("Cannot save: Mesh Send device not found."); return; }
+            const val = input.value.trim();
+            const cmd = `!flood_scope ${val}`;
+            try {
+                const url = `/json.htm?type=command&param=udevice&idx=${sendIdx}&nvalue=0&svalue=${encodeURIComponent(cmd)}`;
+                const r = await fetch(url, { method: "GET" });
+                if (!r.ok) throw new Error(`HTTP ${r.status}`);
+                // Optimistic: the plugin normalizes ("#nl" prefix) on apply.
+                if (_deviceMap) {
+                    _deviceMap.default_flood_scope = val
+                        ? (val.startsWith("#") ? val : "#" + val)
+                        : "";
+                }
+                input.value = _deviceMap.default_flood_scope || "";
+                input.classList.add("saved");
+                setTimeout(() => input.classList.remove("saved"), 1200);
+            } catch (err) {
+                alert(`Failed to save flood scope: ${err.message}`);
+            }
         }
 
         // Patch an already-rendered card in-place with fresh data from byIdx.
@@ -773,8 +1364,8 @@
                 if (liveDev) {
                     const online = liveDev.Status === "On" || liveDev.Data === "On";
                     badgeEl.innerHTML = online
-                        ? `<a href="${deviceUrl(statusIdx)}" target="_top" style="text-decoration:none"><span class="badge online">Online</span></a>`
-                        : `<a href="${deviceUrl(statusIdx)}" target="_top" style="text-decoration:none"><span class="badge offline">Offline</span></a>`;
+                        ? `<a href="${deviceUrl(statusIdx)}" target="_top" style="text-decoration:none"><span class="badge online" title="Online"><i class="fa-solid fa-circle-check"></i></span></a>`
+                        : `<a href="${deviceUrl(statusIdx)}" target="_top" style="text-decoration:none"><span class="badge offline" title="Offline"><i class="fa-solid fa-circle-xmark"></i></span></a>`;
                 }
             }
 
@@ -910,12 +1501,11 @@
             if (!_inboxHistory.length) {
                 container.innerHTML = `<div id="inbox-empty">No messages yet.</div>`;
                 _lastRenderedInboxHtml = "";
-                _renderChannelChips([]);
+                _renderChannelChips(_allChannelChips());
                 return;
             }
 
-            const channels = [...new Set(_inboxHistory.map(m => m.channel).filter(Boolean))].sort();
-            _renderChannelChips(channels);
+            _renderChannelChips(_allChannelChips());
 
             const needle = _inboxSearch.toLowerCase();
             const visible = _inboxHistory.filter(m => {
@@ -988,6 +1578,17 @@
             _renderChipRow("channel-chips", channels, _inboxChanFilter, _setChanFilter);
         }
 
+        // Union of: channels we've ever seen in the inbox + every channel configured on the device.
+        // This way every device-known channel (e.g. #leusden) appears as a chip even before its
+        // first message arrives.
+        function _allChannelChips() {
+            const seen = new Set(_inboxHistory.map(m => m.channel).filter(Boolean));
+            for (const name of Object.values(_channelNames)) {
+                if (name) seen.add(name);
+            }
+            return [...seen].sort();
+        }
+
         function _setChanFilter(key) {
             _inboxChanFilter = key;
             _syncComposeTarget();
@@ -1023,6 +1624,161 @@
             return escHtml(text).replace(/@\[([^\]]+)\]|@(\S+)/g, (m, bracketed, plain) =>
                 bracketed ? `<span class="mention">@[${bracketed}]</span>`
                           : `<span class="mention">@${plain}</span>`);
+        }
+
+        // ── Contacts filter / sort / view state ──────────────────────────────────────
+
+        let _viewMode = "cards";      // "cards" or "list"
+        let _filterName = "";         // matches against name + type label
+        const _selectedContacts = new Set();   // contact names checked in list view
+        // Cached live-resolver from the last loadData() call so view-toggling /
+        // filter changes don't fall back to stale JSON snapshot values.
+        let _lastLiveSlotsOf = null;
+        let _lastRemoteNodes = [];
+
+        // Build sorted/filtered groups for the contacts area.
+        // Returns an array of { groupLabel, contacts: [{name, slots, type, online, lastTs}] }
+        function _buildContactGroups(remoteNodes, liveSlotsOf) {
+            const items = remoteNodes.map(name => {
+                const slots = liveSlotsOf(name);
+                const type = Number(slots.type) || 0;
+                const online = _slotOnline(slots.status);
+                // Parse last_seen "YYYY-MM-DD HH:MM:SS" into a unix timestamp for sorting
+                let lastTs = Number(slots.last_advert) || 0;
+                if (!lastTs && slots.last_seen) {
+                    const raw = _slotValue(slots.last_seen);
+                    if (raw) {
+                        const d = new Date(raw.replace(" ", "T"));
+                        if (!isNaN(d.getTime())) lastTs = Math.floor(d.getTime() / 1000);
+                    }
+                }
+                return { name, slots, type, online, lastTs, favorite: _isFavorite(name) };
+            });
+
+            // Apply filter — matches against name and type label (e.g. "repeater")
+            const q = _filterName.trim().toLowerCase();
+            const filtered = q
+                ? items.filter(it => {
+                    if (it.name.toLowerCase().includes(q)) return true;
+                    const typeLabel = (TYPE_LABELS[it.type] || "").toLowerCase();
+                    return typeLabel && typeLabel.includes(q);
+                })
+                : items;
+
+            // Sort:
+            //   1. online before offline
+            //   2. favorites before non-favorites (within the same online/offline group)
+            //   3. type rank: Contact(1) → Sensor(4) → Room(3) → Repeater(2) → Unknown(0)
+            //   4. newer last_advert first
+            //   5. by name
+            const TYPE_RANK = { 1: 0, 4: 1, 3: 2, 2: 3, 0: 4 };
+            filtered.sort((a, b) => {
+                if (a.online !== b.online)     return a.online ? -1 : 1;
+                if (a.favorite !== b.favorite) return a.favorite ? -1 : 1;
+                const ra = TYPE_RANK[a.type] ?? 9;
+                const rb = TYPE_RANK[b.type] ?? 9;
+                if (ra !== rb) return ra - rb;
+                if (a.lastTs !== b.lastTs) return b.lastTs - a.lastTs;
+                return a.name.localeCompare(b.name);
+            });
+
+            return filtered;
+        }
+
+        function _renderListRow(item) {
+            const { name, slots, type, online, lastTs } = item;
+            const lastSeen = slots.last_seen ? _slotValue(slots.last_seen) : "";
+            const snr = slots.snr ? _slotValue(slots.snr).replace(/\s*dB$/i, "") : "";
+            // Strip the " hops" unit suffix Domoticz adds — we already render "hops" ourselves.
+            const hops = slots.hops ? _slotValue(slots.hops).replace(/\s*hops?$/i, "").trim() : "";
+            const typeLabel = TYPE_LABELS[type] || "—";
+            const isChecked = _selectedContacts.has(name);
+            const selectedCls = isChecked ? " row-selected" : "";
+            const checkIcon = isChecked ? "fa-square-check" : "fa-square";
+            const checkCls  = isChecked ? "row-check-box checked" : "row-check-box";
+            const fav = _isFavorite(name);
+            const favHtml = fav
+                ? `<span class="row-fav" title="Favorite"><i class="fa-solid fa-star"></i></span>`
+                : `<span class="row-fav empty"></span>`;
+            const isDirect = hops === "0";
+            const directHtml = isDirect
+                ? `<span class="row-direct" title="Direct neighbour (0 hops)"><i class="fa-solid fa-tower-broadcast"></i></span>`
+                : "";
+            return `
+        <div class="contact-row${selectedCls}" data-node="${escHtml(name)}">
+          <span class="row-check"><span class="${checkCls}" data-node="${escHtml(name)}" data-checked="${isChecked ? 1 : 0}" role="checkbox" aria-checked="${isChecked}"><i class="fa-regular ${checkIcon}"></i></span></span>
+          <span class="row-status ${online ? "online" : "offline"}" title="${online ? "Online" : "Offline"}"></span>
+          <div class="row-name">${favHtml}${escHtml(name)}${directHtml}</div>
+          <div class="row-type">${escHtml(typeLabel)}</div>
+          <div class="row-meta">${escHtml(lastSeen || "—")}</div>
+          <div class="row-snr">${snr ? escHtml(snr) + " dB" : "—"}</div>
+          <div class="row-hops">${hops !== "" ? hops + " hops" : "—"}</div>
+          <button class="row-remove" title="Remove contact" data-node="${escHtml(name)}"><i class="fa-solid fa-trash"></i></button>
+        </div>`;
+        }
+
+        function _renderListHeader(visibleNames) {
+            const allChecked = visibleNames.length > 0 && visibleNames.every(n => _selectedContacts.has(n));
+            const someChecked = visibleNames.some(n => _selectedContacts.has(n));
+            const indeterminate = someChecked && !allChecked;
+            const count = visibleNames.filter(n => _selectedContacts.has(n)).length;
+            const headIcon = allChecked ? "fa-square-check" : (indeterminate ? "fa-square-minus" : "fa-square");
+            const headCls  = allChecked ? "row-check-box checked" : (indeterminate ? "row-check-box indeterminate" : "row-check-box");
+            return `
+        <div class="contact-row-header">
+          <span class="row-check"><span id="bulk-toggle" class="${headCls}" data-checked="${allChecked ? 1 : 0}" role="checkbox" aria-checked="${allChecked}"><i class="fa-regular ${headIcon}"></i></span></span>
+          <span></span>
+          <div class="row-bulk-actions">
+            <span class="selected-count">${count > 0 ? count + " selected" : ""}</span>
+            <button id="bulk-delete" class="danger" ${count === 0 ? "disabled" : ""}>
+              <i class="fa-solid fa-trash"></i> Delete selected
+            </button>
+          </div>
+        </div>`;
+        }
+
+        function _renderContacts(remoteNodes, liveSlotsOf) {
+            const items = _buildContactGroups(remoteNodes, liveSlotsOf);
+            const grid = document.getElementById("contacts-grid");
+            const list = document.getElementById("contacts-list");
+            if (!grid || !list) return;
+
+            // Update the count badge next to the "Contacts" header
+            const countEl = document.getElementById("contacts-count");
+            if (countEl) {
+                const total = remoteNodes.length;
+                const shown = items.length;
+                countEl.textContent = shown === total ? `(${total})` : `(${shown} / ${total})`;
+            }
+
+            const empty = !items.length;
+            const emptyHtml = `<div class="contacts-empty">No contacts match the filter.</div>`;
+
+            if (_viewMode === "list") {
+                grid.style.display = "none";
+                list.style.display = "";
+                if (empty) {
+                    list.innerHTML = emptyHtml;
+                } else {
+                    const visibleNames = items.map(it => it.name);
+                    list.innerHTML = _renderListHeader(visibleNames) + items.map(_renderListRow).join("");
+                }
+            } else {
+                list.style.display = "none";
+                grid.style.display = "";
+                grid.innerHTML = empty ? emptyHtml : items.map(it => renderNode(it.name, it.slots, false)).join("");
+            }
+            _reapplyComposeSelection();
+        }
+
+        function _reapplyComposeSelection() {
+            const sel = document.getElementById("compose-target");
+            if (!sel) return;
+            const v = sel.value;
+            document.querySelectorAll(".compose-selected").forEach(el => el.classList.remove("compose-selected"));
+            if (!v || v.startsWith("#")) return;
+            document.querySelectorAll(`.node-card[data-node="${CSS.escape(v)}"], .contact-row[data-node="${CSS.escape(v)}"]`)
+                .forEach(el => el.classList.add("compose-selected"));
         }
 
         // ── Derive node list from device map (or fallback suffix-sniff) ───────────────
@@ -1069,11 +1825,7 @@
                 document.getElementById("self-section").style.display = "";
             }
             if (remoteNodes.length) {
-                const grid = document.getElementById("contacts-grid");
-                grid.innerHTML = remoteNodes.map(name => {
-                    const slots = (_deviceMap.nodes && _deviceMap.nodes[name]) || {};
-                    return renderNode(name, slots, false);
-                }).join("");
+                _renderContacts(remoteNodes, (n) => (_deviceMap.nodes && _deviceMap.nodes[n]) || {});
                 document.getElementById("contacts-section").style.display = "";
             }
             document.getElementById("layout-divider").style.display =
@@ -1149,17 +1901,14 @@
                 }
 
                 // ── Contacts ──
-                const contactsGrid = document.getElementById("contacts-grid");
+                // Always rebuild via the filter/sort/group pipeline. Patching
+                // is replaced by full rebuild — contact counts are tiny and
+                // filters/groups change which items are shown anyway.
                 const contactsSection = document.getElementById("contacts-section");
                 if (remoteNodes.length) {
-                    const rendered = new Set(
-                        [...contactsGrid.querySelectorAll(".node-card[data-node]")].map(el => el.dataset.node)
-                    );
-                    if (remoteNodes.some(n => !rendered.has(n))) {
-                        contactsGrid.innerHTML = remoteNodes.map(n => renderNode(n, _liveSlots(n), false)).join("");
-                    } else {
-                        for (const n of remoteNodes) patchNode(n, false, byIdx);
-                    }
+                    _lastLiveSlotsOf = _liveSlots;
+                    _lastRemoteNodes = remoteNodes;
+                    _renderContacts(remoteNodes, _liveSlots);
                     contactsSection.style.display = "";
                 } else {
                     contactsSection.style.display = "none";
@@ -1171,6 +1920,7 @@
 
                 // Refresh compose targets in case new nodes / channels appeared
                 _populateComposeTargets();
+                _refreshNodeSettingsActive();
 
                 // Inbox — load in background so the node grid update is not blocked
                 const inboxIdx = _deviceMap && _deviceMap.inbox;
@@ -1187,21 +1937,243 @@
             }
         }
 
+        // Click a contact card / list row → select that node as the compose target.
+        // Uses event delegation so it survives re-renders.
+        function _initContactClickToCompose() {
+            const handler = (ev) => {
+                // Bulk-delete button
+                if (ev.target.closest("#bulk-delete")) {
+                    ev.stopPropagation();
+                    _bulkDeleteSelectedContacts();
+                    return;
+                }
+                // Bulk toggle-all checkbox (custom icon)
+                const bulk = ev.target.closest("#bulk-toggle");
+                if (bulk) {
+                    ev.stopPropagation();
+                    const newChecked = bulk.dataset.checked !== "1";
+                    _onBulkToggle(newChecked);
+                    return;
+                }
+                // Per-row checkbox in list view — toggle membership, don't change compose target
+                const cb = ev.target.closest(".row-check-box");
+                if (cb && cb.id !== "bulk-toggle") {
+                    ev.stopPropagation();
+                    const n = cb.dataset.node;
+                    if (n) {
+                        if (cb.dataset.checked === "1") _selectedContacts.delete(n);
+                        else                            _selectedContacts.add(n);
+                        _rerenderContacts();
+                    }
+                    return;
+                }
+                // Favorite toggle (card overlay)
+                const favBtn = ev.target.closest(".fav-toggle");
+                if (favBtn) {
+                    ev.stopPropagation();
+                    ev.preventDefault();
+                    _toggleFavorite(favBtn.dataset.node);
+                    return;
+                }
+                // Remove button (single)
+                const removeBtn = ev.target.closest(".row-remove");
+                if (removeBtn) {
+                    ev.stopPropagation();
+                    _removeContact(removeBtn.dataset.node);
+                    return;
+                }
+                // Don't hijack clicks on metric links
+                if (ev.target.closest("a")) return;
+                const el = ev.target.closest(".node-card, .contact-row");
+                if (!el) return;
+                const name = el.dataset.node;
+                if (!name) return;
+                const sel = document.getElementById("compose-target");
+                if (!sel) return;
+                const match = [...sel.options].find(o => o.value === name);
+                if (match) {
+                    sel.value = name;
+                    _persistComposeTarget(name);
+                    _reapplyComposeSelection();
+                    const input = document.getElementById("compose-input");
+                    if (input) input.focus();
+                }
+            };
+            const grid = document.getElementById("contacts-grid");
+            const list = document.getElementById("contacts-list");
+            if (grid && !grid._composeBound) { grid._composeBound = true; grid.addEventListener("click", handler); }
+            if (list && !list._composeBound) { list._composeBound = true; list.addEventListener("click", handler); }
+
+            // Persist user-driven changes to the compose-target dropdown
+            const composeSel = document.getElementById("compose-target");
+            if (composeSel && !composeSel._persistBound) {
+                composeSel._persistBound = true;
+                composeSel.addEventListener("change", () => {
+                    _persistComposeTarget(composeSel.value);
+                    _reapplyComposeSelection();
+                });
+            }
+
+            // Toolbar wiring (search / type filter / view toggle)
+            const nameInput = document.getElementById("filter-name");
+            const btnCards  = document.getElementById("view-cards");
+            const btnList   = document.getElementById("view-list");
+            _initNodeSettings();
+            if (nameInput && !nameInput._bound) {
+                nameInput._bound = true;
+                nameInput.addEventListener("input", (e) => {
+                    _filterName = e.target.value;
+                    _selectedContacts.clear();   // changing the filter resets the bulk selection
+                    _rerenderContacts();
+                });
+            }
+            if (btnCards && !btnCards._bound) {
+                btnCards._bound = true;
+                btnCards.addEventListener("click", () => { _viewMode = "cards"; btnCards.classList.add("active"); btnList.classList.remove("active"); _rerenderContacts(); });
+            }
+            if (btnList && !btnList._bound) {
+                btnList._bound = true;
+                btnList.addEventListener("click", () => { _viewMode = "list"; btnList.classList.add("active"); btnCards.classList.remove("active"); _rerenderContacts(); });
+            }
+        }
+
+        // Rerender contacts using the last live-resolver from loadData() if we have one,
+        // otherwise fall back to the JSON snapshot.
+        function _rerenderContacts() {
+            if (_lastLiveSlotsOf && _lastRemoteNodes.length) {
+                _renderContacts(_lastRemoteNodes, _lastLiveSlotsOf);
+                return;
+            }
+            if (!_deviceMap || !_deviceMap.nodes) return;
+            const { selfName } = _nodeList([]);
+            const remoteNodes = Object.keys(_deviceMap.nodes).filter(n => n !== selfName);
+            _renderContacts(remoteNodes, (n) => (_deviceMap.nodes && _deviceMap.nodes[n]) || {});
+        }
+
+        // Re-apply active highlights on all settings buttons based on the current device map.
+        // Called whenever the device map JSON is reloaded.
+        function _refreshNodeSettingsActive() {
+            for (const def of _SETTINGS_DEFS) {
+                const cur = _currentSettingValue(def.key);
+                document.querySelectorAll(`.settings-btn[data-key="${def.key}"]`).forEach(b => {
+                    b.classList.toggle("active", Number(b.dataset.val) === Number(cur));
+                });
+            }
+            // Sync the flood-scope input — but don't overwrite if user is editing it
+            const scopeInput = document.getElementById("settings-flood-scope");
+            if (scopeInput && document.activeElement !== scopeInput && _deviceMap) {
+                scopeInput.value = _deviceMap.default_flood_scope || "";
+            }
+        }
+
+        // Toggle every currently-visible row's checkbox state. "visible" = passes the active filter.
+        function _onBulkToggle(checked) {
+            const visibleNames = _currentVisibleContactNames();
+            if (checked) visibleNames.forEach(n => _selectedContacts.add(n));
+            else         visibleNames.forEach(n => _selectedContacts.delete(n));
+            _rerenderContacts();
+        }
+
+        function _currentVisibleContactNames() {
+            // Mirrors what _buildContactGroups would render now
+            if (!_lastLiveSlotsOf || !_lastRemoteNodes.length) return [];
+            return _buildContactGroups(_lastRemoteNodes, _lastLiveSlotsOf).map(it => it.name);
+        }
+
+        async function _bulkDeleteSelectedContacts() {
+            const names = [..._selectedContacts];
+            if (!names.length) return;
+            if (!confirm(`Remove ${names.length} contact${names.length === 1 ? "" : "s"} from the device?\n\n${names.join(", ")}\n\nThis cannot be undone.`)) return;
+            const sendIdx = _deviceMap && _deviceMap.send_idx;
+            if (!sendIdx) { alert("Cannot remove: Mesh Send device not found."); return; }
+            // Sequential, with a brief delay so the plugin can finish each !remove
+            // cycle before the next overwrites the Mesh Send device value.
+            let failures = [];
+            for (const name of names) {
+                try {
+                    const url = `/json.htm?type=command&param=udevice&idx=${sendIdx}&nvalue=0&svalue=${encodeURIComponent("!remove " + name)}`;
+                    const r = await fetch(url, { method: "GET" });
+                    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+                    if (_deviceMap && _deviceMap.nodes) delete _deviceMap.nodes[name];
+                    _selectedContacts.delete(name);
+                    await new Promise(res => setTimeout(res, 250));
+                } catch (err) {
+                    failures.push(`${name}: ${err.message}`);
+                }
+            }
+            _rerenderContacts();
+            if (failures.length) alert("Some removals failed:\n\n" + failures.join("\n"));
+        }
+
+        async function _toggleFavorite(name) {
+            if (!name) return;
+            const sendIdx = _deviceMap && _deviceMap.send_idx;
+            if (!sendIdx) { alert("Cannot toggle favorite: Mesh Send device not found."); return; }
+            const wasFav = _isFavorite(name);
+            const action = wasFav ? "remove" : "add";
+            const cmd = `!favorite ${action} ${name}`;
+            try {
+                const url = `/json.htm?type=command&param=udevice&idx=${sendIdx}&nvalue=0&svalue=${encodeURIComponent(cmd)}`;
+                const r = await fetch(url, { method: "GET" });
+                if (!r.ok) throw new Error(`HTTP ${r.status}`);
+                // Optimistic update of local cache so the UI reflects it immediately
+                if (_deviceMap) {
+                    const arr = Array.isArray(_deviceMap.favorites) ? _deviceMap.favorites.slice() : [];
+                    const i = arr.indexOf(name);
+                    if (wasFav && i >= 0) arr.splice(i, 1);
+                    else if (!wasFav && i < 0) arr.push(name);
+                    _deviceMap.favorites = arr;
+                }
+                _rerenderContacts();
+            } catch (err) {
+                alert(`Failed to toggle favorite: ${err.message}`);
+            }
+        }
+
+        // Remove a contact: send "!remove <name>" via the Mesh Send device.
+        async function _removeContact(name) {
+            if (!name) return;
+            if (!confirm(`Remove contact "${name}" from the device?\n\nThis cannot be undone.`)) return;
+            const sendIdx = _deviceMap && _deviceMap.send_idx;
+            if (!sendIdx) { alert("Cannot remove: Mesh Send device not found."); return; }
+            try {
+                const url = `/json.htm?type=command&param=udevice&idx=${sendIdx}&nvalue=0&svalue=${encodeURIComponent("!remove " + name)}`;
+                const r = await fetch(url, { method: "GET" });
+                if (!r.ok) throw new Error(`HTTP ${r.status}`);
+                // Optimistic: drop from local map so it disappears immediately
+                if (_deviceMap && _deviceMap.nodes) delete _deviceMap.nodes[name];
+                _rerenderContacts();
+            } catch (err) {
+                alert(`Failed to remove contact: ${err.message}`);
+            }
+        }
+
         // Init: load JSON files, render snapshot instantly, then start live refresh loop.
         Promise.all([_loadChannelNames(), _loadDeviceMap()]).then(async () => {
             _deviceMapFreshFromInit = true;
             _populateComposeTargets();
             await initialRender();   // instant — no API call
+            _initContactClickToCompose();
             loadData();              // kick off first live refresh immediately
             setInterval(loadData, 10000);
         });
 
         // ── Compose bar ───────────────────────────────────────────────────────────
 
+        const LS_COMPOSE_TARGET = "meshcore.composeTarget";
+
+        function _persistComposeTarget(val) {
+            try { if (val) localStorage.setItem(LS_COMPOSE_TARGET, val); } catch (_) {}
+        }
+        function _loadComposeTarget() {
+            try { return localStorage.getItem(LS_COMPOSE_TARGET) || ""; } catch (_) { return ""; }
+        }
+
         function _populateComposeTargets() {
             const sel = document.getElementById("compose-target");
             if (!sel) return;
-            const prev = sel.value;
+            // Use current selection if any, else fall back to last-used target from localStorage
+            const prev = sel.value || _loadComposeTarget();
             const prevText = sel.options[sel.selectedIndex] ? sel.options[sel.selectedIndex].textContent : "";
             const wasReply = sel.options[sel.selectedIndex] ? !!sel.options[sel.selectedIndex].dataset.reply : false;
             sel.innerHTML = "";

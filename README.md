@@ -69,10 +69,15 @@ Then go to **Setup → Hardware** and add a new hardware entry of type **MeshCor
 
 | Field | Description |
 |---|---|
-| **MeshCore Host** | IP address of the MeshCore TCP endpoint |
-| **MeshCore Port** | TCP port (default `5000`) |
+| **Transport** | TCP or Serial |
+| **MeshCore Host** | (TCP) IP address of the MeshCore TCP endpoint |
+| **MeshCore Port** | (TCP) TCP port (default `5000`) |
+| **Serial Port** | (Serial) COM/tty port — dropdown auto-populated by Domoticz with detected adapters |
+| **Baud Rate** | (Serial) default `115200` |
 | **Install Custom Dashboard** | Yes / No — installs `meshcore.html` into Domoticz templates (default Yes) |
 | **Debug Level** | None / Basic / All |
+
+If a serial connection drops (cable unplugged, device reset), the plugin logs an error and automatically retries every 30 s. A “Connected” log line is emitted once the link is restored.
 
 > All contacts discovered by the mesh are tracked automatically — there is no manual node list to configure.
 
