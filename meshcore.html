@@ -5,10 +5,16 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>MeshCore Dashboard</title>
     <link rel="stylesheet" href="/font-awesome/css/all.min.css">
-    <!-- Leaflet from CDN. Some browsers' tracking-prevention may block this;
-         when that happens the map panel shows a fallback message instead. -->
-    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" crossorigin=""/>
-    <script defer src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" crossorigin=""></script>
+    <!-- Leaflet — served locally from www/templates/leaflet/ by the plugin
+         (installed alongside this file on plugin start). Loading same-origin
+         avoids Edge/Firefox tracking-prevention blocks against unpkg.com etc. -->
+    <link rel="stylesheet" href="/templates/leaflet/leaflet.css"/>
+    <script src="/templates/leaflet/leaflet.js"></script>
+    <!-- Legacy CDN refs (kept for reference only — do not enable, would
+         re-introduce the tracking-prevention block):
+         <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" crossorigin=""/>
+         <script defer src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" crossorigin=""></script>
+    -->
     <style>
         :root {
             --bg: #1e1f26;
@@ -1599,6 +1605,25 @@
     </div>
 
     <script>
+    // Inject Leaflet dynamically — Domoticz custom-template loading does not
+    // execute <script src> tags reliably across browsers, so we create the
+    // tag at runtime from this inline script (which is always executed).
+    (function _loadLeaflet() {
+        if (typeof L !== "undefined") return;
+        if (!document.querySelector('link[data-leaflet]')) {
+            const css = document.createElement("link");
+            css.rel = "stylesheet";
+            css.href = "/templates/leaflet/leaflet.css";
+            css.setAttribute("data-leaflet", "1");
+            document.head.appendChild(css);
+        }
+        if (!document.querySelector('script[data-leaflet]')) {
+            const s = document.createElement("script");
+            s.src = "/templates/leaflet/leaflet.js";
+            s.setAttribute("data-leaflet", "1");
+            document.head.appendChild(s);
+        }
+    })();
     (function () {
         // Metrics shown for the self (connected) node — in display order.
         // "key" matches the property names in meshcore_devices.json.
@@ -3290,14 +3315,15 @@
                 if (e.chan_hash && e.chan_name) hashToName[e.chan_hash] = e.chan_name;
             }
 
-            // All 8 device-side channel slots (from plugin via device map).
+            // Device-side channel slots (firmware supports up to 40).
             // If the plugin hasn't sent the slot table yet, fall back to
             // synthesising it from the legacy {idx: name} known-channels map.
+            const MAX_SLOTS = 40;
             let slots = (_deviceMap && _deviceMap.channel_slots) || null;
             if (!slots) {
                 const known = (_rxLog.known_channels) || _channelNames || {};
                 slots = [];
-                for (let i = 0; i < 8; i++) slots.push({ idx: i, name: known[String(i)] || "" });
+                for (let i = 0; i < MAX_SLOTS; i++) slots.push({ idx: i, name: known[String(i)] || "" });
             }
             const slotRows = slots.map(s => {
                 const empty = !s.name;
@@ -3328,7 +3354,7 @@
 
             view.innerHTML = `
                 <div style="font-size:0.78rem;color:var(--accent);font-weight:600;text-transform:uppercase;letter-spacing:0.05em;border-bottom:1px solid var(--accent);padding-bottom:4px">
-                    Channel slots (8)
+                    Channel slots (${slots.length})
                 </div>
                 <div style="font-size:0.78rem;color:var(--text);opacity:0.85;line-height:1.5">
                     Slots on this device — fill an empty one to subscribe.
@@ -3336,7 +3362,7 @@
                     auto-derive their key from the name; private channels need
                     a 16-byte secret too.
                 </div>
-                <div id="chan-slots-list">${slotRows}</div>
+                <div id="chan-slots-list" style="max-height:340px;overflow-y:auto">${slotRows}</div>
                 <div style="font-size:0.78rem;color:var(--accent);font-weight:600;text-transform:uppercase;letter-spacing:0.05em;border-bottom:1px solid var(--accent);padding-bottom:4px;margin-top:6px">
                     Hashes heard on air
                 </div>
@@ -3524,11 +3550,16 @@
         function _renderTopology() {
             const canvas = document.getElementById("map-canvas");
             if (!canvas) return;
+            let tries = 0;
             const init = () => {
                 if (typeof L === "undefined") {
-                    canvas.innerHTML = `<div style="padding:24px;color:var(--muted);font-size:0.85rem;text-align:center;">
-                        Leaflet failed to load from CDN.<br>The topology view needs the map library.
-                    </div>`;
+                    if (++tries > 50) {
+                        canvas.innerHTML = `<div style="padding:24px;color:var(--muted);font-size:0.85rem;text-align:center;">
+                            Leaflet failed to load.<br>The topology view needs the map library.
+                        </div>`;
+                        return;
+                    }
+                    setTimeout(init, 100);
                     return;
                 }
                 if (!_leafletMap) {

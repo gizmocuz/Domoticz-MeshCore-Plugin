@@ -69,6 +69,10 @@ UNIT_MSGS_SENT_ = 4   # Custom counter: messages sent today
 NODE_BASE  = 10
 NODE_SLOTS = 20   # device slots reserved per node (max 11 nodes → unit 219)
 
+# MeshCore firmware exposes up to 40 channel slots. Domoticz devices are NOT
+# created per slot — they live entirely in the dashboard JSON map.
+MAX_CHANNEL_SLOTS = 40
+
 # Offsets within each node's slot block
 OFF_STATUS    = 0   # Switch:      online / offline
 OFF_BATT_PCT  = 1   # Percentage:  battery %
@@ -646,6 +650,22 @@ class BasePlugin:
         except Exception as exc:
             Domoticz.Error(f"Failed to install dashboard: {exc}")
 
+        # Bundle Leaflet locally so the topology / map panel works even when
+        # the browser's tracking-prevention blocks unpkg.com (Edge/Firefox).
+        leaflet_src = os.path.join(plugin_dir, "assets", "leaflet")
+        leaflet_dst = os.path.join(dest_dir, "leaflet")
+        if os.path.isdir(leaflet_src):
+            try:
+                import shutil
+                os.makedirs(leaflet_dst, exist_ok=True)
+                for fname in ("leaflet.js", "leaflet.css"):
+                    s = os.path.join(leaflet_src, fname)
+                    if os.path.isfile(s):
+                        shutil.copy2(s, os.path.join(leaflet_dst, fname))
+                Domoticz.Debug(f"Leaflet installed: {leaflet_dst}")
+            except Exception as exc:
+                Domoticz.Error(f"Failed to install Leaflet: {exc}")
+
     def _install_manual_locations(self):
         """Copy meshcore_locations.json to the templates dir so the dashboard can fetch it."""
         plugin_dir    = os.path.dirname(os.path.abspath(__file__))
@@ -799,7 +819,7 @@ class BasePlugin:
             # an Add/Remove button per slot. Non-empty slots have their
             # `name`; empty slots have name = "".
             "channel_slots": [
-                {"idx": i, "name": self._channel_slots.get(i, "")} for i in range(8)
+                {"idx": i, "name": self._channel_slots.get(i, "")} for i in range(MAX_CHANNEL_SLOTS)
             ],
             "written_at":   int(time.time()),
         }
@@ -877,13 +897,21 @@ class BasePlugin:
     def _remove_custom_page(self):
         plugin_dir    = os.path.dirname(os.path.abspath(__file__))
         domoticz_root = os.path.abspath(os.path.join(plugin_dir, "..", ".."))
+        tpl_dir = os.path.join(domoticz_root, "www", "templates")
         fname = "meshcore.html"
-        dest = os.path.join(domoticz_root, "www", "templates", fname)
+        dest = os.path.join(tpl_dir, fname)
         try:
             if os.path.isfile(dest):
                 os.remove(dest)
         except Exception as exc:
             Domoticz.Error(f"Failed to remove {fname}: {exc}")
+        leaflet_dst = os.path.join(tpl_dir, "leaflet")
+        if os.path.isdir(leaflet_dst):
+            try:
+                import shutil
+                shutil.rmtree(leaflet_dst, ignore_errors=True)
+            except Exception as exc:
+                Domoticz.Debug(f"Failed to remove leaflet dir: {exc}")
         Domoticz.Log("MeshCore dashboard removed.")
 
     # ── Persistent-connection worker ──────────────────────────────────────────
@@ -1336,7 +1364,7 @@ class BasePlugin:
             self._queue.put(("self_stats", stats))
 
     async def _fetch_channel_names(self, mc):
-        """Query all 8 channel slots and record every one (including empty).
+        """Query all channel slots and record every one (including empty).
 
         The device map exposes the full slot table so the dashboard can render
         every slot with an Add/Remove control. The legacy meshcore_channels.json
@@ -1344,8 +1372,8 @@ class BasePlugin:
         existing channel resolver.
         """
         channel_names = {}        # non-empty only — used by message routing
-        all_slots: dict = {}      # idx → name ("" if empty) for all 8 slots
-        for idx in range(8):
+        all_slots: dict = {}      # idx → name ("" if empty) for all slots
+        for idx in range(MAX_CHANNEL_SLOTS):
             try:
                 res = await asyncio.wait_for(mc.commands.get_channel(idx), timeout=2.0)
                 Domoticz.Debug(f"get_channel({idx}): type={res.type if res else None} payload={res.payload if res else None}")
@@ -1357,7 +1385,7 @@ class BasePlugin:
                 elif res and res.type == EventType.ERROR:
                     # ERROR usually means firmware reports no such slot —
                     # record the remaining slots as empty and stop probing.
-                    for j in range(idx, 8):
+                    for j in range(idx, MAX_CHANNEL_SLOTS):
                         all_slots.setdefault(j, "")
                     break
             except asyncio.TimeoutError:
@@ -1368,8 +1396,8 @@ class BasePlugin:
                 Domoticz.Debug(f"get_channel({idx}) error: {exc} — assume empty")
                 all_slots[idx] = ""
                 continue
-        # Ensure full coverage of 0..7
-        for j in range(8):
+        # Ensure full coverage
+        for j in range(MAX_CHANNEL_SLOTS):
             all_slots.setdefault(j, "")
         self._channel_slots = all_slots
         self._channel_names = {int(k): v for k, v in channel_names.items()}
@@ -1834,13 +1862,13 @@ class BasePlugin:
             if len(parts) < 3:
                 self._queue.put(("send_result", {
                     "ok": False, "target": "!set_channel", "body": text,
-                    "result": "syntax: !set_channel <slot 0-7> <name> [secret_hex]"
+                    "result": f"syntax: !set_channel <slot 0-{MAX_CHANNEL_SLOTS-1}> <name> [secret_hex]"
                 }))
                 return
             try:
                 slot = int(parts[1])
-                if slot < 0 or slot > 7:
-                    raise ValueError("slot must be 0..7")
+                if slot < 0 or slot >= MAX_CHANNEL_SLOTS:
+                    raise ValueError(f"slot must be 0..{MAX_CHANNEL_SLOTS-1}")
             except ValueError as exc:
                 self._queue.put(("send_result", {
                     "ok": False, "target": "!set_channel", "body": text,
@@ -1900,13 +1928,13 @@ class BasePlugin:
             if len(parts) < 2:
                 self._queue.put(("send_result", {
                     "ok": False, "target": "!clear_channel", "body": text,
-                    "result": "syntax: !clear_channel <slot 0-7>"
+                    "result": f"syntax: !clear_channel <slot 0-{MAX_CHANNEL_SLOTS-1}>"
                 }))
                 return
             try:
                 slot = int(parts[1])
-                if slot < 0 or slot > 7:
-                    raise ValueError("slot must be 0..7")
+                if slot < 0 or slot >= MAX_CHANNEL_SLOTS:
+                    raise ValueError(f"slot must be 0..{MAX_CHANNEL_SLOTS-1}")
             except ValueError as exc:
                 self._queue.put(("send_result", {
                     "ok": False, "target": "!clear_channel", "body": text,
