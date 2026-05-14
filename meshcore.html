@@ -207,6 +207,7 @@
             right: 0;
             bottom: 0;
             width: 480px;
+            min-width: 360px;
             max-width: 90vw;
             background: var(--surface);
             border-left: 1px solid var(--border);
@@ -218,6 +219,18 @@
             box-shadow: -4px 0 16px rgba(0, 0, 0, 0.4);
         }
         #map-panel.open { transform: translateX(0); }
+        #map-panel.resizing { transition: none; user-select: none; }
+        /* Drag handle on the left edge — user can drag to resize the panel */
+        #map-panel-resizer {
+            position: absolute;
+            top: 0; bottom: 0; left: -3px;
+            width: 6px;
+            cursor: ew-resize;
+            z-index: 1001;
+            background: transparent;
+        }
+        #map-panel-resizer:hover,
+        #map-panel.resizing #map-panel-resizer { background: var(--accent); opacity: 0.5; }
         #map-panel-header {
             padding: 12px 14px;
             border-bottom: 1px solid var(--border);
@@ -733,8 +746,6 @@
             color: var(--text);
             transition: color 0.15s;
             white-space: nowrap;
-            overflow: hidden;
-            text-overflow: ellipsis;
         }
         .metric-value.na { color: var(--muted); font-style: italic; }
 
@@ -955,6 +966,222 @@
             border-bottom: 1px solid var(--border);
         }
         .msg-detail-row:last-child { border-bottom: none; }
+        .msg-detail-section {
+            font-size: 0.66rem;
+            text-transform: uppercase;
+            letter-spacing: 0.08em;
+            color: var(--accent);
+            border-top: 1px solid var(--border);
+            margin-top: 8px;
+            padding-top: 8px;
+        }
+
+        /* RX-log toolbar in the header */
+        .rx-toolbar { display: inline-flex; gap: 4px; }
+        .rx-tool-btn {
+            background: var(--card-bg, transparent);
+            border: 1px solid var(--border);
+            color: var(--text);
+            border-radius: 6px;
+            width: 32px; height: 32px;
+            cursor: pointer;
+            font-size: 0.95rem;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            transition: color .15s, border-color .15s, background .15s;
+        }
+        .rx-tool-btn:hover { color: var(--accent); border-color: var(--accent); background: var(--bg); }
+        .rx-tool-btn.active { color: var(--accent); border-color: var(--accent); }
+
+        /* ── Generic side-panel view styles (reused across firehose/traffic/heatmap/channels) ── */
+        .panel-view {
+            padding: 12px 14px;
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+            overflow-y: auto;
+            font-size: 0.85rem;
+        }
+        /* Firehose stream rows */
+        .firehose-row {
+            font-family: ui-monospace, "Cascadia Code", "Consolas", monospace;
+            font-size: 0.72rem;
+            line-height: 1.35;
+            color: var(--text);
+            border-bottom: 1px solid var(--border);
+            padding: 4px 0;
+            display: grid;
+            grid-template-columns: 56px 70px 28px 1fr;
+            gap: 6px;
+            align-items: baseline;
+        }
+        .firehose-row.firehose-head {
+            color: var(--accent);
+            font-weight: 600;
+            border-bottom: 1px solid var(--accent);
+            text-transform: uppercase;
+            font-size: 0.65rem;
+            letter-spacing: 0.05em;
+            padding-top: 0;
+        }
+        .firehose-row[data-tip] { cursor: help; }
+        .firehose-row[data-tip]:hover { background: var(--bg); }
+        .firehose-row.text     { color: var(--accent); }
+        .firehose-row.advert   { color: #a0c4ff; }
+        .firehose-row.response { color: #c7c7c7; opacity: 0.85; }
+        .firehose-row.group    { color: #f9c74f; }
+        .firehose-row .t  { color: var(--muted); }
+        .firehose-row .pt { font-weight: 600; }
+        .firehose-row .meta { color: var(--muted); }
+        .firehose-row .msg  { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+        .firehose-controls {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            border-bottom: 1px solid var(--border);
+            padding-bottom: 6px;
+        }
+        .firehose-controls button {
+            background: none;
+            border: 1px solid var(--border);
+            color: var(--text);
+            border-radius: 4px;
+            padding: 3px 10px;
+            cursor: pointer;
+            font-size: 0.78rem;
+        }
+        .firehose-controls button:hover { color: var(--accent); border-color: var(--accent); background: var(--bg); }
+        #firehose-list {
+            max-height: calc(100vh - 220px);
+            overflow-y: auto;
+        }
+
+        /* Bar chart for traffic stats */
+        .bar-row {
+            display: grid;
+            grid-template-columns: 120px 1fr 50px;
+            gap: 8px;
+            align-items: center;
+            font-size: 0.78rem;
+        }
+        .bar-bar {
+            height: 12px;
+            background: var(--bg);
+            border: 1px solid var(--border);
+            border-radius: 3px;
+            overflow: hidden;
+            position: relative;
+        }
+        .bar-bar > span {
+            display: block;
+            height: 100%;
+            background: var(--accent);
+        }
+        .bar-row .bar-count { text-align: right; color: var(--text); font-variant-numeric: tabular-nums; }
+
+        /* 24h heatmap grid */
+        .heatmap-grid {
+            display: grid;
+            grid-template-columns: repeat(12, 1fr);
+            gap: 2px;
+            margin-top: 6px;
+        }
+        .heatmap-grid > div {
+            aspect-ratio: 1 / 1;
+            border-radius: 2px;
+            background: rgba(255,255,255,0.04);
+            border: 1px solid var(--border);
+            position: relative;
+            font-size: 0.62rem;
+            color: var(--text);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-variant-numeric: tabular-nums;
+        }
+        .heatmap-grid > div.hot1 { background: rgba(38,196,124,0.22); color: var(--text); border-color: rgba(38,196,124,0.30); }
+        .heatmap-grid > div.hot2 { background: rgba(38,196,124,0.45); color: #ffffff; border-color: rgba(38,196,124,0.55); }
+        .heatmap-grid > div.hot3 { background: rgba(38,196,124,0.70); color: #000;     border-color: rgba(38,196,124,0.85); }
+        .heatmap-grid > div.hot4 { background: rgba(38,196,124,0.95); color: #000;     border-color: rgba(38,196,124,1.00); font-weight: 600; }
+        .heatmap-grid > div.now  { outline: 2px solid var(--accent); outline-offset: -2px; }
+        .heatmap-labels {
+            display: grid;
+            grid-template-columns: repeat(24, 1fr);
+            gap: 2px;
+            margin-top: 2px;
+            font-size: 0.62rem;
+            color: var(--text);
+            opacity: 0.7;
+        }
+        .heatmap-labels > div { text-align: center; }
+
+        /* Channel discovery list */
+        .chan-row {
+            display: grid;
+            grid-template-columns: 60px 1fr 60px;
+            gap: 6px;
+            font-size: 0.8rem;
+            padding: 4px 0;
+            border-bottom: 1px solid var(--border);
+        }
+        .chan-slot-row {
+            display: grid;
+            grid-template-columns: 36px 1fr auto;
+            gap: 8px;
+            align-items: center;
+            padding: 5px 0;
+            border-bottom: 1px solid var(--border);
+            font-size: 0.82rem;
+        }
+        .chan-slot-row .slot-idx {
+            color: var(--accent);
+            font-family: ui-monospace, monospace;
+            text-align: center;
+        }
+        .chan-slot-btn {
+            background: var(--bg);
+            border: 1px solid var(--border);
+            color: var(--text);
+            padding: 3px 10px;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 0.75rem;
+        }
+        .chan-slot-btn.add:hover    { color: #26c47c; border-color: #26c47c; }
+        .chan-slot-btn.clear:hover  { color: #e63946; border-color: #e63946; }
+        .chan-row .chash { font-family: ui-monospace, monospace; color: var(--accent); }
+        .chan-row .name  { color: var(--text); opacity: 0.7; font-style: italic; }
+        .chan-row .cnt   { text-align: right; font-variant-numeric: tabular-nums; }
+        .chan-row.known  .name { color: var(--text); opacity: 1; font-style: normal; }
+
+        /* Mini SNR sparkline on cards */
+        .sparkline {
+            display: block;
+            width: 100%;
+            height: 16px;
+            margin-top: 4px;
+            opacity: 0.9;
+            border-top: 1px dashed var(--border);
+            padding-top: 2px;
+        }
+        .sparkline:hover { opacity: 1; }
+
+        /* Direct (1-hop) neighbour badge */
+        .direct-badge {
+            display: inline-flex;
+            align-items: center;
+            gap: 3px;
+            background: rgba(38,196,124,0.14);
+            color: #6cf2a8;
+            border: 1px solid rgba(38,196,124,0.35);
+            border-radius: 8px;
+            padding: 0 5px;
+            font-size: 0.6rem;
+            line-height: 1.4;
+            margin-left: 4px;
+        }
         .msg-detail-row .lbl {
             font-size: 0.66rem;
             text-transform: uppercase;
@@ -1121,7 +1348,9 @@
             min-width: 0;
         }
         .signal-wrap span { font-variant-numeric: tabular-nums; }
-        .signal-bars { display: flex; align-items: flex-end; gap: 2px; height: 12px; flex-shrink: 0; }
+        .signal-bars { display: flex; align-items: flex-end; gap: 1px; height: 11px; flex-shrink: 0; }
+        .signal-bars .bar { width: 3px; }
+        .signal-wrap { gap: 5px; }
         .signal-bars .bar {
             width: 3px;
             border-radius: 1px;
@@ -1137,7 +1366,14 @@
 
     <header>
         <h1><span class="logo">MC</span> MeshCore Dashboard</h1>
-        <div style="display:flex;align-items:center;gap:14px">
+        <div style="display:flex;align-items:center;gap:10px">
+            <div class="rx-toolbar">
+                <button class="rx-tool-btn" onclick="_openSidePanel('firehose')" title="Live RF firehose (RX_LOG_DATA)"><i class="fa-solid fa-tower-broadcast"></i></button>
+                <button class="rx-tool-btn" onclick="_openSidePanel('traffic')" title="Traffic stats by payload type"><i class="fa-solid fa-chart-column"></i></button>
+                <button class="rx-tool-btn" onclick="_openSidePanel('heatmap')" title="24h packet rate heatmap"><i class="fa-solid fa-grip"></i></button>
+                <button class="rx-tool-btn" onclick="_openSidePanel('channels')" title="Channel auto-discovery"><i class="fa-solid fa-hashtag"></i></button>
+                <button class="rx-tool-btn" onclick="_openSidePanel('topology')" title="Mesh topology: all contacts + paths"><i class="fa-solid fa-sitemap"></i></button>
+            </div>
             <span id="last-updated"></span>
             <button id="refresh-btn" onclick="loadData()">↻ Refresh</button>
         </div>
@@ -1246,6 +1482,48 @@
                 const r = await fetch("/templates/meshcore_devices.json?_=" + Date.now());
                 if (r.ok) _deviceMap = await r.json();
             } catch (_) { }
+        }
+
+        // ── RX_LOG_DATA buffer (analyzer-style packet detail) ────────────────
+        // Written by the plugin from EventType.RX_LOG_DATA push events.
+        // Shape: { entries: [...], stats: {payload_type_counts, chan_hash_counts,
+        //   signal_history, dup_floods, heatmap_24h}, known_channels: {...} }
+        let _rxLog = { entries: [], stats: {} };
+        let _rxLogLastSeen = 0;        // last entry _t seen by the firehose
+        let _rxLogFirehosePaused = false;
+
+        async function _loadRxLog() {
+            try {
+                const r = await fetch("/templates/meshcore_rx_log.json?_=" + Date.now());
+                if (r.ok) _rxLog = await r.json();
+            } catch (_) { }
+        }
+
+        // Heuristic: match an inbox message to an RX log entry.
+        // We have message text, channel and approximate time; the RX log entry
+        // has snr/rssi/recv_time + raw header fields. Match by:
+        //   1) exact text inside entry.message  (best signal)
+        //   2) same channel hash (chan_hash matches the channel index name hash)
+        //   3) recv_time within ±10s of the inbox-reported time
+        function _findRxEntryForMsg(msgObj) {
+            if (!_rxLog || !Array.isArray(_rxLog.entries)) return null;
+            const wantText = (msgObj.text || "").trim();
+            const wantTs   = msgObj.ts ? msgObj.ts : 0;
+            let best = null, bestScore = -1;
+            for (const e of _rxLog.entries) {
+                let score = 0;
+                const msg = (e.message || "").trim();
+                if (wantText && msg && msg.indexOf(wantText) !== -1) score += 10;
+                if (wantText && msg === wantText) score += 5;
+                if (wantTs && e.recv_time) {
+                    const dt = Math.abs((e.recv_time - wantTs));
+                    if (dt < 5)  score += 4;
+                    else if (dt < 15) score += 2;
+                }
+                if (msgObj.isSent && (e.payload_typename === "TEXT_MSG" || e.payload_typename === "GRP_TXT")) score += 1;
+                if (score > bestScore) { bestScore = score; best = e; }
+            }
+            return bestScore >= 5 ? best : null;
         }
 
         function deviceUrl(idx) {
@@ -1455,6 +1733,14 @@
                 ? `<button class="map-toggle" data-node="${escHtml(nodeName)}" data-lat="${slots.lat}" data-lon="${slots.lon}" title="Show on map"><i class="fa-solid fa-location-dot"></i></button>`
                 : "";
 
+            // SNR sparkline for remote contacts. We key it by the contact's
+            // 12-char pubkey_prefix so it matches the plugin's signal_history
+            // bucket (filled from ADVERT + CONTACT_MSG_RECV events).
+            const pkPrefix = (!isSelf && slots.pubkey_prefix) ? slots.pubkey_prefix : "";
+            const sparklineHtml = pkPrefix
+                ? `<svg class="sparkline" data-pubkey="${escHtml(pkPrefix)}" preserveAspectRatio="none"></svg>`
+                : "";
+
             return `
         <div class="node-card" data-node="${escHtml(nodeName)}">
           <div class="node-header">
@@ -1465,6 +1751,7 @@
             <span class="node-badge" data-node="${escHtml(nodeName)}">${badgeHtml}</span>
           </div>
           <div class="node-metrics">${metricsHtml}</div>
+          ${sparklineHtml}
           ${settingsHtml}
           ${mapHtml}
           ${favHtml}
@@ -1814,8 +2101,18 @@
                 const timeLabel = isPending ? "sending…" : escHtml(time);
                 // Stash the message in a data attribute we can read on click;
                 // base64-encode so JSON quotes don't break the attribute.
+                // Best-effort parse of the Domoticz timestamp to Unix seconds so
+                // we can match this inbox row against an RX_LOG_DATA entry.
+                let ts = 0;
+                if (time) {
+                    const m = String(time).match(/^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2}):(\d{2})/);
+                    if (m) {
+                        const d = new Date(+m[1], +m[2] - 1, +m[3], +m[4], +m[5], +m[6]);
+                        ts = Math.floor(d.getTime() / 1000);
+                    }
+                }
                 const payload = btoa(unescape(encodeURIComponent(JSON.stringify({
-                    time, channel, sender, text, isSent
+                    time, channel, sender, text, isSent, ts
                 }))));
                 const infoBtn = isPending ? "" :
                     `<button class="msg-info-btn" data-msg="${payload}" title="Message details">
@@ -2419,6 +2716,78 @@
             if (failures.length) alert("Some removals failed:\n\n" + failures.join("\n"));
         }
 
+        // Build analyzer-style rows from a raw RX_LOG_DATA entry. Header byte
+        // decode follows the MeshCore packet spec: bits 0-1 = route_type,
+        // bits 2-5 = payload_type, bits 6-7 = payload_ver.
+        function _buildAnalyzerRows(e) {
+            const rows = [];
+            const hex2 = v => (v === null || v === undefined) ? "" : ("0x" + Number(v).toString(16).padStart(2, "0").toUpperCase());
+            if (e.snr  !== undefined) rows.push(["SNR",  `${e.snr} dB`]);
+            if (e.rssi !== undefined) rows.push(["RSSI", `${e.rssi} dBm`]);
+            if (e.recv_time)          rows.push(["Recv time", new Date(e.recv_time * 1000).toLocaleTimeString()]);
+            if (e.header !== undefined) {
+                const h = Number(e.header);
+                const rt = h & 0x03, pt = (h >> 2) & 0x0F, pv = (h >> 6) & 0x03;
+                rows.push(["Header byte", `${hex2(h)}  (bin ${h.toString(2).padStart(8, "0")})`]);
+                rows.push(["  route_type",   `${rt}  ${e.route_typename ? "(" + e.route_typename + ")" : ""}`]);
+                rows.push(["  payload_type", `${pt}  ${e.payload_typename ? "(" + e.payload_typename + ")" : ""}`]);
+                rows.push(["  payload_ver",  `${pv}`]);
+            } else {
+                if (e.route_typename)   rows.push(["Route type",   e.route_typename]);
+                if (e.payload_typename) rows.push(["Payload type", e.payload_typename]);
+            }
+            if (e.transport_code)  rows.push(["Transport code", e.transport_code]);
+            if (e.path_len !== undefined) rows.push(["Path length", `${e.path_len} hop(s)`]);
+            if (e.path)            rows.push(["Path hashes", e.path]);
+            if (e.chan_hash)       rows.push(["Channel hash", e.chan_hash]);
+            if (e.cipher_mac)      rows.push(["Cipher MAC",   e.cipher_mac]);
+            if (e.raw_hex)         rows.push(["Raw on-air",   e.raw_hex]);
+            return rows;
+        }
+
+        // For an outgoing message, look for an ACK entry in the rolling RX log
+        // within ~30s after the send. Best-effort — the meshcore library does
+        // not give us a packet hash on send_msg, so we match by timing only.
+        function _buildAckRows(msgObj) {
+            if (!msgObj || !msgObj.ts) return [];
+            const entries = (_rxLog && _rxLog.entries) || [];
+            // ACKs that fired between the send and +30s
+            const acks = entries.filter(e =>
+                e.payload_typename === "ACK" &&
+                e._t && e._t >= msgObj.ts - 1 && e._t <= msgObj.ts + 30
+            );
+            if (!acks.length) return [["Status", "No ACK received in the 30s window after send."]];
+            const a = acks[0];
+            const dt = (a._t - msgObj.ts).toFixed(1);
+            const rows = [
+                ["Status",   `ACK received +${dt}s after send`],
+                ["ACK time", new Date(a._t * 1000).toLocaleTimeString()],
+            ];
+            if (a.snr  != null) rows.push(["SNR",  `${a.snr} dB`]);
+            if (a.rssi != null) rows.push(["RSSI", `${a.rssi} dBm`]);
+            for (const k of ["pkt_hash", "code", "ack_code", "request_hash"]) {
+                if (a[k] !== undefined) rows.push([k, String(a[k])]);
+            }
+            return rows;
+        }
+
+        function _buildDupRows(e) {
+            // The plugin tracks duplicate floods keyed by raw_hex. If this
+            // entry's raw_hex was heard via multiple paths, show them.
+            const raw = e.raw_hex;
+            const stats = _rxLog && _rxLog.stats;
+            if (!raw || !stats || !stats.dup_floods || !stats.dup_floods[raw]) return [];
+            const list = stats.dup_floods[raw];
+            if (!list.length || list.length < 2) return [];
+            const rows = [];
+            rows.push(["Heard via", `${list.length} repeater path(s)`]);
+            list.forEach((d, i) => {
+                const ts = d.t ? new Date(d.t * 1000).toLocaleTimeString() : "?";
+                rows.push([`Copy ${i + 1}`, `path=${d.path || "(direct)"}  snr=${d.snr ?? "?"}  @${ts}`]);
+            });
+            return rows;
+        }
+
         // ── Message details side panel ───────────────────────────────────────────
         // Shows whatever metadata we have for a single inbox entry. Reuses the
         // map-panel side-drawer DOM/CSS to keep the styling consistent.
@@ -2448,16 +2817,50 @@
                 ["Char count",`${chars} characters`, ""],
                 ["Hex",       msgObj.text ? Array.from(_byteEncoder.encode(msgObj.text)).map(b => b.toString(16).padStart(2, "0")).join(" ") : "—", ""],
             ];
+
+            // Try to enrich with analyzer-style RX log fields (header bits decoded,
+            // route type, transport code, path, cipher MAC, raw_hex). Outgoing
+            // messages are unlikely to match (the firmware doesn't emit RX_LOG_DATA
+            // for our own TX) — but we do scan for an ACK event in the same
+            // window so the user can see whether the message was acknowledged.
+            const rxEntry = msgObj.isSent ? null : _findRxEntryForMsg(msgObj);
+            const analyzerRows = rxEntry ? _buildAnalyzerRows(rxEntry) : [];
+            const dupRows      = rxEntry ? _buildDupRows(rxEntry) : [];
+            const ackRows      = msgObj.isSent ? _buildAckRows(msgObj) : [];
+
             const html = `<div id="msg-details-list">` + rows.map(([lbl, val, cls]) =>
                 `<div class="msg-detail-row">
                     <span class="lbl">${escHtml(lbl)}</span>
                     <span class="val ${cls}">${escHtml(val)}</span>
                 </div>`
-            ).join("") + `
-            <div style="font-size:0.72rem;color:var(--muted);font-style:italic;padding-top:4px">
-                Raw on-air bytes (header, transport codes, cipher MAC, path hashes) aren't exposed
-                by the meshcore Python library, so they can't be shown here.
-            </div></div>`;
+            ).join("") +
+            (analyzerRows.length ? `<div class="msg-detail-section">RX log (on-air)</div>` +
+                analyzerRows.map(([lbl, val, cls]) =>
+                    `<div class="msg-detail-row">
+                        <span class="lbl">${escHtml(lbl)}</span>
+                        <span class="val ${cls || ""}">${escHtml(val)}</span>
+                    </div>`
+                ).join("") : "") +
+            (dupRows.length ? `<div class="msg-detail-section">Duplicate paths heard</div>` +
+                dupRows.map(([lbl, val]) =>
+                    `<div class="msg-detail-row">
+                        <span class="lbl">${escHtml(lbl)}</span>
+                        <span class="val">${escHtml(val)}</span>
+                    </div>`
+                ).join("") : "") +
+            (ackRows.length ? `<div class="msg-detail-section">Acknowledgement</div>` +
+                ackRows.map(([lbl, val]) =>
+                    `<div class="msg-detail-row">
+                        <span class="lbl">${escHtml(lbl)}</span>
+                        <span class="val">${escHtml(val)}</span>
+                    </div>`
+                ).join("") : "") +
+            (rxEntry ? "" : `
+                <div style="font-size:0.72rem;color:var(--muted);font-style:italic;padding-top:4px">
+                    No matching RX_LOG_DATA entry found for this message. (Outgoing
+                    messages, very old messages, or text that doesn't match any
+                    recent on-air frame won't be enriched.)
+                </div>`) + `</div>`;
             // Replace the map canvas with our content; we'll restore it on map-open.
             body.dataset.previousContent = body.dataset.previousContent || "1";
             body.innerHTML = html;
@@ -2465,6 +2868,544 @@
             panel.classList.add("open");
             backdrop.classList.add("open");
             panel.setAttribute("aria-hidden", "false");
+        }
+
+        // ── Generic RX-log side-panel views ─────────────────────────────────
+        // The map panel side-drawer is reused for all of these: firehose,
+        // traffic, channels, heatmap. We track which view is open so the
+        // 3s _loadRxLog interval can re-render only the active one.
+        let _sidePanelView = null;  // null | 'firehose' | 'traffic' | 'channels' | 'heatmap' | 'msg'
+
+        function _openSidePanel(view) {
+            const panel    = document.getElementById("map-panel");
+            const backdrop = document.getElementById("map-backdrop");
+            const title    = document.getElementById("map-panel-title");
+            const coords   = document.getElementById("map-panel-coords");
+            const body     = document.getElementById("map-panel-body");
+            const ext      = document.getElementById("map-panel-external");
+            const footer   = document.getElementById("map-panel-footer");
+            if (!panel || !body) return;
+            ext.style.display = "none";
+            // Hide the "Powered by Leaflet · OpenStreetMap" footer when we're
+            // not showing a map-based view.
+            if (footer) footer.style.display = (view === "map" || view === "topology") ? "" : "none";
+            // Mark toolbar button active
+            document.querySelectorAll(".rx-tool-btn").forEach(b => b.classList.remove("active"));
+            _sidePanelView = view;
+            // Kick a fresh fetch so the panel shows live data immediately instead
+            // of waiting for the next 3 s interval tick.
+            _loadRxLog().then(() => {
+                if (view === "firehose") _renderFirehoseIfOpen();
+                if (view === "traffic")  _renderTrafficIfOpen();
+                if (view === "channels") _renderChannelsIfOpen();
+                if (view === "heatmap")  _renderHeatmapIfOpen();
+            });
+            if (view === "firehose") {
+                title.textContent  = "RF firehose";
+                coords.textContent = "Every RX_LOG_DATA frame, live";
+                body.innerHTML = `
+                    <div class="panel-view" id="firehose-view">
+                        <div class="firehose-controls">
+                            <button id="firehose-legend" title="What do these columns mean?"><i class="fa-solid fa-circle-info"></i></button>
+                            <div style="display:flex;gap:6px">
+                                <button id="firehose-pause">Pause</button>
+                                <button id="firehose-clear">Clear view</button>
+                            </div>
+                        </div>
+                        <div id="firehose-legend-pop" style="display:none"></div>
+                        <div class="firehose-row firehose-head">
+                            <span>Time</span>
+                            <span>Type</span>
+                            <span>Hops</span>
+                            <span>SNR/RSSI · Text or raw bytes</span>
+                        </div>
+                        <div id="firehose-list" style="font-family: ui-monospace, monospace;"></div>
+                    </div>`;
+                document.getElementById("firehose-pause").onclick = _toggleFirehosePause;
+                document.getElementById("firehose-clear").onclick = () => {
+                    _rxLogLastSeen = (_rxLog.entries.length ? _rxLog.entries[_rxLog.entries.length - 1]._t : 0);
+                    document.getElementById("firehose-list").innerHTML = "";
+                };
+                document.getElementById("firehose-legend").onclick = _toggleFirehoseLegend;
+                _rxLogLastSeen = 0;
+                _renderFirehoseIfOpen();
+            } else if (view === "traffic") {
+                title.textContent  = "Traffic by payload type";
+                coords.textContent = "Cumulative since plugin start";
+                body.innerHTML = `<div class="panel-view" id="traffic-view"></div>`;
+                _renderTrafficIfOpen();
+            } else if (view === "channels") {
+                title.textContent  = "Channel discovery";
+                coords.textContent = "Known + unknown chan_hashes heard";
+                body.innerHTML = `<div class="panel-view" id="channels-view"></div>`;
+                _renderChannelsIfOpen();
+            } else if (view === "heatmap") {
+                title.textContent  = "Packet rate (24h)";
+                coords.textContent = "Hour-of-day bucket counts";
+                body.innerHTML = `<div class="panel-view" id="heatmap-view"></div>`;
+                _renderHeatmapIfOpen();
+            } else if (view === "topology") {
+                title.textContent  = "Mesh topology";
+                coords.textContent = "All contacts with a known location";
+                // Use the map canvas Leaflet already knows about; restore it
+                // so Leaflet can attach.
+                _ensureMapCanvas();
+                _renderTopology();
+            }
+            panel.classList.add("open");
+            backdrop.classList.add("open");
+            panel.setAttribute("aria-hidden", "false");
+        }
+
+        // Track which view is currently in the panel so renderers can no-op
+        // when their tab isn't open.
+        function _isOpen(view)  { return _sidePanelView === view && document.getElementById("map-panel").classList.contains("open"); }
+        function _toggleFirehosePause() {
+            _rxLogFirehosePaused = !_rxLogFirehosePaused;
+            const btn = document.getElementById("firehose-pause");
+            if (btn) {
+                btn.textContent = _rxLogFirehosePaused ? "Resume" : "Pause";
+                btn.classList.toggle("active", _rxLogFirehosePaused);
+            }
+        }
+
+        function _toggleFirehoseLegend() {
+            const pop = document.getElementById("firehose-legend-pop");
+            if (!pop) return;
+            if (pop.style.display === "none") {
+                pop.innerHTML = `
+                  <div style="font-size:0.78rem;line-height:1.5;background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:8px 10px;">
+                    <div style="color:var(--accent);font-weight:600;margin-bottom:4px">Column legend</div>
+                    <div><strong>Time</strong> — when this packet was heard (local time).</div>
+                    <div><strong>Type</strong> — payload type:
+                        <span style="color:var(--accent)">TEXT_MSG</span> (DM),
+                        <span style="color:#f9c74f">GRP_TXT</span> (channel),
+                        <span style="color:#a0c4ff">ADVERT</span> (node beacon),
+                        <span style="opacity:.85">RESPONSE</span> (ACK/reply),
+                        REQ / ANON_REQ (queries).</div>
+                    <div><strong>Nh</strong> — how many hops the packet has already traversed in the mesh (e.g. <code>6h</code> = 6 repeaters).</div>
+                    <div><strong>SNR / RSSI</strong> — the signal we received this copy with. SNR is in dB (higher = cleaner), RSSI is in dBm (less negative = stronger).</div>
+                    <div><strong>Text / raw bytes</strong> — the decoded message if we have the key, otherwise the start of the raw on-air frame (ciphertext for encrypted payloads).</div>
+                  </div>`;
+                pop.style.display = "";
+            } else {
+                pop.style.display = "none";
+            }
+        }
+
+        function _renderFirehoseIfOpen() {
+            if (!_isOpen("firehose") || _rxLogFirehosePaused) return;
+            const list = document.getElementById("firehose-list");
+            if (!list) return;
+            const entries = (_rxLog && _rxLog.entries) || [];
+            // Append only what is newer than the last cursor
+            const fresh = entries.filter(e => (e._t || 0) > _rxLogLastSeen);
+            if (!fresh.length) return;
+            _rxLogLastSeen = fresh[fresh.length - 1]._t || _rxLogLastSeen;
+            // Keep most recent 200 in DOM
+            const ADV_TYPE_NAME = { 1: "Contact", 2: "Repeater", 3: "Room Server", 4: "Sensor" };
+            const rowsHtml = fresh.map(e => {
+                const ts = e._t ? new Date(e._t * 1000).toLocaleTimeString() : "?";
+                const pt = e.payload_typename || "?";
+                const cls = ({
+                    TEXT_MSG: "text", GRP_TXT: "group",
+                    ADVERT: "advert", RESPONSE: "response",
+                })[pt] || "";
+                const sig = `${e.snr ?? "?"}/${e.rssi ?? "?"}`;
+                const hops = e.path_len !== undefined ? `${e.path_len}h` : "";
+
+                // What to show in the visible message column. For ADVERT we have a
+                // parsed adv_name + location — far more useful than the raw hex.
+                // For GRP_TXT the firmware tells us the channel name. For TEXT_MSG
+                // the body is encrypted, so we keep the raw bytes preview.
+                let msg;
+                if (pt === "ADVERT" && e.adv_name) {
+                    const loc = (e.adv_lat && e.adv_lon) ? `  @${e.adv_lat.toFixed(4)},${e.adv_lon.toFixed(4)}` : "";
+                    const kind = ADV_TYPE_NAME[e.adv_type] || `type ${e.adv_type ?? "?"}`;
+                    msg = `${e.adv_name}  (${kind})${loc}`;
+                } else if (pt === "GRP_TXT" && e.chan_name) {
+                    msg = `${e.chan_name}   (ciphertext: ${(e.crypted || e.raw_hex || "").slice(0, 24)}…)`;
+                } else if (e.message) {
+                    msg = e.message.slice(0, 80);
+                } else {
+                    msg = e.raw_hex ? e.raw_hex.slice(0, 30) + "…" : "";
+                }
+
+                // Build the per-row tooltip from every field we have. Advert
+                // packets get a richer block (name / type / pubkey / lat-lon /
+                // flags / timestamp).
+                const tipLines = [
+                    `Time:        ${ts}`,
+                    `Type:        ${pt}`,
+                    `Route:       ${e.route_typename || "?"}`,
+                    `Hops:        ${e.path_len ?? "?"}`,
+                    `SNR:         ${e.snr ?? "?"} dB`,
+                    `RSSI:        ${e.rssi ?? "?"} dBm`,
+                    e.transport_code ? `Transport:   ${e.transport_code}` : "",
+                    e.path ?           `Path hashes: ${e.path}` : "",
+                ];
+                if (pt === "ADVERT") {
+                    if (e.adv_name)       tipLines.push(`Name:        ${e.adv_name}`);
+                    if (e.adv_type !== undefined) tipLines.push(`Adv type:    ${e.adv_type} (${ADV_TYPE_NAME[e.adv_type] || "?"})`);
+                    if (e.adv_flags !== undefined) tipLines.push(`Adv flags:   0x${e.adv_flags.toString(16)}`);
+                    if (e.adv_lat && e.adv_lon) tipLines.push(`Location:    ${e.adv_lat}, ${e.adv_lon}`);
+                    if (e.adv_timestamp) tipLines.push(`Adv ts:      ${new Date(e.adv_timestamp * 1000).toLocaleString()}`);
+                    if (e.adv_key)       tipLines.push(`Public key:  ${e.adv_key}`);
+                    if (e.signature)     tipLines.push(`Signature:   ${e.signature.slice(0, 32)}…`);
+                }
+                if (e.chan_hash) tipLines.push(`Chan hash:   0x${e.chan_hash}${e.chan_name ? " (" + e.chan_name + ")" : ""}`);
+                if (e.cipher_mac) tipLines.push(`Cipher MAC:  ${e.cipher_mac}`);
+                if (e.message)    tipLines.push(`Text:        ${e.message}`);
+                if (e.raw_hex)    tipLines.push(`Raw hex:     ${e.raw_hex.slice(0, 80)}${e.raw_hex.length > 80 ? "…" : ""}`);
+                const tip = tipLines.filter(Boolean).join("\n");
+
+                return `<div class="firehose-row ${cls}" data-tip="1" title="${escHtml(tip)}">
+                    <span class="t">${ts}</span>
+                    <span class="pt">${pt}</span>
+                    <span>${hops}</span>
+                    <span class="msg">${escHtml(sig)} · ${escHtml(msg)}</span>
+                </div>`;
+            }).join("");
+            list.insertAdjacentHTML("afterbegin", rowsHtml);
+            // Trim
+            while (list.children.length > 200) list.removeChild(list.lastChild);
+        }
+
+        function _renderTrafficIfOpen() {
+            if (!_isOpen("traffic")) return;
+            const view = document.getElementById("traffic-view");
+            if (!view) return;
+            const counts = (_rxLog.stats && _rxLog.stats.payload_type_counts) || {};
+            const pairs = Object.entries(counts).sort((a, b) => b[1] - a[1]);
+            if (!pairs.length) {
+                view.innerHTML = `<div style="color:var(--muted)">No packets seen yet.</div>`;
+                return;
+            }
+            const max = Math.max(...pairs.map(p => p[1]));
+            const head = `<div class="bar-row" style="color:var(--accent);font-weight:600;text-transform:uppercase;font-size:0.65rem;letter-spacing:0.05em;border-bottom:1px solid var(--accent);padding-bottom:4px">
+                <span>Payload type</span><span></span><span style="text-align:right">Count</span>
+            </div>`;
+            view.innerHTML = head + pairs.map(([name, n]) => {
+                const pct = max ? Math.round(100 * n / max) : 0;
+                return `<div class="bar-row">
+                    <span>${escHtml(name)}</span>
+                    <div class="bar-bar"><span style="width:${pct}%"></span></div>
+                    <span class="bar-count">${n}</span>
+                </div>`;
+            }).join("");
+        }
+
+        function _renderChannelsIfOpen() {
+            if (!_isOpen("channels")) return;
+            const view = document.getElementById("channels-view");
+            if (!view) return;
+            const counts = (_rxLog.stats && _rxLog.stats.chan_hash_counts) || {};
+            // Try to build a hash → channel-name map from recent entries
+            // (the firmware tags each GRP_TXT entry with chan_name when we
+            // have its key, which lets us resolve hashes to readable names).
+            const hashToName = {};
+            for (const e of (_rxLog.entries || [])) {
+                if (e.chan_hash && e.chan_name) hashToName[e.chan_hash] = e.chan_name;
+            }
+
+            // All 8 device-side channel slots (from plugin via device map).
+            // If the plugin hasn't sent the slot table yet, fall back to
+            // synthesising it from the legacy {idx: name} known-channels map.
+            let slots = (_deviceMap && _deviceMap.channel_slots) || null;
+            if (!slots) {
+                const known = (_rxLog.known_channels) || _channelNames || {};
+                slots = [];
+                for (let i = 0; i < 8; i++) slots.push({ idx: i, name: known[String(i)] || "" });
+            }
+            const slotRows = slots.map(s => {
+                const empty = !s.name;
+                const nameHtml = empty
+                    ? `<span class="name" style="font-style:italic;opacity:.7">(empty)</span>`
+                    : `<span class="name" style="color:var(--text)">${escHtml(s.name)}</span>`;
+                const btn = empty
+                    ? `<button class="chan-slot-btn add"   data-slot="${s.idx}" title="Add a channel to this slot"><i class="fa-solid fa-plus"></i> Add</button>`
+                    : `<button class="chan-slot-btn clear" data-slot="${s.idx}" title="Wipe this slot"><i class="fa-solid fa-trash"></i> Remove</button>`;
+                return `<div class="chan-slot-row">
+                    <span class="slot-idx">${s.idx}</span>
+                    ${nameHtml}
+                    ${btn}
+                </div>`;
+            }).join("");
+
+            // Hashes heard on air (with packet counts)
+            const pairs = Object.entries(counts).sort((a, b) => b[1] - a[1]);
+            const hashRows = pairs.map(([h, n]) => {
+                const name = hashToName[h] || "(unknown — no key)";
+                const isKnown = !!hashToName[h];
+                return `<div class="chan-row${isKnown ? " known" : ""}">
+                    <span class="chash">0x${escHtml(h)}</span>
+                    <span class="name">${escHtml(name)}</span>
+                    <span class="cnt">${n}</span>
+                </div>`;
+            }).join("");
+
+            view.innerHTML = `
+                <div style="font-size:0.78rem;color:var(--accent);font-weight:600;text-transform:uppercase;letter-spacing:0.05em;border-bottom:1px solid var(--accent);padding-bottom:4px">
+                    Channel slots (8)
+                </div>
+                <div style="font-size:0.78rem;color:var(--text);opacity:0.85;line-height:1.5">
+                    Slots on this device — fill an empty one to subscribe.
+                    Public-style names that start with <code>#</code>
+                    auto-derive their key from the name; private channels need
+                    a 16-byte secret too.
+                </div>
+                <div id="chan-slots-list">${slotRows}</div>
+                <div style="font-size:0.78rem;color:var(--accent);font-weight:600;text-transform:uppercase;letter-spacing:0.05em;border-bottom:1px solid var(--accent);padding-bottom:4px;margin-top:6px">
+                    Hashes heard on air
+                </div>
+                <div style="font-size:0.78rem;color:var(--text);opacity:0.85;line-height:1.5">
+                    Each row is a channel hash heard over the radio. Unknown
+                    rows are channels we have no key for — knowing the hash
+                    alone isn't enough to subscribe, you need the name (and
+                    secret for private channels).
+                </div>
+                ${hashRows ? `
+                    <div class="chan-row" style="color:var(--accent);font-weight:600;text-transform:uppercase;font-size:0.65rem;letter-spacing:0.05em;border-bottom:1px solid var(--accent)">
+                        <span title="MeshCore hashes a channel's name to a single byte; the firmware uses this hash to route encrypted group traffic. We see it on every GRP_TXT packet.">Chan hash</span>
+                        <span>Name</span>
+                        <span style="text-align:right">Pkts</span>
+                    </div>${hashRows}` : `<div style="color:var(--text);opacity:.7;padding-top:8px">No grouped traffic heard yet.</div>`}`;
+
+            // Wire up slot Add/Remove buttons
+            view.querySelectorAll(".chan-slot-btn.add").forEach(btn => {
+                btn.onclick = () => _addChannelSlot(parseInt(btn.dataset.slot, 10));
+            });
+            view.querySelectorAll(".chan-slot-btn.clear").forEach(btn => {
+                btn.onclick = () => _clearChannelSlot(parseInt(btn.dataset.slot, 10), btn);
+            });
+        }
+
+        async function _addChannelSlot(slot) {
+            const sendIdx = _deviceMap && _deviceMap.send_idx;
+            if (!sendIdx) { alert("Cannot add: Mesh Send device not found."); return; }
+            const name = prompt(
+                `Add channel to slot ${slot}.\n\n` +
+                `Enter the channel name (e.g. "#mc-radar" or "#nl").\n\n` +
+                `Names starting with # auto-derive the key from the name.\n` +
+                `For a private channel, append a space and the 32-hex-char secret.\n\n` +
+                `Examples:\n` +
+                `  #nl\n` +
+                `  MyPrivateRoom 0123456789abcdef0123456789abcdef`, ""
+            );
+            if (!name) return;
+            const cmd = `!set_channel ${slot} ${name}`;
+            try {
+                const url = `/json.htm?type=command&param=udevice&idx=${sendIdx}&nvalue=0&svalue=${encodeURIComponent(cmd)}`;
+                const r = await fetch(url, { method: "GET" });
+                if (!r.ok) throw new Error(`HTTP ${r.status}`);
+                await _refreshChannelsAndCompose();
+                _renderChannelsIfOpen();
+            } catch (err) {
+                alert(`Failed to add channel: ${err.message}`);
+            }
+        }
+
+        async function _clearChannelSlot(slot, btn) {
+            if (!confirm(`Wipe channel slot ${slot}?\n\nYou can re-add the channel later by name.`)) return;
+            const sendIdx = _deviceMap && _deviceMap.send_idx;
+            if (!sendIdx) { alert("Cannot clear: Mesh Send device not found."); return; }
+            try {
+                const url = `/json.htm?type=command&param=udevice&idx=${sendIdx}&nvalue=0&svalue=${encodeURIComponent("!clear_channel " + slot)}`;
+                const r = await fetch(url, { method: "GET" });
+                if (!r.ok) throw new Error(`HTTP ${r.status}`);
+                await _refreshChannelsAndCompose();
+                _renderChannelsIfOpen();
+            } catch (err) {
+                alert(`Failed to clear channel: ${err.message}`);
+            }
+        }
+
+        // After a channel slot is added/removed, reload everything that
+        // depends on the channel name table: the device map (which holds the
+        // slot list), meshcore_channels.json (which feeds the compose-bar
+        // channel dropdown) AND the inbox channel-filter chip row above the
+        // inbox (so a freshly-added channel appears as a filter immediately).
+        async function _refreshChannelsAndCompose() {
+            await Promise.all([_loadDeviceMap(), _loadChannelNames()]);
+            _populateComposeTargets();
+            try { _renderChannelChips(_allChannelChips()); } catch (_) { /* before inbox render */ }
+        }
+
+        function _renderHeatmapIfOpen() {
+            if (!_isOpen("heatmap")) return;
+            const view = document.getElementById("heatmap-view");
+            if (!view) return;
+            const hm = (_rxLog.stats && _rxLog.stats.heatmap_24h) || new Array(24).fill(0);
+            const max = Math.max(...hm);
+            const now = new Date().getHours();
+            // Two rows of 12 hours, 0..11 and 12..23
+            const cell = (h) => {
+                const v = hm[h] || 0;
+                let cls = "";
+                if (max > 0) {
+                    const r = v / max;
+                    if      (r > 0.75) cls = "hot4";
+                    else if (r > 0.5)  cls = "hot3";
+                    else if (r > 0.25) cls = "hot2";
+                    else if (r > 0)    cls = "hot1";
+                }
+                if (h === now) cls += " now";
+                return `<div class="${cls}" title="${h}:00–${h}:59  ${v} pkt">${v || ""}</div>`;
+            };
+            const labels = Array.from({length: 24}, (_, h) => `<div>${h}</div>`).join("");
+            view.innerHTML = `
+                <div style="font-size:0.82rem;color:var(--text)">
+                    Packets received per hour-of-day, last 24h. Outlined cell = current hour.
+                </div>
+                <div class="heatmap-grid" style="grid-template-columns:repeat(24,1fr)">
+                    ${Array.from({length: 24}, (_, h) => cell(h)).join("")}
+                </div>
+                <div class="heatmap-labels">${labels}</div>`;
+        }
+
+        // Topology: render every contact (and self if known) on one Leaflet
+        // map, drawing a polyline from each contact to the self node when we
+        // have both endpoints. Line colour encodes hop count (green = direct,
+        // yellow = 1-3 hops, orange = 4-7, red = 8+).
+        let _topologyLayer = null;
+        function _renderTopology() {
+            const canvas = document.getElementById("map-canvas");
+            if (!canvas) return;
+            const init = () => {
+                if (typeof L === "undefined") {
+                    canvas.innerHTML = `<div style="padding:24px;color:var(--muted);font-size:0.85rem;text-align:center;">
+                        Leaflet failed to load from CDN.<br>The topology view needs the map library.
+                    </div>`;
+                    return;
+                }
+                if (!_leafletMap) {
+                    _leafletMap = L.map(canvas, { zoomControl: true }).setView([52, 5], 7);
+                    L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+                        attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors',
+                        maxZoom: 19,
+                    }).addTo(_leafletMap);
+                }
+                // Drop any prior topology overlay so a refresh doesn't pile up
+                if (_topologyLayer) { _topologyLayer.remove(); _topologyLayer = null; }
+                _topologyLayer = L.layerGroup().addTo(_leafletMap);
+
+                const nodes = (_deviceMap && _deviceMap.nodes) || {};
+                const selfName = _deviceMap && _deviceMap.self;
+                const selfNode = selfName ? nodes[selfName] : null;
+                const selfLoc = (selfNode && selfNode.lat != null && selfNode.lon != null && (selfNode.lat || selfNode.lon))
+                    ? [selfNode.lat, selfNode.lon] : null;
+
+                const bounds = [];
+                let plotted = 0;
+
+                // Helper: pick a colour for the hop count
+                const hopColour = (h) => {
+                    if (h == null || h < 0) return "#888";
+                    if (h === 0) return "#26c47c";  // green: direct
+                    if (h <= 3)  return "#f9c74f";  // yellow
+                    if (h <= 7)  return "#ff8c42";  // orange
+                    return "#e63946";               // red
+                };
+
+                // Self marker
+                if (selfLoc) {
+                    const icon = L.divIcon({
+                        className: "mc-pin self",
+                        html: '<div class="mc-pin-inner" style="background:#3a7bd5"></div>',
+                        iconSize: [22, 22], iconAnchor: [11, 22],
+                    });
+                    L.marker(selfLoc, { icon }).addTo(_topologyLayer).bindPopup(`<b>${selfName}</b><br>(this node)`);
+                    bounds.push(selfLoc);
+                    plotted++;
+                }
+
+                // Contact markers + lines
+                for (const [name, node] of Object.entries(nodes)) {
+                    if (name === selfName) continue;
+                    if (node.lat == null || node.lon == null) continue;
+                    if (!node.lat && !node.lon) continue;
+                    const ll = [node.lat, node.lon];
+                    const hopsRaw = node.hops && node.hops.value;
+                    const h = hopsRaw != null ? parseInt(String(hopsRaw).replace(/[^\d-]/g, ""), 10) : null;
+                    const colour = hopColour(h);
+                    const icon = L.divIcon({
+                        className: "mc-pin",
+                        html: `<div class="mc-pin-inner" style="background:${colour}"></div>`,
+                        iconSize: [20, 20], iconAnchor: [10, 20],
+                    });
+                    L.marker(ll, { icon }).addTo(_topologyLayer).bindPopup(
+                        `<b>${name}</b><br>` +
+                        `Hops: ${h != null && !isNaN(h) ? h : "?"}<br>` +
+                        `Type: ${({1:"Contact",2:"Repeater",3:"Room Server",4:"Sensor"})[node.type] || "?"}`
+                    );
+                    if (selfLoc) {
+                        L.polyline([selfLoc, ll], {
+                            color: colour, weight: 2, opacity: 0.7, dashArray: h === 0 ? null : "4 4",
+                        }).addTo(_topologyLayer);
+                    }
+                    bounds.push(ll);
+                    plotted++;
+                }
+
+                if (bounds.length >= 2) {
+                    _leafletMap.fitBounds(bounds, { padding: [30, 30] });
+                } else if (bounds.length === 1) {
+                    _leafletMap.setView(bounds[0], 11);
+                }
+
+                if (!plotted) {
+                    canvas.innerHTML = `<div style="padding:24px;color:var(--text);opacity:.7;font-size:0.85rem;text-align:center;">
+                        No contacts have shared a location yet.<br>
+                        Set <code>adv_loc_policy = Share</code> on the connected node
+                        and ask remote contacts to do the same, or add manual
+                        positions in <code>meshcore_locations.json</code>.
+                    </div>`;
+                    return;
+                }
+
+                // Force Leaflet to recompute container size after the panel animation
+                setTimeout(() => _leafletMap.invalidateSize(), 280);
+            };
+            init();
+        }
+
+        // Sparkline refresh hook — invoked from the rx-log interval. Walks all
+        // visible contact cards and re-paints their SVG.
+        function _refreshCardSparklines() {
+            const sigHist = (_rxLog.stats && _rxLog.stats.signal_history) || {};
+            document.querySelectorAll(".sparkline").forEach(el => {
+                const pk = el.dataset.pubkey;
+                if (!pk || !sigHist[pk] || sigHist[pk].length < 2) {
+                    // Not enough samples yet — render a flat placeholder.
+                    el.innerHTML = "";
+                    return;
+                }
+                _renderSparkline(el, sigHist[pk]);
+            });
+        }
+
+        function _renderSparkline(svg, points) {
+            if (!points || !points.length) return;
+            const W = 100, H = 16;
+            const snrs = points.map(p => p.snr).filter(v => v !== null && v !== undefined);
+            if (!snrs.length) return;
+            const lo = Math.min(...snrs), hi = Math.max(...snrs);
+            const rng = (hi - lo) || 1;
+            const pts = points.map((p, i) => {
+                const x = (W * i) / Math.max(points.length - 1, 1);
+                const y = H - ((p.snr - lo) / rng) * H;
+                return `${x.toFixed(1)},${y.toFixed(1)}`;
+            }).join(" ");
+            svg.setAttribute("viewBox", `0 0 ${W} ${H}`);
+            const last = points[points.length - 1];
+            const tip = `SNR history: ${snrs.length} samples\nRange: ${lo} … ${hi} dB\nLatest: ${last.snr ?? "?"} dB at ${last.t ? new Date(last.t * 1000).toLocaleTimeString() : "?"}`;
+            svg.setAttribute("title", tip);
+            // A faint filled area under the line makes the curve more readable
+            // at 14px. Use the accent colour at low alpha.
+            const areaPts = `0,${H} ${pts} ${W},${H}`;
+            svg.innerHTML =
+                `<polygon points="${areaPts}" fill="var(--accent)" fill-opacity="0.10"/>` +
+                `<polyline points="${pts}" fill="none" stroke="var(--accent)" stroke-width="1" stroke-linejoin="round"/>`;
         }
 
         // Restore the map canvas inside the panel before opening a map view —
@@ -2498,6 +3439,8 @@
         let _leafletMarker = null;
 
         function _openMapPanel(name, lat, lon) {
+            // Clear any topology overlay before showing a single-node view
+            if (_topologyLayer) { _topologyLayer.remove(); _topologyLayer = null; }
             const panel = document.getElementById("map-panel");
             const backdrop = document.getElementById("map-backdrop");
             const title = document.getElementById("map-panel-title");
@@ -2566,6 +3509,7 @@
             panel.classList.remove("open");
             backdrop.classList.remove("open");
             panel.setAttribute("aria-hidden", "true");
+            _sidePanelView = null;
         }
 
         // Hook up close interactions once on script load
@@ -2576,6 +3520,48 @@
             if (backdrop) backdrop.addEventListener("click", _closeMapPanel);
             document.addEventListener("keydown", (e) => {
                 if (e.key === "Escape") _closeMapPanel();
+            });
+
+            // ── Resizable side panel ──
+            // Drag the left edge to make the panel wider/narrower. We persist
+            // the chosen width in localStorage so it survives page reloads.
+            const panel   = document.getElementById("map-panel");
+            const resizer = document.getElementById("map-panel-resizer");
+            if (!panel || !resizer) return;
+            const LS_KEY = "meshcore.sidePanelWidth";
+            const saved  = parseInt(localStorage.getItem(LS_KEY) || "0", 10);
+            if (saved >= 360) panel.style.width = saved + "px";
+            let dragging = false;
+            // Throttle Leaflet redraws — invalidateSize() per pixel move is
+            // wasteful, especially on the topology map. Coalesce into a
+            // single rAF callback per frame.
+            let mapInvalidatePending = false;
+            const _scheduleMapInvalidate = () => {
+                if (mapInvalidatePending || !_leafletMap) return;
+                mapInvalidatePending = true;
+                requestAnimationFrame(() => {
+                    mapInvalidatePending = false;
+                    if (_leafletMap) _leafletMap.invalidateSize();
+                });
+            };
+            resizer.addEventListener("mousedown", (e) => {
+                dragging = true;
+                panel.classList.add("resizing");
+                e.preventDefault();
+            });
+            document.addEventListener("mousemove", (e) => {
+                if (!dragging) return;
+                // Panel is anchored to the right edge: width = (viewportW - clientX)
+                const w = Math.max(360, Math.min(window.innerWidth - 80, window.innerWidth - e.clientX));
+                panel.style.width = w + "px";
+                _scheduleMapInvalidate();
+            });
+            document.addEventListener("mouseup", () => {
+                if (!dragging) return;
+                dragging = false;
+                panel.classList.remove("resizing");
+                if (_leafletMap) _leafletMap.invalidateSize();
+                try { localStorage.setItem(LS_KEY, parseInt(panel.style.width, 10) || 480); } catch (_) {}
             });
         })();
 
@@ -2623,13 +3609,24 @@
         }
 
         // Init: load JSON files, render snapshot instantly, then start live refresh loop.
-        Promise.all([_loadChannelNames(), _loadDeviceMap()]).then(async () => {
+        Promise.all([_loadChannelNames(), _loadDeviceMap(), _loadRxLog()]).then(async () => {
             _deviceMapFreshFromInit = true;
             _populateComposeTargets();
             await initialRender();   // instant — no API call
             _initContactClickToCompose();
             loadData();              // kick off first live refresh immediately
             setInterval(loadData, 10000);
+            // Faster cadence for the RX log: drives the firehose / sparklines /
+            // packet stats. 3s feels live without thrashing the disk.
+            setInterval(() => {
+                _loadRxLog().then(() => {
+                    if (!_rxLogFirehosePaused) _renderFirehoseIfOpen();
+                    _renderTrafficIfOpen();
+                    _renderChannelsIfOpen();
+                    _renderHeatmapIfOpen();
+                    _refreshCardSparklines();
+                });
+            }, 3000);
         });
 
         // ── Compose bar ───────────────────────────────────────────────────────────
@@ -3015,12 +4012,14 @@
         window._filterEmoji        = _filterEmoji;
         window._replyTo            = _replyTo;
         window._updateCharCounter  = _updateCharCounter;
+        window._openSidePanel      = _openSidePanel;
     })();
     </script>
 
     <!-- ── Map side panel ─────────────────────────────────────── -->
     <div id="map-backdrop"></div>
     <div id="map-panel" aria-hidden="true">
+        <div id="map-panel-resizer" title="Drag to resize"></div>
         <div id="map-panel-header">
             <div>
                 <h3 id="map-panel-title">Map</h3>
