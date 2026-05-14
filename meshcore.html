@@ -647,7 +647,16 @@
             white-space: nowrap;
             flex-shrink: 0;
         }
-        .inbox-msg .msg-text { color: var(--text); word-break: break-word; }
+        .inbox-msg .msg-text {
+            color: var(--text);
+            word-break: break-word;
+            user-select: text;
+            -webkit-user-select: text;
+            cursor: text;
+        }
+        /* Allow selecting time + sender too (e.g. copy a timestamp) */
+        .inbox-msg .msg-time,
+        .inbox-msg .msg-sender { user-select: text; -webkit-user-select: text; }
         .inbox-msg .msg-text .mention {
             color: #4caf7d;
             background: rgba(76,175,125,0.13);
@@ -1397,7 +1406,14 @@
         let _inboxLastUpdate = null;  // LastUpdate of the last recorded entry
         let _inboxDevIdx2 = null;
         let _inboxLoaded = false; // true once initial history has been fetched
-        let _inboxChanFilter = null;    // null = all, or "Public" / "Private" / "Ch 1"
+        const LS_INBOX_CHAN = "meshcore.inboxChanFilter";
+        // Restore the last channel filter from localStorage; "" / null means "All"
+        let _inboxChanFilter = (() => {
+            try {
+                const v = localStorage.getItem(LS_INBOX_CHAN);
+                return v ? v : null;
+            } catch (_) { return null; }
+        })();
         let _inboxSearch = "";           // text search on sender + text (case-insensitive)
 
         let _channelNames = {};  // idx string → name, loaded from meshcore_channels.json
@@ -1542,6 +1558,13 @@
 
             // Only touch the DOM when content actually changed — preserves scroll position
             if (html !== _lastRenderedInboxHtml) {
+                // Don't stomp an active text selection inside the inbox
+                // (the user is mid-drag trying to copy text). Defer until next tick.
+                const sel = window.getSelection && window.getSelection();
+                const selInInbox = sel && !sel.isCollapsed && sel.anchorNode
+                    && container.contains(sel.anchorNode);
+                if (selInInbox) return;
+
                 const scrollTop = container.scrollTop;
                 container.innerHTML = html;
                 container.scrollTop = scrollTop;
@@ -1591,6 +1614,10 @@
 
         function _setChanFilter(key) {
             _inboxChanFilter = key;
+            try {
+                if (key) localStorage.setItem(LS_INBOX_CHAN, key);
+                else     localStorage.removeItem(LS_INBOX_CHAN);
+            } catch (_) {}
             _syncComposeTarget();
             _lastRenderedInboxHtml = "";
             const container = document.getElementById("inbox-history");
