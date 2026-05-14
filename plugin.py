@@ -175,6 +175,17 @@ class BasePlugin:
         # Device info (firmware version, build, model) from send_device_query().
         # Fetched on connect and refreshed periodically.
         self._device_info: dict = {}
+        # Full SELF_INFO snapshot — radio params (freq, bw, sf, cr, tx_power,
+        # max_tx_power, multi_acks), our pubkey + advertised lat/lon. Exposed
+        # via the device map so the dashboard's self-node side panel can show
+        # and edit them.
+        self._self_info_full: dict = {}
+        # Latest result of get_self_telemetry (board-level sensors if any).
+        self._self_telemetry: dict = {}
+        # Per-contact query results from remote sync calls (status, telemetry,
+        # neighbours). Keyed by contact adv_name. Exposed via device map so
+        # the dashboard's contact info panel can read them.
+        self._contact_query_results: dict = {}
         # Bumped from fast (2s) to steady (10s) once the first contacts batch
         # has been dispatched, so we keep onHeartbeat responsive without
         # firing every 2 seconds forever.
@@ -198,6 +209,12 @@ class BasePlugin:
         self._mc = None                       # live MeshCore instance (worker-owned)
         self._stop_event = threading.Event()  # set on shutdown (cross-thread)
         self._stop_async: asyncio.Event | None = None  # created inside worker loop
+        # Serialise concurrent `!verb` sends and remote queries. The meshcore
+        # library subscribes to EventType.OK/ERROR globally per send() call,
+        # so two commands in flight at the same time can have their responses
+        # cross-attributed (the second waiter gets the first reply). One lock
+        # → one in-flight command keeps the dispatcher unambiguous.
+        self._cmd_lock: asyncio.Lock | None = None
         # Flag to prevent new connections during shutdown
         self._stopping = False
         # All fields below are touched from BOTH the worker thread (push
@@ -449,7 +466,13 @@ class BasePlugin:
             }))
             return
 
-        Domoticz.Log(f"Sending message: {text}")
+        # Internal "!"-commands have their own per-verb success log in the
+        # worker; don't double-log them here. User-typed messages still get
+        # a "Sending …" line so the inbox flow is traceable.
+        if text.startswith("!"):
+            Domoticz.Debug(f"Sending command: {text}")
+        else:
+            Domoticz.Log(f"Sending message: {text}")
         # Schedule the send on the worker's event loop. The coroutine re-reads
         # self._mc and checks is_connected itself — the worker may disconnect
         # between this scheduling call and the coroutine running, and we don't
@@ -733,6 +756,9 @@ class BasePlugin:
                 # lookup is keyed by the prefix.
                 "pubkey":        pk_full,
                 "pubkey_prefix": pk_full[:12] if pk_full else "",
+                # Per-contact query results (status / telemetry / neighbours)
+                # from req_* sync calls. None if never queried.
+                "query":         self._contact_query_results.get(node_name, {}),
             }
 
         inbox_dev = Devices.get(UNIT_INBOX)
@@ -752,6 +778,23 @@ class BasePlugin:
             "default_flood_scope": self._default_flood_scope or "",
             "favorites":    sorted(self._favorites),
             "device_info":  self._device_info or {},
+            # Full self_info snapshot — radio params, our coordinates, pubkey.
+            # Dashboard self-node side panel reads from here.
+            "self_info":    {
+                "name":           self._self_info_full.get("name", self._self_name),
+                "public_key":     self._self_info_full.get("public_key", ""),
+                "adv_lat":        self._self_info_full.get("adv_lat", 0.0),
+                "adv_lon":        self._self_info_full.get("adv_lon", 0.0),
+                "adv_type":       self._self_info_full.get("adv_type", 0),
+                "radio_freq":     self._self_info_full.get("radio_freq", 0),
+                "radio_bw":       self._self_info_full.get("radio_bw", 0),
+                "radio_sf":       self._self_info_full.get("radio_sf", 0),
+                "radio_cr":       self._self_info_full.get("radio_cr", 0),
+                "tx_power":       self._self_info_full.get("tx_power", 0),
+                "max_tx_power":   self._self_info_full.get("max_tx_power", 0),
+                "multi_acks":     self._self_info_full.get("multi_acks", 0),
+            },
+            "self_telemetry": self._self_telemetry or {},
             # Every channel slot the device has, so the dashboard can render
             # an Add/Remove button per slot. Non-empty slots have their
             # `name`; empty slots have name = "".
@@ -854,6 +897,7 @@ class BasePlugin:
         self._worker_loop = loop
         asyncio.set_event_loop(loop)
         self._stop_async = asyncio.Event()
+        self._cmd_lock   = asyncio.Lock()
         try:
             loop.run_until_complete(self._run())
         except asyncio.CancelledError:
@@ -1043,25 +1087,35 @@ class BasePlugin:
 
                 now = time.monotonic()
 
+                # Periodic refreshes also acquire the command lock so they
+                # don't interleave with user-initiated sends (which would
+                # trip the meshcore library's event-subscription race).
+                async def _locked(coro):
+                    if self._cmd_lock is None:
+                        await coro
+                        return
+                    async with self._cmd_lock:
+                        await coro
+
                 if now - last_stats >= STATS_REFRESH_S:
                     last_stats = now
                     try:
-                        await self._refresh_flood_scope(mc)
+                        await _locked(self._refresh_flood_scope(mc))
                     except Exception as exc:
                         Domoticz.Debug(f"Periodic flood_scope error: {exc}")
                     try:
-                        await self._refresh_device_info(mc)
+                        await _locked(self._refresh_device_info(mc))
                     except Exception as exc:
                         Domoticz.Debug(f"Periodic device_info error: {exc}")
                     try:
-                        await self._poll_self_stats(mc)
+                        await _locked(self._poll_self_stats(mc))
                     except Exception as exc:
                         Domoticz.Debug(f"Periodic self_stats error: {exc}")
 
                 if now - last_contacts >= CONTACTS_REFRESH_S:
                     last_contacts = now
                     try:
-                        await self._refresh_contacts(mc)
+                        await _locked(self._refresh_contacts(mc))
                     except Exception as exc:
                         Domoticz.Debug(f"Periodic contacts error: {exc}")
 
@@ -1195,8 +1249,28 @@ class BasePlugin:
     async def _refresh_flood_scope(self, mc):
         r = await asyncio.wait_for(mc.commands.get_default_flood_scope(), timeout=5.0)
         if r and r.type == EventType.DEFAULT_FLOOD_SCOPE:
-            scope_name = (r.payload or {}).get("scope_name", "") or ""
-            self._queue.put(("flood_scope", scope_name))
+            payload = r.payload or {}
+            scope_name = payload.get("scope_name", "") or ""
+            scope_key  = payload.get("scope_key", "")  or ""
+            # The firmware doesn't reliably zero-pad the 31-byte scope_name
+            # buffer when overwriting, so leftover bytes from a previous scope
+            # bleed back through the meshcore library's NUL-stripping decode.
+            # scope_key is the source of truth: it's the sha256-derived
+            # routing key. If it's all zeros, the scope is actually empty
+            # (global flood). Otherwise trim scope_name to the first run of
+            # valid scope characters.
+            if scope_key and set(scope_key) <= {"0"}:
+                cleaned = ""
+            else:
+                import re
+                m = re.match(r"^([#A-Za-z0-9_\-]+)", scope_name)
+                cleaned = m.group(1) if m else ""
+            if cleaned != scope_name:
+                Domoticz.Debug(
+                    f"Flood scope sanitised: raw_name={scope_name!r} "
+                    f"key_zero={scope_key and set(scope_key) <= {'0'}} cleaned={cleaned!r}"
+                )
+            self._queue.put(("flood_scope", cleaned))
 
     async def _refresh_device_info(self, mc):
         r = await asyncio.wait_for(mc.commands.send_device_query(), timeout=5.0)
@@ -1306,12 +1380,56 @@ class BasePlugin:
             Domoticz.Debug("No channel names found on device.")
         self._write_channel_names(channel_names)
 
+    async def _run_remote_query(self, verb: str, name: str, coro, kind: str):
+        """Run a req_*_sync call as a detached task and queue the result.
+
+        Detaches the slow remote round-trip from the main send pipeline so an
+        unresponsive contact can't stall other sends or periodic pollers.
+        Tasks are bounded to 30s. Held under the global command lock to avoid
+        the meshcore library's per-call event subscription race.
+        """
+        lock = self._cmd_lock
+        try:
+            if lock is not None:
+                await lock.acquire()
+            r = await asyncio.wait_for(coro, timeout=30.0)
+            ok = r is not None and getattr(r, "type", None) != EventType.ERROR
+            if ok:
+                payload = dict(r.payload or {}) if hasattr(r, "payload") else None
+                # neighbours payload may be a list — preserve as-is
+                if r.payload is not None and not isinstance(r.payload, dict):
+                    payload = r.payload
+                self._queue.put((kind, {"name": name, "data": payload}))
+            self._queue.put(("send_result", {
+                "ok": ok, "target": verb, "body": name,
+                "result": "received" if ok else "no response from remote",
+            }))
+        except asyncio.TimeoutError:
+            self._queue.put(("send_result", {
+                "ok": False, "target": verb, "body": name,
+                "result": "timeout — remote did not respond within 30s",
+            }))
+        except Exception as exc:
+            self._queue.put(("send_result", {
+                "ok": False, "target": verb, "body": name, "result": str(exc),
+            }))
+        finally:
+            try:
+                if lock is not None and lock.locked():
+                    lock.release()
+            except RuntimeError:
+                pass
+
     async def _send_message_for_text(self, text: str):
         """Wrapper invoked via run_coroutine_threadsafe by onDeviceModified.
 
         Reads the live mc instance inside the worker loop and short-circuits
         with a friendly result if we are mid-reconnect — the alternative is
         a stale mc reference that would error confusingly inside the library.
+
+        Holds the global command lock so concurrent rapid-fire sends (e.g.
+        applying a preset that issues 4 verbs back-to-back) don't trip the
+        meshcore library's per-call event-subscription race condition.
         """
         mc = self._mc
         if mc is None or not getattr(mc, "is_connected", False):
@@ -1320,7 +1438,12 @@ class BasePlugin:
                 "result": "not connected — auto-reconnect in progress",
             }))
             return
-        await self._send_message(mc, text)
+        lock = self._cmd_lock
+        if lock is None:
+            await self._send_message(mc, text)
+            return
+        async with lock:
+            await self._send_message(mc, text)
 
     async def _send_message(self, mc, text: str):
         """Send a message from the Mesh Send device value.
@@ -1336,6 +1459,369 @@ class BasePlugin:
         # Note: "!favorite ..." is intentionally NOT handled here — it is consumed
         # locally by onDeviceModified()/_handle_local_only_command() without
         # opening an MC session, since the operation only touches plugin state.
+
+        # ── Remote-contact verbs ─────────────────────────────────────────
+        # Helper: resolve a contact dict by adv_name from mc.contacts.
+        def _resolve_contact(name):
+            for c in mc.contacts.values():
+                if c.get("adv_name", "").strip() == name:
+                    return dict(c)
+            return None
+
+        # !reset_path <contact name>
+        if text.startswith("!reset_path "):
+            name = text[len("!reset_path "):].strip()
+            contact = _resolve_contact(name)
+            if contact is None:
+                self._queue.put(("send_result", {
+                    "ok": False, "target": "!reset_path", "body": name,
+                    "result": f"contact '{name}' not found"
+                }))
+                return
+            try:
+                # reset_path takes a pubkey-like key
+                pk = bytes.fromhex(contact.get("public_key", ""))
+                r = await asyncio.wait_for(mc.commands.reset_path(pk), timeout=8.0)
+                ok = r is not None and r.type == EventType.OK
+                if ok:
+                    Domoticz.Log(f"Path reset for '{name}'")
+                self._queue.put(("send_result", {
+                    "ok": ok, "target": "!reset_path", "body": name,
+                    "result": "applied" if ok else str(r),
+                }))
+            except Exception as exc:
+                self._queue.put(("send_result", {
+                    "ok": False, "target": "!reset_path", "body": name, "result": str(exc),
+                }))
+            return
+
+        # !req_status / !req_telemetry / !req_neighbours <contact name>
+        # Remote queries can block for tens of seconds while waiting for the
+        # remote node to respond. We run them as detached asyncio tasks so a
+        # slow / offline contact doesn't pin the worker loop and stall other
+        # sends or the periodic pollers.
+        for verb, fn_name, kind, ok_event_only in (
+            ("!req_status ",     "req_status_sync",     "contact_status",     False),
+            ("!req_telemetry ",  "req_telemetry_sync",  "contact_telemetry",  False),
+            ("!req_neighbours ", "req_neighbours_sync", "contact_neighbours", False),
+        ):
+            if text.startswith(verb):
+                name = text[len(verb):].strip()
+                contact = _resolve_contact(name)
+                if contact is None:
+                    self._queue.put(("send_result", {
+                        "ok": False, "target": verb.strip(), "body": name,
+                        "result": f"contact '{name}' not found"
+                    }))
+                    return
+                asyncio.create_task(self._run_remote_query(
+                    verb.strip(), name, getattr(mc.commands, fn_name)(contact), kind
+                ))
+                # Immediate optimistic ack so the UI doesn't sit on a spinner
+                self._queue.put(("send_result", {
+                    "ok": True, "target": verb.strip(), "body": name,
+                    "result": "querying (up to 30s)",
+                }))
+                return
+
+        # ── Self-node verbs ──────────────────────────────────────────────
+        # !send_advert [direct|flood]   default flood
+        if text.startswith("!send_advert"):
+            arg = text[len("!send_advert"):].strip().lower()
+            flood = arg != "direct"   # anything other than "direct" → flood
+            try:
+                r = await asyncio.wait_for(mc.commands.send_advert(flood=flood), timeout=8.0)
+                ok = r is not None and r.type == EventType.OK
+                if ok:
+                    Domoticz.Log(f"Advertisement sent ({'flood' if flood else 'direct'}).")
+                self._queue.put(("send_result", {
+                    "ok": ok, "target": "!send_advert",
+                    "body": "flood" if flood else "direct",
+                    "result": "applied" if ok else str(r),
+                }))
+            except Exception as exc:
+                self._queue.put(("send_result", {
+                    "ok": False, "target": "!send_advert", "body": arg, "result": str(exc),
+                }))
+            return
+
+        # !set_radio <freq_MHz> <bw_kHz> <sf 7-12> <cr 5-8>
+        if text.startswith("!set_radio"):
+            parts = text.split()
+            if len(parts) != 5:
+                self._queue.put(("send_result", {
+                    "ok": False, "target": "!set_radio", "body": text,
+                    "result": "syntax: !set_radio <freq MHz> <bw kHz> <sf 7-12> <cr 5-8>"
+                }))
+                return
+            try:
+                freq, bw, sf, cr = float(parts[1]), float(parts[2]), int(parts[3]), int(parts[4])
+            except ValueError as exc:
+                self._queue.put(("send_result", {
+                    "ok": False, "target": "!set_radio", "body": text, "result": f"parse error: {exc}"
+                }))
+                return
+            # Sanity bounds. ISM bands cover 100-2500 MHz; MeshCore typically
+            # runs 433 / 868 / 915 MHz. SF is 7-12, CR is 5-8 (= 4/5..4/8).
+            # Wide bandwidth range to allow narrow-band experimentation.
+            if not (100.0 <= freq <= 2500.0):
+                self._queue.put(("send_result", {
+                    "ok": False, "target": "!set_radio", "body": text,
+                    "result": "freq must be 100-2500 MHz"
+                }))
+                return
+            if not (5.0 <= bw <= 500.0):
+                self._queue.put(("send_result", {
+                    "ok": False, "target": "!set_radio", "body": text,
+                    "result": "bw must be 5-500 kHz"
+                }))
+                return
+            if not (7 <= sf <= 12):
+                self._queue.put(("send_result", {
+                    "ok": False, "target": "!set_radio", "body": text,
+                    "result": "sf must be 7-12"
+                }))
+                return
+            if not (5 <= cr <= 8):
+                self._queue.put(("send_result", {
+                    "ok": False, "target": "!set_radio", "body": text,
+                    "result": "cr must be 5-8 (=4/5..4/8)"
+                }))
+                return
+            try:
+                r = await asyncio.wait_for(mc.commands.set_radio(freq, bw, sf, cr), timeout=8.0)
+                ok = r is not None and r.type == EventType.OK
+                if ok:
+                    Domoticz.Log(f"Radio set: freq={freq} MHz bw={bw} kHz sf={sf} cr={cr}")
+                    # Optimistically update local snapshot — firmware will re-emit
+                    # SELF_INFO on next connect / advert anyway.
+                    self._self_info_full["radio_freq"] = freq
+                    self._self_info_full["radio_bw"]   = bw
+                    self._self_info_full["radio_sf"]   = sf
+                    self._self_info_full["radio_cr"]   = cr
+                    self._write_device_map()
+                self._queue.put(("send_result", {
+                    "ok": ok, "target": "!set_radio",
+                    "body": f"{freq}/{bw}/sf{sf}/cr{cr}",
+                    "result": "applied" if ok else str(r),
+                }))
+            except Exception as exc:
+                self._queue.put(("send_result", {
+                    "ok": False, "target": "!set_radio", "body": text, "result": str(exc),
+                }))
+            return
+
+        # !set_tx_power <dBm>
+        if text.startswith("!set_tx_power"):
+            parts = text.split()
+            if len(parts) != 2:
+                self._queue.put(("send_result", {
+                    "ok": False, "target": "!set_tx_power", "body": text,
+                    "result": "syntax: !set_tx_power <dBm>"
+                }))
+                return
+            try:
+                p = int(parts[1])
+            except ValueError as exc:
+                self._queue.put(("send_result", {
+                    "ok": False, "target": "!set_tx_power", "body": text, "result": str(exc),
+                }))
+                return
+            # Clamp against the firmware-reported maximum to avoid bricking
+            # the radio at hardware-illegal levels. Fall back to a generous
+            # 22 dBm ceiling when max isn't known yet.
+            max_tx = int(self._self_info_full.get("max_tx_power", 22) or 22)
+            if not (0 <= p <= max_tx):
+                self._queue.put(("send_result", {
+                    "ok": False, "target": "!set_tx_power", "body": str(p),
+                    "result": f"tx_power must be 0-{max_tx} dBm",
+                }))
+                return
+            try:
+                r = await asyncio.wait_for(mc.commands.set_tx_power(p), timeout=8.0)
+                ok = r is not None and r.type == EventType.OK
+                if ok:
+                    Domoticz.Log(f"TX power set to {p} dBm")
+                    self._self_info_full["tx_power"] = p
+                    self._write_device_map()
+                self._queue.put(("send_result", {
+                    "ok": ok, "target": "!set_tx_power", "body": str(p),
+                    "result": "applied" if ok else str(r),
+                }))
+            except Exception as exc:
+                self._queue.put(("send_result", {
+                    "ok": False, "target": "!set_tx_power", "body": text, "result": str(exc),
+                }))
+            return
+
+        # !set_name <new name>
+        if text.startswith("!set_name "):
+            new_name = text[len("!set_name "):].strip()
+            if not new_name:
+                self._queue.put(("send_result", {
+                    "ok": False, "target": "!set_name", "body": text,
+                    "result": "name must not be empty"
+                }))
+                return
+            # Defend in depth: HTML caps at 32 but the /json.htm endpoint
+            # bypasses that. Reject overlong / non-printable names.
+            if len(new_name) > 32:
+                self._queue.put(("send_result", {
+                    "ok": False, "target": "!set_name", "body": new_name,
+                    "result": "name must be ≤ 32 characters"
+                }))
+                return
+            if not all(c.isprintable() for c in new_name):
+                self._queue.put(("send_result", {
+                    "ok": False, "target": "!set_name", "body": new_name,
+                    "result": "name contains non-printable characters"
+                }))
+                return
+            try:
+                r = await asyncio.wait_for(mc.commands.set_name(new_name), timeout=8.0)
+                ok = r is not None and r.type == EventType.OK
+                if ok:
+                    Domoticz.Log(f"Device name set to: {new_name}")
+                    self._self_name = new_name
+                    self._self_info_full["name"] = new_name
+                    self._write_device_map()
+                self._queue.put(("send_result", {
+                    "ok": ok, "target": "!set_name", "body": new_name,
+                    "result": "applied" if ok else str(r),
+                }))
+            except Exception as exc:
+                self._queue.put(("send_result", {
+                    "ok": False, "target": "!set_name", "body": new_name, "result": str(exc),
+                }))
+            return
+
+        # !set_coords <lat> <lon>
+        if text.startswith("!set_coords"):
+            parts = text.split()
+            if len(parts) != 3:
+                self._queue.put(("send_result", {
+                    "ok": False, "target": "!set_coords", "body": text,
+                    "result": "syntax: !set_coords <lat> <lon>"
+                }))
+                return
+            try:
+                lat, lon = float(parts[1]), float(parts[2])
+            except ValueError as exc:
+                self._queue.put(("send_result", {
+                    "ok": False, "target": "!set_coords", "body": text, "result": str(exc),
+                }))
+                return
+            if not (-90.0 <= lat <= 90.0 and -180.0 <= lon <= 180.0):
+                self._queue.put(("send_result", {
+                    "ok": False, "target": "!set_coords", "body": f"{lat},{lon}",
+                    "result": "lat must be -90..90 and lon must be -180..180",
+                }))
+                return
+            try:
+                r = await asyncio.wait_for(mc.commands.set_coords(lat, lon), timeout=8.0)
+                ok = r is not None and r.type == EventType.OK
+                if ok:
+                    Domoticz.Log(f"Coords set: lat={lat} lon={lon}")
+                    self._self_info_full["adv_lat"] = lat
+                    self._self_info_full["adv_lon"] = lon
+                    self._write_device_map()
+                self._queue.put(("send_result", {
+                    "ok": ok, "target": "!set_coords", "body": f"{lat},{lon}",
+                    "result": "applied" if ok else str(r),
+                }))
+            except Exception as exc:
+                self._queue.put(("send_result", {
+                    "ok": False, "target": "!set_coords", "body": text, "result": str(exc),
+                }))
+            return
+
+        # !set_path_hash_mode <1|2|3>
+        #   1 = 1-byte hashes (max ~64 hops)
+        #   2 = 2-byte hashes (max ~32 hops)
+        #   3 = 3-byte hashes (max ~21 hops, default on SF8)
+        if text.startswith("!set_path_hash_mode"):
+            parts = text.split()
+            if len(parts) != 2:
+                self._queue.put(("send_result", {
+                    "ok": False, "target": "!set_path_hash_mode", "body": text,
+                    "result": "syntax: !set_path_hash_mode <1|2|3>"
+                }))
+                return
+            try:
+                mode = int(parts[1])
+                if mode < 1 or mode > 3:
+                    raise ValueError("mode must be 1, 2 or 3")
+            except ValueError as exc:
+                self._queue.put(("send_result", {
+                    "ok": False, "target": "!set_path_hash_mode", "body": text, "result": str(exc),
+                }))
+                return
+            # Wire format: firmware uses 0/1/2 to mean 1/2/3-byte hashes
+            # (off-by-one vs. the human-friendly value the UI uses). Translate
+            # at the boundary so the rest of the code can stay in 1/2/3.
+            wire_mode = mode - 1
+            try:
+                r = await asyncio.wait_for(mc.commands.set_path_hash_mode(wire_mode), timeout=8.0)
+                ok = r is not None and r.type == EventType.OK
+                if ok:
+                    Domoticz.Log(f"Path hash mode set to {mode}-byte (wire={wire_mode})")
+                    # Store the human-friendly value so the dashboard dropdown
+                    # selects the same option the user picked.
+                    self._device_info["path_hash_mode"] = mode
+                    self._write_device_map()
+                self._queue.put(("send_result", {
+                    "ok": ok, "target": "!set_path_hash_mode", "body": str(mode),
+                    "result": "applied" if ok else str(r),
+                }))
+            except Exception as exc:
+                self._queue.put(("send_result", {
+                    "ok": False, "target": "!set_path_hash_mode", "body": text, "result": str(exc),
+                }))
+            return
+
+        # !reboot
+        if text.startswith("!reboot"):
+            try:
+                # reboot doesn't wait for a response — the device acks then
+                # disconnects roughly 1s later. We only swallow disconnect-
+                # class exceptions (TimeoutError, ConnectionError) as expected;
+                # other errors (e.g. permission denied, bad state) are reported.
+                await asyncio.wait_for(mc.commands.reboot(), timeout=5.0)
+                Domoticz.Log("Reboot command sent.")
+                self._queue.put(("send_result", {
+                    "ok": True, "target": "!reboot", "body": "", "result": "sent",
+                }))
+            except (asyncio.TimeoutError, ConnectionError, OSError) as exc:
+                # Disconnection during reboot is expected — the device just
+                # reset and our serial/TCP link dropped. Treat as success.
+                Domoticz.Log(f"Reboot sent (device disconnected as expected: {exc})")
+                self._queue.put(("send_result", {
+                    "ok": True, "target": "!reboot", "body": "", "result": "sent",
+                }))
+            except Exception as exc:
+                Domoticz.Error(f"Reboot failed: {exc}")
+                self._queue.put(("send_result", {
+                    "ok": False, "target": "!reboot", "body": "", "result": str(exc),
+                }))
+            return
+
+        # !get_telemetry — local sensors
+        if text.startswith("!get_telemetry"):
+            try:
+                r = await asyncio.wait_for(mc.commands.get_self_telemetry(), timeout=8.0)
+                payload = dict(r.payload or {}) if r else {}
+                ok = r is not None
+                if ok:
+                    self._queue.put(("self_telemetry", payload))
+                self._queue.put(("send_result", {
+                    "ok": ok, "target": "!get_telemetry", "body": "",
+                    "result": "received" if ok else "no response",
+                }))
+            except Exception as exc:
+                self._queue.put(("send_result", {
+                    "ok": False, "target": "!get_telemetry", "body": "", "result": str(exc),
+                }))
+            return
 
         # ── Special: set / clear a channel slot ─────────────────────────────
         # Syntax:
@@ -1455,16 +1941,50 @@ class BasePlugin:
         # Syntax: "!flood_scope <name>"  (empty name = reset to global flood)
         if text.startswith("!flood_scope"):
             arg = text[len("!flood_scope"):].strip()
-            # Library treats "", "0", "None", "*" as reset
-            scope_to_set = arg if arg else None
+            # Library treats "", "0", "None", "*" as reset. We pass the empty
+            # string for reset (NOT None) because meshcore.commands.messaging
+            # has a bug where set_default_flood_scope(None) calls len(scope)
+            # on the still-None argument. Empty string takes the elif branch
+            # and resets correctly.
+            scope_to_set = arg or ""
+            # Mirror the library's disable sentinels so our UI/state stays in
+            # sync. "0", "*", "None" all mean "clear scope" — collapse to "".
+            if scope_to_set in ("0", "*", "None"):
+                scope_to_set = ""
             try:
-                result = await asyncio.wait_for(
-                    mc.commands.set_default_flood_scope(scope_to_set), timeout=10.0
-                )
+                # When clearing, also clear the runtime scope first. The firmware
+                # refuses set_default_flood_scope("") while a runtime scope is
+                # active (returns ERR_CODE_ILLEGAL_ARG). Clearing the runtime
+                # scope first removes that block.
+                if not scope_to_set:
+                    try:
+                        await asyncio.wait_for(
+                            mc.commands.set_flood_scope(""), timeout=10.0
+                        )
+                    except Exception as e:
+                        Domoticz.Debug(f"set_flood_scope clear pre-step failed: {e}")
+                    # Try each disable sentinel in turn: "0", "", "*".
+                    result = None
+                    for sentinel in ("0", "", "*"):
+                        try:
+                            result = await asyncio.wait_for(
+                                mc.commands.set_default_flood_scope(sentinel),
+                                timeout=10.0,
+                            )
+                        except Exception as e:
+                            Domoticz.Debug(f"set_default_flood_scope({sentinel!r}) raised: {e}")
+                            continue
+                        if result is not None and result.type == EventType.OK:
+                            Domoticz.Debug(f"Empty-scope clear accepted with sentinel {sentinel!r}")
+                            break
+                else:
+                    result = await asyncio.wait_for(
+                        mc.commands.set_default_flood_scope(scope_to_set), timeout=10.0
+                    )
                 ok = result is not None and result.type == EventType.OK
                 if ok:
                     # Normalize the stored value to what the device would echo back
-                    if scope_to_set is None:
+                    if not scope_to_set:
                         self._default_flood_scope = ""
                     else:
                         s = scope_to_set
@@ -1473,10 +1993,26 @@ class BasePlugin:
                         self._default_flood_scope = s
                     Domoticz.Log(f"Default flood scope set to {self._default_flood_scope or '(none)'}")
                     self._write_device_map()
+                # Detect the firmware's "ILLEGAL_ARG on empty-scope set" quirk
+                # and surface a user-facing hint about !reboot. The firmware
+                # refuses to wipe an active scope_key in-place; it only clears
+                # on power-on. Reproduces consistently on fw 27 (Apr 2026).
+                err_payload = (result.payload if result is not None else None) or {}
+                is_empty_scope_quirk = (
+                    not ok and not scope_to_set
+                    and isinstance(err_payload, dict)
+                    and err_payload.get("code_string") == "ERR_CODE_ILLEGAL_ARG"
+                )
+                if is_empty_scope_quirk:
+                    result_str = ("firmware refused empty-scope set while a scope is active. "
+                                  "Workaround: clear scope via the MeshCore phone app and save, "
+                                  "or send !reboot — the scope clears on startup.")
+                else:
+                    result_str = "applied" if ok else str(result)
                 self._queue.put(("send_result", {
                     "ok": ok, "target": "!flood_scope",
                     "body": arg or "(reset)",
-                    "result": "applied" if ok else str(result),
+                    "result": result_str,
                 }))
             except Exception as exc:
                 self._queue.put(("send_result", {
@@ -1579,6 +2115,7 @@ class BasePlugin:
                     self._node_types.pop(name, None)
                     self._node_last_advert.pop(name, None)
                     self._node_pubkey.pop(name, None)
+                    self._contact_query_results.pop(name, None)
                     self._node_last_activity.pop(name, None)
                     self._node_locations.pop(name, None)
                     if name in self._favorites:
@@ -1693,6 +2230,38 @@ class BasePlugin:
                 self._heartbeat_restored = True
         elif kind == "self_stats":
             self._handle_self_stats(item[1])
+        elif kind == "self_telemetry":
+            # Latest local-sensor reading from get_self_telemetry. Stored in
+            # the device map so the self-node side panel can render it.
+            self._self_telemetry = item[1] or {}
+            self._write_device_map()
+        elif kind == "contact_status":
+            d = item[1] or {}
+            name = d.get("name")
+            if name:
+                self._contact_query_results.setdefault(name, {})["status"] = {
+                    "t": int(time.time()), "data": d.get("data") or {}
+                }
+                self._write_device_map()
+        elif kind == "contact_telemetry":
+            d = item[1] or {}
+            name = d.get("name")
+            if name:
+                self._contact_query_results.setdefault(name, {})["telemetry"] = {
+                    "t": int(time.time()), "data": d.get("data") or {}
+                }
+                self._write_device_map()
+        elif kind == "contact_neighbours":
+            d = item[1] or {}
+            name = d.get("name")
+            if name:
+                # Neighbours payload can be a list — preserve as-is, JSON serializer
+                # will handle it.
+                data = d.get("data")
+                self._contact_query_results.setdefault(name, {})["neighbours"] = {
+                    "t": int(time.time()), "data": data
+                }
+                self._write_device_map()
         elif kind == "flood_scope":
             scope = (item[1] or "").strip()
             if scope != self._default_flood_scope:
@@ -1700,7 +2269,12 @@ class BasePlugin:
                 Domoticz.Debug(f"Default flood scope: {scope or '(none)'}")
                 self._write_device_map()
         elif kind == "device_info":
-            info = item[1] or {}
+            info = dict(item[1] or {})
+            # Firmware reports path_hash_mode in wire format (0/1/2 = 1/2/3
+            # byte). The rest of our code and the dashboard work in the
+            # human-friendly 1/2/3 form, so translate at the boundary.
+            if "path_hash_mode" in info and isinstance(info["path_hash_mode"], int):
+                info["path_hash_mode"] = info["path_hash_mode"] + 1
             if info != self._device_info:
                 self._device_info = info
                 fw = info.get("fw ver", "?")
@@ -1713,6 +2287,9 @@ class BasePlugin:
             Domoticz.Debug(f"Self info: name={name}, freq={item[1].get('radio_freq')} MHz")
             if name and name != self._self_name:
                 self._self_name = name
+            # Keep a full snapshot for the dashboard's self-node side panel.
+            self._self_info_full = dict(item[1])
+            self._write_device_map()
             # Track device-side settings so the dashboard can show / toggle them.
             # Skip while in the user-set grace window — some firmware returns
             # the previous value briefly while persisting to flash.
@@ -1739,9 +2316,12 @@ class BasePlugin:
             # a sent mesh message.
             is_internal = isinstance(d.get("target"), str) and d["target"].startswith("!")
             if d["ok"]:
-                Domoticz.Log(f"Message sent to '{d['target']}': {d['body']}")
                 if is_internal:
+                    # The verb handler already logged its own success message;
+                    # don't duplicate. Debug-level keeps it greppable.
+                    Domoticz.Debug(f"Internal command ok: {d['target']} {d['body']}")
                     return
+                Domoticz.Log(f"Message sent to '{d['target']}': {d['body']}")
                 self._sent_count += 1
                 if UNIT_MSGS_SENT_ in Devices:
                     Devices[UNIT_MSGS_SENT_].Update(nValue=0, sValue=str(self._sent_count))

@@ -189,6 +189,29 @@
             transition: color 0.12s, background 0.12s;
         }
         .map-toggle:hover { color: var(--green); background: rgba(76, 175, 125, 0.08); }
+        /* Card action button: opens the self/contact info side panel.
+           Sits in the top-right area of the card alongside the status badge. */
+        .card-action-btn {
+            position: absolute;
+            top: 10px;
+            right: 36px;
+            z-index: 2;
+            width: 20px;
+            height: 20px;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            background: transparent;
+            border: none;
+            color: var(--text);
+            opacity: 0.85;
+            font-size: 0.85rem;
+            cursor: pointer;
+            padding: 0;
+            border-radius: 50%;
+            transition: color 0.12s, background 0.12s, opacity 0.12s;
+        }
+        .card-action-btn:hover { color: var(--accent); opacity: 1; background: var(--bg); }
         /* List-view map indicator before the favorite slot */
         .row-map {
             display: inline-flex;
@@ -340,20 +363,21 @@
         .row-fav.empty { visibility: hidden; }
 
         .badge {
-            font-size: 1rem;
+            font-size: 0.85rem;
             line-height: 1;
             display: inline-flex;
             align-items: center;
             justify-content: center;
-            width: 24px;
-            height: 24px;
+            width: 20px;
+            height: 20px;
             border-radius: 50%;
             box-shadow: 0 1px 4px rgba(0, 0, 0, 0.35);
+            flex-shrink: 0;
         }
-        .badge i { font-size: 1rem; }
+        .badge i { font-size: 0.85rem; }
         .badge.online  { background: #1a3d2b; color: var(--green); }
         .badge.offline { background: #3d1a1a; color: var(--red); }
-        .badge.unknown { background: #2e2e2e; color: var(--muted); }
+        .badge.unknown { background: #2e2e2e; color: var(--text); }
         .badge.self    { background: #1a2e3d; color: var(--accent); }
 
         .node-metrics {
@@ -1156,6 +1180,45 @@
         .chan-row .cnt   { text-align: right; font-variant-numeric: tabular-nums; }
         .chan-row.known  .name { color: var(--text); opacity: 1; font-style: normal; }
 
+        /* Heard-nodes list */
+        .heard-list { display: flex; flex-direction: column; gap: 4px; }
+        .heard-row {
+            display: grid;
+            grid-template-columns: 1fr;
+            gap: 2px;
+            padding: 6px 8px;
+            background: rgba(255,255,255,0.025);
+            border: 1px solid var(--border);
+            border-radius: 5px;
+        }
+        .heard-row .heard-name { color: var(--text); font-weight: 600; font-size: 0.86rem; }
+        .heard-row .heard-meta { display: flex; gap: 5px; flex-wrap: wrap; }
+        .heard-chip {
+            font-size: 0.66rem;
+            text-transform: uppercase;
+            letter-spacing: 0.04em;
+            background: var(--bg);
+            color: var(--text);
+            opacity: 0.85;
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            padding: 1px 6px;
+        }
+        .heard-pk {
+            font-family: ui-monospace, "Cascadia Code", "Consolas", monospace;
+            font-size: 0.72rem;
+            color: var(--accent);
+            opacity: 0.85;
+            cursor: help;
+        }
+        .heard-extra {
+            display: flex;
+            justify-content: space-between;
+            font-size: 0.72rem;
+            color: var(--text);
+            opacity: 0.7;
+        }
+
         /* Mini SNR sparkline on cards */
         .sparkline {
             display: block;
@@ -1167,6 +1230,94 @@
             padding-top: 2px;
         }
         .sparkline:hover { opacity: 1; }
+
+        /* Self / contact info side panel form styling */
+        .self-section {
+            font-size: 0.7rem;
+            color: var(--accent);
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 0.06em;
+            border-bottom: 1px solid var(--accent);
+            padding-bottom: 4px;
+            margin-top: 8px;
+        }
+        .self-row {
+            display: grid;
+            grid-template-columns: 130px 1fr;
+            gap: 8px;
+            align-items: center;
+            font-size: 0.82rem;
+        }
+        .self-row label {
+            color: var(--text);
+            opacity: 0.85;
+        }
+        .self-row input[type="text"],
+        .self-row input[type="number"],
+        .self-row select,
+        .self-input-wrap input[type="text"],
+        .self-input-wrap select {
+            background: var(--bg);
+            border: 1px solid var(--border);
+            color: var(--text);
+            border-radius: 4px;
+            padding: 4px 8px;
+            font-family: inherit;
+            font-size: 0.82rem;
+            min-width: 0;
+            width: 100%;
+        }
+        .self-row input[readonly] { opacity: 0.7; cursor: not-allowed; }
+        .self-value {
+            color: var(--text);
+            font-variant-numeric: tabular-nums;
+        }
+        .self-grid-2 {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 6px 12px;
+        }
+        .self-grid-2 .self-row {
+            grid-template-columns: 1fr;
+            gap: 2px;
+        }
+        .self-grid-2 .self-row label {
+            font-size: 0.7rem;
+            text-transform: uppercase;
+            letter-spacing: 0.04em;
+            opacity: 0.7;
+        }
+        .self-input-wrap {
+            display: flex;
+            gap: 6px;
+            align-items: center;
+        }
+        .self-input-wrap input { flex: 1; }
+        .self-btn {
+            background: var(--bg);
+            border: 1px solid var(--border);
+            color: var(--text);
+            padding: 5px 12px;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 0.78rem;
+            font-family: inherit;
+            white-space: nowrap;
+        }
+        .self-btn:hover { color: var(--accent); border-color: var(--accent); }
+        .self-btn.primary { background: var(--accent); color: var(--bg); border-color: var(--accent); }
+        .self-btn.primary:hover { opacity: 0.85; color: var(--bg); }
+        .self-btn.danger:hover { color: #e63946; border-color: #e63946; }
+        .self-btn:disabled { opacity: 0.4; cursor: not-allowed; pointer-events: none; }
+        /* Highlight inputs that a Save / Apply button will read or overwrite. */
+        .preset-highlight {
+            outline: 2px solid var(--accent);
+            outline-offset: 1px;
+            border-radius: 4px;
+            transition: outline-color 0.12s;
+        }
+        .preset-highlight-label { color: var(--accent) !important; opacity: 1 !important; }
 
         /* Direct (1-hop) neighbour badge */
         .direct-badge {
@@ -1373,6 +1524,7 @@
                 <button class="rx-tool-btn" onclick="_openSidePanel('heatmap')" title="24h packet rate heatmap"><i class="fa-solid fa-grip"></i></button>
                 <button class="rx-tool-btn" onclick="_openSidePanel('channels')" title="Channel auto-discovery"><i class="fa-solid fa-hashtag"></i></button>
                 <button class="rx-tool-btn" onclick="_openSidePanel('topology')" title="Mesh topology: all contacts + paths"><i class="fa-solid fa-sitemap"></i></button>
+                <button class="rx-tool-btn" onclick="_openSidePanel('heard')" title="Heard nodes — adverts from nodes not in your contacts"><i class="fa-solid fa-satellite-dish"></i></button>
             </div>
             <span id="last-updated"></span>
             <button id="refresh-btn" onclick="loadData()">↻ Refresh</button>
@@ -1741,6 +1893,14 @@
                 ? `<svg class="sparkline" data-pubkey="${escHtml(pkPrefix)}" preserveAspectRatio="none"></svg>`
                 : "";
 
+            // Self-node card gets a "gear" button that opens the self side
+            // panel (radio params, identity, send-advert, reboot, telemetry).
+            // Remote cards get an "info" button that opens the contact side
+            // panel (reset path, status / telemetry / neighbours queries).
+            const cardActionBtn = isSelf
+                ? `<button class="card-action-btn" data-action="open-self" title="Self-node info & radio settings"><i class="fa-solid fa-sliders"></i></button>`
+                : `<button class="card-action-btn" data-action="open-contact" data-node="${escHtml(nodeName)}" title="Contact info & remote queries"><i class="fa-solid fa-circle-info"></i></button>`;
+
             return `
         <div class="node-card" data-node="${escHtml(nodeName)}">
           <div class="node-header">
@@ -1753,6 +1913,7 @@
           <div class="node-metrics">${metricsHtml}</div>
           ${sparklineHtml}
           ${settingsHtml}
+          ${cardActionBtn}
           ${mapHtml}
           ${favHtml}
         </div>`;
@@ -2899,6 +3060,7 @@
                 if (view === "traffic")  _renderTrafficIfOpen();
                 if (view === "channels") _renderChannelsIfOpen();
                 if (view === "heatmap")  _renderHeatmapIfOpen();
+                if (view === "heard")    _renderHeardIfOpen();
             });
             if (view === "firehose") {
                 title.textContent  = "RF firehose";
@@ -2951,6 +3113,22 @@
                 // so Leaflet can attach.
                 _ensureMapCanvas();
                 _renderTopology();
+            } else if (view === "heard") {
+                title.textContent  = "Heard nodes";
+                coords.textContent = "Adverts from nodes not in your contacts";
+                body.innerHTML = `<div class="panel-view" id="heard-view"></div>`;
+                _renderHeardIfOpen();
+            } else if (view === "self") {
+                title.textContent  = "Connected node";
+                coords.textContent = "Identity, radio, advert, telemetry";
+                body.innerHTML = `<div class="panel-view" id="self-view"></div>`;
+                _renderSelfPanel();
+            } else if (view && view.startsWith("contact:")) {
+                const name = view.slice("contact:".length);
+                title.textContent  = name;
+                coords.textContent = "Remote queries";
+                body.innerHTML = `<div class="panel-view" id="contact-view" data-node="${escHtml(name)}"></div>`;
+                _renderContactPanel(name);
             }
             panel.classList.add("open");
             backdrop.classList.add("open");
@@ -2998,10 +3176,14 @@
             const list = document.getElementById("firehose-list");
             if (!list) return;
             const entries = (_rxLog && _rxLog.entries) || [];
-            // Append only what is newer than the last cursor
+            // Append only what is newer than the last cursor. The plugin
+            // stores entries oldest-first; we render newest-first so the
+            // initial dump and incremental appends both put the freshest
+            // packet at the top of the list.
             const fresh = entries.filter(e => (e._t || 0) > _rxLogLastSeen);
             if (!fresh.length) return;
             _rxLogLastSeen = fresh[fresh.length - 1]._t || _rxLogLastSeen;
+            fresh.reverse();
             // Keep most recent 200 in DOM
             const ADV_TYPE_NAME = { 1: "Contact", 2: "Repeater", 3: "Room Server", 4: "Sensor" };
             const rowsHtml = fresh.map(e => {
@@ -3231,6 +3413,77 @@
             try { _renderChannelChips(_allChannelChips()); } catch (_) { /* before inbox render */ }
         }
 
+        // Build the "heard but not in contacts" list. We scan recent ADVERT
+        // entries in the RX log, dedupe by adv_key (full pubkey), and filter
+        // out any pubkey that's already in the device map's contact nodes.
+        function _renderHeardIfOpen() {
+            if (!_isOpen("heard")) return;
+            const view = document.getElementById("heard-view");
+            if (!view) return;
+            const ADV_TYPE = { 1: "Contact", 2: "Repeater", 3: "Room Server", 4: "Sensor" };
+            const knownPks = new Set();
+            const nodes = (_deviceMap && _deviceMap.nodes) || {};
+            for (const n of Object.values(nodes)) {
+                if (n.pubkey) knownPks.add(n.pubkey);
+            }
+            // Aggregate by pubkey — keep most recent advert per node
+            const heard = {};
+            for (const e of (_rxLog.entries || [])) {
+                if (e.payload_typename !== "ADVERT" || !e.adv_key) continue;
+                if (knownPks.has(e.adv_key)) continue;   // already a contact
+                const prev = heard[e.adv_key];
+                if (!prev || (e._t || 0) > (prev._t || 0)) heard[e.adv_key] = e;
+            }
+            const list = Object.values(heard).sort((a, b) => (b._t || 0) - (a._t || 0));
+            if (!list.length) {
+                view.innerHTML = `
+                    <div style="font-size:0.82rem;color:var(--text);opacity:0.85;line-height:1.5">
+                        No unknown adverts heard in the rolling RX log window
+                        (last ~250 frames). Try waiting for repeaters to beacon,
+                        or trigger a flood-advert from a friend.
+                    </div>`;
+                return;
+            }
+            const rows = list.map(e => {
+                const t  = e._t ? new Date(e._t * 1000).toLocaleTimeString() : "?";
+                const sig = `${e.snr ?? "?"}/${e.rssi ?? "?"}`;
+                const loc = (e.adv_lat && e.adv_lon)
+                    ? `${e.adv_lat.toFixed(4)}, ${e.adv_lon.toFixed(4)}`
+                    : "—";
+                const kind = ADV_TYPE[e.adv_type] || "?";
+                const hops = e.path_len !== undefined ? `${e.path_len}h` : "?";
+                return `<div class="heard-row">
+                    <div class="heard-name">${escHtml(e.adv_name || "(unnamed)")}</div>
+                    <div class="heard-meta">
+                        <span class="heard-chip">${escHtml(kind)}</span>
+                        <span class="heard-chip">${hops}</span>
+                        <span class="heard-chip">${escHtml(sig)} dB/dBm</span>
+                    </div>
+                    <div class="heard-pk" title="${escHtml(e.adv_key)}">${escHtml(e.adv_key.slice(0, 16))}…</div>
+                    <div class="heard-extra">
+                        <span title="Last heard at">${escHtml(t)}</span>
+                        <span>${escHtml(loc)}</span>
+                    </div>
+                </div>`;
+            }).join("");
+            view.innerHTML = `
+                <div style="font-size:0.82rem;color:var(--text);opacity:0.85;line-height:1.5">
+                    Adverts from nodes whose pubkey isn't in your contacts.
+                    One row per pubkey, with the most recent advert's signal
+                    and path-length. Nodes can stay off the contact list for
+                    a few reasons:
+                    <ul style="margin:4px 0 4px 16px;padding:0">
+                      <li>Auto-add contacts is disabled (Connected Node Settings).</li>
+                      <li>The contact slot table on the device is full.</li>
+                      <li>Filtering by advert type — some firmware versions
+                          skip auto-adding repeaters / room servers.</li>
+                      <li>The advert arrived between connect cycles before
+                          the contact list refresh ran.</li>
+                    </ul>
+                </div>
+                <div class="heard-list">${rows}</div>`;
+        }
+
         function _renderHeatmapIfOpen() {
             if (!_isOpen("heatmap")) return;
             const view = document.getElementById("heatmap-view");
@@ -3369,6 +3622,526 @@
             init();
         }
 
+        // ── Self-node side panel ─────────────────────────────────────────
+        // Renders identity + radio + actions. Uses the same panel-view
+        // styling as the other RX-log views.
+        const LS_RADIO_PRESETS = "meshcore.radioPresets";
+        const LS_HAS_GPS = "meshcore.selfHasGps";
+
+        function _loadRadioPresets() {
+            try { return JSON.parse(localStorage.getItem(LS_RADIO_PRESETS) || "[]"); }
+            catch (_) { return []; }
+        }
+        function _saveRadioPresets(arr) {
+            try { localStorage.setItem(LS_RADIO_PRESETS, JSON.stringify(arr)); } catch (_) {}
+        }
+        function _hasGpsHardware() {
+            return localStorage.getItem(LS_HAS_GPS) === "1";
+        }
+        function _setHasGpsHardware(v) {
+            try { localStorage.setItem(LS_HAS_GPS, v ? "1" : "0"); } catch (_) {}
+        }
+
+        // Accept both "12,34" (EU locale) and "12.34" decimal separators —
+        // <input type=number> normalisation is inconsistent across browsers
+        // and Domoticz users come from many locales.
+        function _normDecimal(v) {
+            if (v === null || v === undefined) return "";
+            return String(v).trim().replace(",", ".");
+        }
+
+        async function _sendDeviceCmd(cmd) {
+            const sendIdx = _deviceMap && _deviceMap.send_idx;
+            if (!sendIdx) { alert("Mesh Send device not found."); return false; }
+            const url = `/json.htm?type=command&param=udevice&idx=${sendIdx}&nvalue=0&svalue=${encodeURIComponent(cmd)}`;
+            try {
+                const r = await fetch(url, { method: "GET" });
+                return r.ok;
+            } catch (_) { return false; }
+        }
+
+        function _renderSelfPanel() {
+            const view = document.getElementById("self-view");
+            if (!view) return;
+            const si = (_deviceMap && _deviceMap.self_info) || {};
+            const st = (_deviceMap && _deviceMap.self_telemetry) || {};
+            const hasGps = _hasGpsHardware();
+            const presets = _loadRadioPresets();
+            const SF_OPTS = [7,8,9,10,11,12].map(v =>
+                `<option value="${v}"${v === si.radio_sf ? " selected" : ""}>${v}</option>`).join("");
+            // Coding rate in MeshCore firmware: 5..8 = 4/5..4/8
+            const CR_OPTS = [5,6,7,8].map(v =>
+                `<option value="${v}"${v === si.radio_cr ? " selected" : ""}>4/${v}</option>`).join("");
+            const presetOpts = presets.length
+                ? `<option value="">— select preset —</option>` +
+                  presets.map((p, i) => {
+                      const parts = [`${p.freq}/${p.bw}/SF${p.sf}/CR4/${p.cr}`];
+                      if (p.tx_power)       parts.push(`${p.tx_power}dBm`);
+                      if (p.path_hash_mode) parts.push(`${p.path_hash_mode}-byte`);
+                      if (p.flood_scope)    parts.push(p.flood_scope);
+                      return `<option value="${i}">${escHtml(p.name)} (${escHtml(parts.join(" · "))})</option>`;
+                  }).join("")
+                : `<option value="">(no presets saved)</option>`;
+
+            view.innerHTML = `
+                <div class="self-section">Identity</div>
+                <div class="self-row">
+                    <label>Name</label>
+                    <div class="self-input-wrap">
+                        <input id="self-name" type="text" value="${escHtml(si.name || "")}" maxlength="32">
+                        <button class="self-btn" data-action="set-name">Save</button>
+                    </div>
+                </div>
+                <div class="self-row">
+                    <label>Public key</label>
+                    <div class="self-input-wrap">
+                        <input id="self-pubkey" type="text" value="${escHtml(si.public_key || "")}" readonly>
+                        <button class="self-btn" data-action="copy-pubkey">Copy</button>
+                    </div>
+                </div>
+                <div class="self-row">
+                    <label>Adv type</label>
+                    <span class="self-value">${escHtml(({1:"Contact",2:"Repeater",3:"Room Server",4:"Sensor"})[si.adv_type] || si.adv_type || "?")}</span>
+                </div>
+
+                <div class="self-section">Coordinates
+                    <label style="float:right;font-weight:normal;font-size:0.78rem">
+                        <input type="checkbox" id="self-has-gps"${hasGps ? " checked" : ""}>
+                        I have GPS hardware
+                    </label>
+                </div>
+                <div style="font-size:0.74rem;color:var(--text);opacity:0.7;line-height:1.4">
+                    ${hasGps
+                        ? "GPS hardware is set, the device updates its own coordinates — manual edit disabled."
+                        : "No GPS hardware — set the coordinates manually so the device advertises a location."}
+                </div>
+                <div class="self-row">
+                    <label>Latitude</label>
+                    <input id="self-lat" type="text" inputmode="decimal" value="${si.adv_lat ?? 0}"${hasGps ? " readonly" : ""}>
+                </div>
+                <div class="self-row">
+                    <label>Longitude</label>
+                    <input id="self-lon" type="text" inputmode="decimal" value="${si.adv_lon ?? 0}"${hasGps ? " readonly" : ""}>
+                </div>
+                ${hasGps ? "" : `<button class="self-btn primary" data-action="set-coords">Apply coordinates</button>`}
+
+                <div class="self-section">Radio</div>
+                <div class="self-grid-2">
+                    <div class="self-row">
+                        <label>Frequency (MHz)</label>
+                        <input id="self-freq" type="text" inputmode="decimal" value="${si.radio_freq ?? ""}">
+                    </div>
+                    <div class="self-row">
+                        <label>Bandwidth (kHz)</label>
+                        <input id="self-bw" type="text" inputmode="decimal" value="${si.radio_bw ?? ""}">
+                    </div>
+                    <div class="self-row">
+                        <label>Spreading factor</label>
+                        <select id="self-sf">${SF_OPTS}</select>
+                    </div>
+                    <div class="self-row">
+                        <label>Coding rate</label>
+                        <select id="self-cr">${CR_OPTS}</select>
+                    </div>
+                    <div class="self-row">
+                        <label>TX power (dBm)</label>
+                        <input id="self-tx" type="number" min="0" max="${si.max_tx_power || 22}" value="${si.tx_power ?? ""}">
+                    </div>
+                    <div class="self-row">
+                        <label>Max TX power</label>
+                        <span class="self-value">${si.max_tx_power ?? "?"} dBm</span>
+                    </div>
+                </div>
+                <div style="display:flex;gap:6px;flex-wrap:wrap">
+                    <button class="self-btn primary" data-action="apply-radio">Apply radio</button>
+                    <button class="self-btn" data-action="apply-tx">Apply TX power</button>
+                </div>
+
+                <div class="self-section">Routing</div>
+                <div class="self-row">
+                    <label title="MeshCore stores N bytes per hop in the packet path field.
+1-byte ≈ 64 max hops but more hash collisions.
+2-byte ≈ 32 max hops, less collision.
+3-byte ≈ 21 max hops, near-zero collision (default on SF8).
+Larger = more reliable routing but smaller mesh diameter.">Path hash size</label>
+                    <div class="self-input-wrap">
+                        <select id="self-phm">
+                            <option value="1"${(_deviceMap?.device_info?.path_hash_mode === 1) ? " selected" : ""}>1 byte (max ~64 hops)</option>
+                            <option value="2"${(_deviceMap?.device_info?.path_hash_mode === 2) ? " selected" : ""}>2 byte (max ~32 hops)</option>
+                            <option value="3"${(_deviceMap?.device_info?.path_hash_mode === 3 || !_deviceMap?.device_info?.path_hash_mode) ? " selected" : ""}>3 byte (max ~21 hops, default on SF8)</option>
+                        </select>
+                        <button class="self-btn" data-action="apply-phm">Apply</button>
+                    </div>
+                </div>
+                <div class="self-row">
+                    <label title="Default flood scope tag — empty = global flood. e.g. #nl or #europe.">Default flood scope</label>
+                    <div class="self-input-wrap">
+                        <input id="self-flood-scope" type="text" maxlength="31" placeholder="(global)" value="${escHtml(_deviceMap?.default_flood_scope || "")}">
+                        <button class="self-btn" data-action="apply-flood-scope">Apply</button>
+                    </div>
+                </div>
+
+                <div class="self-section">Presets</div>
+                <div class="self-input-wrap">
+                    <select id="self-preset" style="flex:1">${presetOpts}</select>
+                    <button class="self-btn" data-action="apply-preset" disabled>Apply</button>
+                    <button class="self-btn" data-action="save-preset">Save current as…</button>
+                    <button class="self-btn" data-action="delete-preset" title="Delete the selected preset" disabled><i class="fa-solid fa-trash"></i></button>
+                </div>
+
+                <div class="self-section">Actions</div>
+                <div class="self-input-wrap">
+                    <label style="display:inline-flex;align-items:center;gap:4px;font-size:0.78rem">
+                        <input type="radio" name="advert-mode" value="flood" checked> Flood
+                    </label>
+                    <label style="display:inline-flex;align-items:center;gap:4px;font-size:0.78rem">
+                        <input type="radio" name="advert-mode" value="direct"> Direct
+                    </label>
+                    <button class="self-btn primary" data-action="send-advert">Send advert</button>
+                </div>
+                <div class="self-input-wrap">
+                    <button class="self-btn" data-action="get-telemetry">Get telemetry</button>
+                    <button class="self-btn danger" data-action="reboot">Reboot device</button>
+                </div>
+                <div id="self-telemetry-box" style="font-size:0.78rem;color:var(--text);${Object.keys(st).length ? "" : "display:none"}">
+                    ${_renderTelemetryBox(st)}
+                </div>
+            `;
+            // Wire buttons
+            view.querySelectorAll(".self-btn").forEach(btn => {
+                btn.onclick = () => _selfPanelAction(btn.dataset.action);
+            });
+
+            // Hovering "Apply" preset or "Save current as…" highlights every
+            // form field that the preset captures, so the user knows at a
+            // glance what is in / not in the preset.
+            const PRESET_FIELD_IDS = ["self-freq", "self-bw", "self-sf", "self-cr",
+                                      "self-tx", "self-phm", "self-flood-scope"];
+            const onHi = () => {
+                PRESET_FIELD_IDS.forEach(id => {
+                    const el = document.getElementById(id);
+                    if (!el) return;
+                    el.classList.add("preset-highlight");
+                    // Also highlight the row's label so it's obvious in the grid
+                    const row = el.closest(".self-row");
+                    if (row) {
+                        const lab = row.querySelector("label");
+                        if (lab) lab.classList.add("preset-highlight-label");
+                    }
+                });
+            };
+            const offHi = () => {
+                document.querySelectorAll(".preset-highlight").forEach(el => el.classList.remove("preset-highlight"));
+                document.querySelectorAll(".preset-highlight-label").forEach(el => el.classList.remove("preset-highlight-label"));
+            };
+            view.querySelectorAll('.self-btn[data-action="apply-preset"], .self-btn[data-action="save-preset"]').forEach(btn => {
+                btn.addEventListener("mouseenter", onHi);
+                btn.addEventListener("mouseleave", offHi);
+                btn.addEventListener("focus", onHi);
+                btn.addEventListener("blur", offHi);
+            });
+            const gpsCb = document.getElementById("self-has-gps");
+            if (gpsCb) gpsCb.onchange = () => {
+                _setHasGpsHardware(gpsCb.checked);
+                _renderSelfPanel();   // re-render to enable/disable inputs
+            };
+            // When the user picks a preset from the dropdown, mirror its
+            // values into the form so they see what Apply will send. Doesn't
+            // actually fire any commands yet — only the Apply button does.
+            // Also gate the Apply/Delete buttons on a valid selection.
+            const presetSel = document.getElementById("self-preset");
+            const applyBtn  = view.querySelector('.self-btn[data-action="apply-preset"]');
+            const deleteBtn = view.querySelector('.self-btn[data-action="delete-preset"]');
+            const syncPresetButtons = () => {
+                const hasSel = presetSel && presetSel.value !== "";
+                if (applyBtn)  applyBtn.disabled  = !hasSel;
+                if (deleteBtn) deleteBtn.disabled = !hasSel;
+            };
+            if (presetSel) presetSel.onchange = () => {
+                syncPresetButtons();
+                const idx = presetSel.value;
+                if (idx === "") return;
+                const ps = _loadRadioPresets();
+                const p = ps[idx];
+                if (!p) return;
+                const setIf = (id, v) => {
+                    const el = document.getElementById(id);
+                    if (el && v !== undefined && v !== null) el.value = String(v);
+                };
+                setIf("self-freq",        p.freq);
+                setIf("self-bw",          p.bw);
+                setIf("self-sf",          p.sf);
+                setIf("self-cr",          p.cr);
+                setIf("self-tx",          p.tx_power);
+                setIf("self-phm",         p.path_hash_mode);
+                if (p.flood_scope !== undefined) setIf("self-flood-scope", p.flood_scope);
+            };
+            syncPresetButtons();
+        }
+
+        function _renderTelemetryBox(st, title = "Last telemetry reading") {
+            if (!st || !Object.keys(st).length) return "";
+            const rows = Object.entries(st).map(([k, v]) =>
+                `<div class="self-row" style="grid-template-columns: 130px 1fr">
+                    <span style="font-size:0.74rem;opacity:0.8;text-transform:uppercase;letter-spacing:0.04em">${escHtml(k)}</span>
+                    <span>${escHtml(typeof v === "object" ? JSON.stringify(v) : String(v))}</span>
+                </div>`).join("");
+            return title ? `<div class="self-section">${escHtml(title)}</div>${rows}` : rows;
+        }
+
+        // Wrap a self-panel command so the user sees feedback and the panel
+        // re-renders with fresh values after the plugin processes the change.
+        async function _selfPanelApply(cmd, btnAction) {
+            const btn = btnAction ? document.querySelector(`.self-btn[data-action="${btnAction}"]`) : null;
+            const orig = btn ? btn.innerHTML : null;
+            if (btn) { btn.disabled = true; btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i>'; }
+            await _sendDeviceCmd(cmd);
+            // The plugin updates the device map after a successful set; give
+            // it a moment, then reload + re-render so the user sees the new
+            // values (and a repeat click won't double-fire).
+            setTimeout(async () => {
+                await _loadDeviceMap();
+                _renderSelfPanel();
+            }, 800);
+            // The re-render replaces the button DOM, but if it failed early
+            // (no device map yet) we still restore the original state.
+            if (btn) {
+                setTimeout(() => { try { btn.disabled = false; btn.innerHTML = orig; } catch (_) {} }, 1200);
+            }
+        }
+
+        async function _selfPanelAction(action) {
+            const si = (_deviceMap && _deviceMap.self_info) || {};
+            if (action === "copy-pubkey") {
+                const el = document.getElementById("self-pubkey");
+                if (el && el.value) {
+                    navigator.clipboard.writeText(el.value).then(
+                        () => { el.style.background = "rgba(38,196,124,0.20)"; setTimeout(() => el.style.background = "", 600); },
+                        () => alert("Copy failed — select the text manually.")
+                    );
+                }
+                return;
+            }
+            if (action === "set-name") {
+                const v = document.getElementById("self-name").value.trim();
+                if (!v) return;
+                await _selfPanelApply(`!set_name ${v}`, action);
+                return;
+            }
+            if (action === "set-coords") {
+                const lat = _normDecimal(document.getElementById("self-lat").value);
+                const lon = _normDecimal(document.getElementById("self-lon").value);
+                if (lat === "" || lon === "") return;
+                await _selfPanelApply(`!set_coords ${lat} ${lon}`, action);
+                return;
+            }
+            if (action === "apply-radio") {
+                const f  = _normDecimal(document.getElementById("self-freq").value);
+                const bw = _normDecimal(document.getElementById("self-bw").value);
+                const sf = document.getElementById("self-sf").value;
+                const cr = document.getElementById("self-cr").value;
+                if (!f || !bw || !sf || !cr) { alert("Fill in all radio fields."); return; }
+                if (!confirm(`Apply radio settings?\nfreq=${f} MHz  bw=${bw} kHz  sf=${sf}  cr=4/${cr}\n\nMis-set values can drop your link to the local mesh.`)) return;
+                await _selfPanelApply(`!set_radio ${f} ${bw} ${sf} ${cr}`, action);
+                return;
+            }
+            if (action === "apply-tx") {
+                const p = _normDecimal(document.getElementById("self-tx").value);
+                if (!p) return;
+                if (!confirm(`Apply TX power = ${p} dBm?`)) return;
+                await _selfPanelApply(`!set_tx_power ${p}`, action);
+                return;
+            }
+            if (action === "apply-phm") {
+                const m = document.getElementById("self-phm").value;
+                if (!m) return;
+                if (!confirm(`Set path hash size to ${m} byte(s)?\n\nLarger size = less hash collision but smaller mesh diameter.`)) return;
+                await _selfPanelApply(`!set_path_hash_mode ${m}`, action);
+                return;
+            }
+            if (action === "apply-flood-scope") {
+                const v = document.getElementById("self-flood-scope").value.trim();
+                await _selfPanelApply(`!flood_scope ${v}`, action);
+                return;
+            }
+            if (action === "save-preset") {
+                const f  = _normDecimal(document.getElementById("self-freq").value);
+                const bw = _normDecimal(document.getElementById("self-bw").value);
+                const sf = document.getElementById("self-sf").value;
+                const cr = document.getElementById("self-cr").value;
+                const tx = _normDecimal(document.getElementById("self-tx").value);
+                const phm = document.getElementById("self-phm").value;
+                const scope = document.getElementById("self-flood-scope").value.trim();
+                const name = prompt("Preset name (e.g. SF7 or SF8):", `SF${sf}`);
+                if (!name) return;
+                const presets = _loadRadioPresets();
+                const existing = presets.findIndex(p => p.name === name);
+                const entry = {
+                    name,
+                    freq: +f, bw: +bw, sf: +sf, cr: +cr,
+                    tx_power: +tx,
+                    path_hash_mode: +phm,
+                    flood_scope: scope,
+                };
+                if (existing >= 0) presets[existing] = entry;
+                else presets.push(entry);
+                _saveRadioPresets(presets);
+                _renderSelfPanel();
+                return;
+            }
+            if (action === "apply-preset") {
+                const idx = document.getElementById("self-preset").value;
+                const presets = _loadRadioPresets();
+                if (idx === "" || !presets[idx]) return;
+                const p = presets[idx];
+                // Build an explicit confirm dialog that names EVERY setting
+                // the preset will or will not touch, so the user can see at
+                // a glance what changes. Empty string = will reset to global
+                // / off; undefined = preset doesn't carry this setting yet
+                // (legacy presets saved before the field existed).
+                const fmt = (v, emptyLabel) =>
+                    v === undefined ? "(unchanged)" :
+                    v === ""        ? emptyLabel :
+                    String(v);
+                const lines = [
+                    `Frequency:        ${p.freq} MHz`,
+                    `Bandwidth:        ${p.bw} kHz`,
+                    `Spreading factor: SF${p.sf}`,
+                    `Coding rate:      4/${p.cr}`,
+                    `TX power:         ${fmt(p.tx_power, "(unchanged)")}${p.tx_power ? " dBm" : ""}`,
+                    `Path hash size:   ${fmt(p.path_hash_mode, "(unchanged)")}${p.path_hash_mode ? "-byte" : ""}`,
+                    `Default flood scope: ${fmt(p.flood_scope, "(global / off)")}`,
+                ];
+                if (!confirm(`Apply preset "${p.name}"?\n\n${lines.join("\n")}`)) return;
+                // Apply non-radio commands FIRST — set_radio re-tunes the
+                // transceiver and can briefly drop the local link. Doing TX
+                // power / path hash / flood scope ahead means we're not
+                // racing against a re-tune. Radio goes last.
+                if (p.flood_scope !== undefined) await _sendDeviceCmd(`!flood_scope ${p.flood_scope}`);
+                if (p.path_hash_mode)            await _sendDeviceCmd(`!set_path_hash_mode ${p.path_hash_mode}`);
+                if (p.tx_power)                  await _sendDeviceCmd(`!set_tx_power ${p.tx_power}`);
+                await _sendDeviceCmd(`!set_radio ${p.freq} ${p.bw} ${p.sf} ${p.cr}`);
+                setTimeout(async () => { await _loadDeviceMap(); _renderSelfPanel(); }, 1500);
+                return;
+            }
+            if (action === "delete-preset") {
+                const idx = document.getElementById("self-preset").value;
+                const presets = _loadRadioPresets();
+                if (idx === "" || !presets[idx]) return;
+                if (!confirm(`Delete preset "${presets[idx].name}"?`)) return;
+                presets.splice(+idx, 1);
+                _saveRadioPresets(presets);
+                _renderSelfPanel();
+                return;
+            }
+            if (action === "send-advert") {
+                const mode = (document.querySelector("input[name='advert-mode']:checked") || {}).value || "flood";
+                await _sendDeviceCmd(`!send_advert ${mode}`);
+                return;
+            }
+            if (action === "get-telemetry") {
+                await _sendDeviceCmd("!get_telemetry");
+                return;
+            }
+            if (action === "reboot") {
+                if (!confirm("Reboot the connected MeshCore device?\n\nYou'll lose the connection for ~30 seconds.")) return;
+                await _sendDeviceCmd("!reboot");
+                return;
+            }
+        }
+
+        // ── Remote-contact side panel ────────────────────────────────────
+        function _renderContactPanel(name) {
+            const view = document.getElementById("contact-view");
+            if (!view) return;
+            const node = (_deviceMap && _deviceMap.nodes && _deviceMap.nodes[name]) || {};
+            const query = node.query || {};
+            const hops  = node.hops && node.hops.value || "?";
+            const snr   = node.snr  && node.snr.value  || "?";
+
+            const fmtAge = (t) => {
+                if (!t) return "never";
+                const d = Math.max(0, Math.floor(Date.now() / 1000 - t));
+                if (d < 60) return `${d}s ago`;
+                if (d < 3600) return `${Math.floor(d / 60)}m ago`;
+                return `${Math.floor(d / 3600)}h ago`;
+            };
+
+            const statusHtml = query.status ? `
+                <div class="self-section">Status @ ${fmtAge(query.status.t)}</div>
+                ${_renderTelemetryBox(query.status.data, null)}
+            ` : "";
+            const telemHtml = query.telemetry ? `
+                <div class="self-section">Telemetry @ ${fmtAge(query.telemetry.t)}</div>
+                ${_renderTelemetryBox(query.telemetry.data, null)}
+            ` : "";
+            const neighHtml = query.neighbours ? `
+                <div class="self-section">Neighbours @ ${fmtAge(query.neighbours.t)}</div>
+                <pre style="font-size:0.72rem;white-space:pre-wrap;word-break:break-all;color:var(--text);background:var(--bg);padding:6px;border-radius:4px">${escHtml(JSON.stringify(query.neighbours.data, null, 2))}</pre>
+            ` : "";
+
+            view.innerHTML = `
+                <div class="self-section">Contact info</div>
+                <div class="self-row"><label>Name</label><span class="self-value">${escHtml(name)}</span></div>
+                <div class="self-row"><label>Type</label><span class="self-value">${escHtml(({1:"Contact",2:"Repeater",3:"Room Server",4:"Sensor"})[node.type] || node.type || "?")}</span></div>
+                <div class="self-row"><label>Hops</label><span class="self-value">${escHtml(hops)}</span></div>
+                <div class="self-row"><label>SNR</label><span class="self-value">${escHtml(snr)} dB</span></div>
+                <div class="self-row"><label>Public key</label>
+                    <div class="self-input-wrap">
+                        <input type="text" readonly value="${escHtml(node.pubkey || "")}">
+                        <button class="self-btn" data-action="copy-pubkey">Copy</button>
+                    </div>
+                </div>
+
+                <div class="self-section">Remote queries</div>
+                <div style="font-size:0.78rem;color:var(--text);opacity:0.8;line-height:1.5">
+                    Each query sends a packet over the mesh and waits up to 60s
+                    for the remote to respond. If the contact is offline or out
+                    of range the query will time out.
+                </div>
+                <div class="self-input-wrap" style="flex-wrap:wrap">
+                    <button class="self-btn" data-action="reset-path">Reset path</button>
+                    <button class="self-btn primary" data-action="req-status">Get status</button>
+                    <button class="self-btn primary" data-action="req-telemetry">Get telemetry</button>
+                    <button class="self-btn primary" data-action="req-neighbours">Get neighbours</button>
+                </div>
+                ${statusHtml}${telemHtml}${neighHtml}
+            `;
+            view.querySelectorAll(".self-btn").forEach(btn => {
+                btn.onclick = async () => {
+                    const action = btn.dataset.action;
+                    if (action === "copy-pubkey") {
+                        const el = btn.previousElementSibling;
+                        if (el && el.value) {
+                            navigator.clipboard.writeText(el.value).then(
+                                () => { el.style.background = "rgba(38,196,124,0.20)"; setTimeout(() => el.style.background = "", 600); },
+                                () => alert("Copy failed — select the text manually.")
+                            );
+                        }
+                        return;
+                    }
+                    btn.disabled = true;
+                    const orig = btn.innerHTML;
+                    btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> …';
+                    try {
+                        if (action === "reset-path")      await _sendDeviceCmd(`!reset_path ${name}`);
+                        else if (action === "req-status") await _sendDeviceCmd(`!req_status ${name}`);
+                        else if (action === "req-telemetry") await _sendDeviceCmd(`!req_telemetry ${name}`);
+                        else if (action === "req-neighbours") await _sendDeviceCmd(`!req_neighbours ${name}`);
+                        // Reload device map so query result appears in the panel
+                        // (plugin writes it on receipt)
+                        setTimeout(async () => {
+                            await _loadDeviceMap();
+                            _renderContactPanel(name);
+                        }, 1500);
+                    } finally {
+                        btn.disabled = false;
+                        btn.innerHTML = orig;
+                    }
+                };
+            });
+        }
+
         // Sparkline refresh hook — invoked from the rx-log interval. Walks all
         // visible contact cards and re-paints their SVG.
         function _refreshCardSparklines() {
@@ -3432,6 +4205,21 @@
                 const json = decodeURIComponent(escape(atob(btn.dataset.msg)));
                 _openMsgDetails(JSON.parse(json));
             } catch (_) { /* corrupt data attr — ignore */ }
+        });
+
+        // Card action buttons (self gear, contact info)
+        document.addEventListener("click", (ev) => {
+            const btn = ev.target.closest(".card-action-btn");
+            if (!btn) return;
+            ev.preventDefault();
+            ev.stopPropagation();
+            const action = btn.dataset.action;
+            if (action === "open-self") {
+                _openSidePanel("self");
+            } else if (action === "open-contact") {
+                const name = btn.dataset.node;
+                if (name) _openSidePanel("contact:" + name);
+            }
         });
 
         // ── Map side panel (Leaflet) ─────────────────────────────────────────────
@@ -3624,6 +4412,7 @@
                     _renderTrafficIfOpen();
                     _renderChannelsIfOpen();
                     _renderHeatmapIfOpen();
+                    _renderHeardIfOpen();
                     _refreshCardSparklines();
                 });
             }, 3000);
