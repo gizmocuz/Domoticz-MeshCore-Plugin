@@ -1347,6 +1347,12 @@ class BasePlugin:
             self._queue.put(("send_result", {"ok": False, "target": target, "body": body, "result": "contact not found"}))
             return
 
+        # Use plain send_msg: returns as soon as the local node has accepted
+        # the packet for TX. We don't wait for the destination ACK here —
+        # send_msg_with_retry's 40-60s wait was too painful in practice for
+        # cases where the recipient is offline. (If you want delivered/no-ACK
+        # status, the path is to switch back to send_msg_with_retry or wire
+        # up a non-blocking background ACK listener.)
         try:
             result = await asyncio.wait_for(
                 mc.commands.send_msg(contact, body), timeout=15.0

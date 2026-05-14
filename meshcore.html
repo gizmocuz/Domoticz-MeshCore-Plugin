@@ -923,8 +923,52 @@
             opacity: 0;
             transition: opacity 0.15s, color 0.15s;
         }
-        .inbox-msg:hover .msg-reply-btn { opacity: 1; }
+        .inbox-msg:hover .msg-reply-btn,
+        .inbox-msg:hover .msg-info-btn { opacity: 1; }
         .msg-reply-btn:hover { color: var(--accent); border-color: var(--accent); }
+        .msg-info-btn {
+            flex-shrink: 0;
+            background: none;
+            border: none;
+            color: var(--muted);
+            cursor: pointer;
+            opacity: 0;
+            padding: 1px 4px;
+            font-size: 0.85rem;
+            transition: opacity 0.15s, color 0.15s;
+        }
+        .msg-info-btn:hover { color: var(--accent); }
+
+        /* Message details panel — shares side-panel skin with the map panel */
+        #msg-details-list {
+            padding: 12px 14px;
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+            overflow-y: auto;
+        }
+        .msg-detail-row {
+            display: flex;
+            flex-direction: column;
+            gap: 2px;
+            padding-bottom: 8px;
+            border-bottom: 1px solid var(--border);
+        }
+        .msg-detail-row:last-child { border-bottom: none; }
+        .msg-detail-row .lbl {
+            font-size: 0.66rem;
+            text-transform: uppercase;
+            letter-spacing: 0.06em;
+            color: var(--muted);
+        }
+        .msg-detail-row .val {
+            font-size: 0.86rem;
+            color: var(--text);
+            word-break: break-word;
+            font-family: ui-monospace, "Cascadia Code", "Consolas", monospace;
+            white-space: pre-wrap;
+        }
+        .msg-detail-row .val.text { font-family: inherit; }
 
         /* ── Compose bar ───────────────────────────────────────────── */
         #compose-bar {
@@ -980,6 +1024,18 @@
         #compose-status { font-size: 0.75rem; flex-shrink: 0; text-align: right; }
         #compose-status.ok  { color: var(--green); }
         #compose-status.err { color: var(--red); }
+
+        /* Character counter — turns yellow ≤30, red ≤10 */
+        #compose-counter {
+            font-size: 0.75rem;
+            color: var(--muted);
+            font-variant-numeric: tabular-nums;
+            min-width: 28px;
+            text-align: right;
+            user-select: none;
+        }
+        #compose-counter.warn { color: var(--yellow); }
+        #compose-counter.low  { color: var(--red); font-weight: 600; }
 
         #compose-actions {
             display: flex;
@@ -1135,7 +1191,8 @@
         <!-- compose bar -->
         <div id="compose-bar" style="position:relative">
             <select id="compose-target" title="Send to"></select>
-            <input id="compose-input" type="text" placeholder="Type a message…" maxlength="200"
+            <input id="compose-input" type="text" placeholder="Type a message…"
+                   oninput="_updateCharCounter(this.value)"
                    onkeydown="if(event.key==='Enter')_sendMessage()">
             <button id="emoji-btn" onclick="_toggleEmojiPicker(event)" title="Insert emoji">😊</button>
             <div id="emoji-picker">
@@ -1143,6 +1200,7 @@
                 <div id="emoji-scroll"><div id="emoji-grid"></div></div>
             </div>
             <div id="compose-actions">
+                <span id="compose-counter" title="Characters remaining (MeshCore limit: 150)">150</span>
                 <button id="compose-send" onclick="_sendMessage()">Send ✈</button>
                 <span id="compose-status"></span>
             </div>
@@ -1692,9 +1750,12 @@
                 const { channel, sender, text } = _parseInboxData(data);
                 // If this is the confirmation of a recent optimistic echo,
                 // drop the pending placeholder so we don't show it twice.
+                // Match on channel + text only — sender comparison is unreliable
+                // because the plugin echoes with self._self_name while the
+                // placeholder was created before we knew that.
                 if (sender && (sender.startsWith("> ") || sender.startsWith("▶"))) {
                     const pIdx = _inboxHistory.findIndex(m =>
-                        m._pending && m.channel === channel && m.sender === sender && m.text === text);
+                        m._pending && m.channel === channel && m.text === text);
                     if (pIdx >= 0) _inboxHistory.splice(pIdx, 1);
                 }
                 _inboxHistory.unshift({ time: update, channel, sender, text });
@@ -1751,11 +1812,21 @@
                     ? `<button class="msg-reply-btn" onclick="_replyTo(event,'${replyTarget}','${replyChannel}')" title="Reply to ${replyTarget}">↩ Reply</button>`
                     : "";
                 const timeLabel = isPending ? "sending…" : escHtml(time);
+                // Stash the message in a data attribute we can read on click;
+                // base64-encode so JSON quotes don't break the attribute.
+                const payload = btoa(unescape(encodeURIComponent(JSON.stringify({
+                    time, channel, sender, text, isSent
+                }))));
+                const infoBtn = isPending ? "" :
+                    `<button class="msg-info-btn" data-msg="${payload}" title="Message details">
+                        <i class="fa-solid fa-circle-info"></i>
+                    </button>`;
                 return `<div class="inbox-msg${isSent ? " sent" : ""}${isPending ? " pending" : ""}">
           <span class="msg-time">${timeLabel}</span>
           ${chanHtml}
           ${sender ? `<span class="msg-sender">${escHtml(sender)}</span>` : ""}
           <span class="msg-text">${_renderMentions(text)}</span>
+          ${infoBtn}
           ${replyBtn}
         </div>`;
             }).join("");
@@ -2348,6 +2419,80 @@
             if (failures.length) alert("Some removals failed:\n\n" + failures.join("\n"));
         }
 
+        // ── Message details side panel ───────────────────────────────────────────
+        // Shows whatever metadata we have for a single inbox entry. Reuses the
+        // map-panel side-drawer DOM/CSS to keep the styling consistent.
+        function _openMsgDetails(msgObj) {
+            const panel = document.getElementById("map-panel");
+            const backdrop = document.getElementById("map-backdrop");
+            const title = document.getElementById("map-panel-title");
+            const coords = document.getElementById("map-panel-coords");
+            const body = document.getElementById("map-panel-body");
+            const ext = document.getElementById("map-panel-external");
+            if (!panel || !body) return;
+
+            title.textContent = "Message details";
+            coords.textContent = msgObj.channel === "Private" ? "Direct message" : `Channel: ${msgObj.channel || "—"}`;
+            ext.style.display = "none";   // no external view for messages
+            // ext is restored when the map panel re-opens; toggle is fine.
+
+            const bytes = _byteLen(msgObj.text);
+            const chars = (msgObj.text || "").length;
+            const rows = [
+                ["Direction", msgObj.isSent ? "Outgoing (sent by us)" : "Incoming", "text"],
+                ["Time",      msgObj.time || "—", ""],
+                ["Channel",   msgObj.channel || "—", "text"],
+                ["Sender",    msgObj.sender || "—", "text"],
+                ["Text",      msgObj.text || "", "text"],
+                ["Byte size", `${bytes} bytes`, ""],
+                ["Char count",`${chars} characters`, ""],
+                ["Hex",       msgObj.text ? Array.from(_byteEncoder.encode(msgObj.text)).map(b => b.toString(16).padStart(2, "0")).join(" ") : "—", ""],
+            ];
+            const html = `<div id="msg-details-list">` + rows.map(([lbl, val, cls]) =>
+                `<div class="msg-detail-row">
+                    <span class="lbl">${escHtml(lbl)}</span>
+                    <span class="val ${cls}">${escHtml(val)}</span>
+                </div>`
+            ).join("") + `
+            <div style="font-size:0.72rem;color:var(--muted);font-style:italic;padding-top:4px">
+                Raw on-air bytes (header, transport codes, cipher MAC, path hashes) aren't exposed
+                by the meshcore Python library, so they can't be shown here.
+            </div></div>`;
+            // Replace the map canvas with our content; we'll restore it on map-open.
+            body.dataset.previousContent = body.dataset.previousContent || "1";
+            body.innerHTML = html;
+
+            panel.classList.add("open");
+            backdrop.classList.add("open");
+            panel.setAttribute("aria-hidden", "false");
+        }
+
+        // Restore the map canvas inside the panel before opening a map view —
+        // the message-details panel replaces the canvas, so we put it back.
+        function _ensureMapCanvas() {
+            const body = document.getElementById("map-panel-body");
+            if (body && !document.getElementById("map-canvas")) {
+                body.innerHTML = `<div id="map-canvas"></div>`;
+                // Force a re-create of the Leaflet map next open
+                _leafletMap = null;
+                _leafletMarker = null;
+            }
+            const ext = document.getElementById("map-panel-external");
+            if (ext) ext.style.display = "";
+        }
+
+        // Delegated click handler for the "info" button on each message
+        document.addEventListener("click", (ev) => {
+            const btn = ev.target.closest(".msg-info-btn");
+            if (!btn) return;
+            ev.preventDefault();
+            ev.stopPropagation();
+            try {
+                const json = decodeURIComponent(escape(atob(btn.dataset.msg)));
+                _openMsgDetails(JSON.parse(json));
+            } catch (_) { /* corrupt data attr — ignore */ }
+        });
+
         // ── Map side panel (Leaflet) ─────────────────────────────────────────────
         let _leafletMap = null;
         let _leafletMarker = null;
@@ -2359,6 +2504,9 @@
             const coords = document.getElementById("map-panel-coords");
             const ext = document.getElementById("map-panel-external");
             if (!panel || !backdrop) return;
+
+            // Restore map canvas if a different content (e.g. message details) replaced it
+            _ensureMapCanvas();
 
             title.textContent = name;
             coords.textContent = `${lat.toFixed(6)}, ${lon.toFixed(6)}`;
@@ -2584,6 +2732,7 @@
                 const data = await resp.json();
                 if (data.status === "OK") {
                     input.value = "";
+                    _updateCharCounter(0);
                     _clearReply();
                     _setComposeStatus(status, "ok", "✓ Sent");
                     // Optimistic inbox echo so the user doesn't wait for the next
@@ -2600,6 +2749,34 @@
             setTimeout(() => _setComposeStatus(status, "", ""), 4000);
         }
 
+        // MeshCore on-the-wire message size cap (bytes, NOT characters —
+        // emoji/multi-byte UTF-8 count for more than one byte).
+        const COMPOSE_MAX = 150;
+        const _byteEncoder = new TextEncoder();
+
+        function _byteLen(s) {
+            return _byteEncoder.encode(s || "").length;
+        }
+
+        function _updateCharCounter(value) {
+            const el = document.getElementById("compose-counter");
+            const input = document.getElementById("compose-input");
+            if (!el || !input) return;
+            // If we received a length (legacy) just treat it as bytes; otherwise compute.
+            let bytes = typeof value === "number" ? value : _byteLen(value);
+            // Hard-truncate when over the byte cap (browsers can't do this natively).
+            if (typeof value === "string" && bytes > COMPOSE_MAX) {
+                let v = value;
+                while (_byteLen(v) > COMPOSE_MAX) v = v.slice(0, -1);
+                input.value = v;
+                bytes = _byteLen(v);
+            }
+            const remaining = COMPOSE_MAX - bytes;
+            el.textContent = remaining;
+            el.classList.toggle("warn", remaining <= 30 && remaining > 10);
+            el.classList.toggle("low",  remaining <= 10);
+        }
+
         function _setComposeStatus(el, cls, text) {
             el.className = `compose-status ${cls}`.trim();
             el.textContent = text;
@@ -2609,10 +2786,13 @@
         // outgoing message immediately. Real send_result will replace this on
         // the next refresh; if no real entry arrives within 90s, drop it.
         function _addPendingInboxEcho(target, body) {
+            const selfName = (_deviceMap && _deviceMap.self) || "Me";
             let channel, sender;
             if (target.startsWith("#")) {
                 channel = target.slice(1) || "Public";
-                sender = "> Me";
+                // For channel sends the plugin uses the connected-node's own name
+                // when echoing back, so mirror that to keep placeholder/real visually identical.
+                sender = "> " + selfName;
             } else {
                 channel = "Private";
                 sender = "> " + target;
@@ -2834,6 +3014,7 @@
         window._toggleEmojiPicker  = _toggleEmojiPicker;
         window._filterEmoji        = _filterEmoji;
         window._replyTo            = _replyTo;
+        window._updateCharCounter  = _updateCharCounter;
     })();
     </script>
 
