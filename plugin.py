@@ -47,6 +47,8 @@ import gc
 import json
 import os
 import queue
+import re
+import shutil
 import threading
 import time
 import traceback
@@ -72,6 +74,20 @@ NODE_SLOTS = 20   # device slots reserved per node (max 11 nodes → unit 219)
 # MeshCore firmware exposes up to 40 channel slots. Domoticz devices are NOT
 # created per slot — they live entirely in the dashboard JSON map.
 MAX_CHANNEL_SLOTS = 40
+
+# Radio-tuning bounds (used by !set_radio / !set_tx_power validation).
+# ISM bands cover 100-2500 MHz; MeshCore typically runs 433/868/915 MHz.
+# Wide bandwidth range allows narrow-band experimentation.
+RADIO_FREQ_MIN_MHZ = 100.0
+RADIO_FREQ_MAX_MHZ = 2500.0
+RADIO_BW_MIN_KHZ   = 5.0
+RADIO_BW_MAX_KHZ   = 500.0
+RADIO_SF_MIN       = 7
+RADIO_SF_MAX       = 12
+RADIO_CR_MIN       = 5   # firmware encoding: 5..8 = 4/5..4/8
+RADIO_CR_MAX       = 8
+# Default upper bound on TX power if the device hasn't reported max_tx_power.
+RADIO_TX_POWER_DEFAULT_MAX_DBM = 22
 
 # Offsets within each node's slot block
 OFF_STATUS    = 0   # Switch:      online / offline
@@ -643,12 +659,27 @@ class BasePlugin:
         dest          = os.path.join(dest_dir, "meshcore.html")
 
         try:
-            import shutil
             os.makedirs(dest_dir, exist_ok=True)
             shutil.copy2(template, dest)
             Domoticz.Log(f"MeshCore dashboard installed: {dest}")
         except Exception as exc:
             Domoticz.Error(f"Failed to install dashboard: {exc}")
+
+        # Pre-create empty JSON stubs so the dashboard's first-load fetch
+        # doesn't log a 404 in the browser console. They're overwritten on
+        # the first heartbeat / push event.
+        for stub_name, stub_body in (
+            ("meshcore_devices.json", {"inbox": None, "nodes": {}}),
+            ("meshcore_rx_log.json",  {"entries": [], "stats": {}}),
+            ("meshcore_channels.json", {}),
+        ):
+            stub_path = os.path.join(dest_dir, stub_name)
+            if not os.path.isfile(stub_path):
+                try:
+                    with open(stub_path, "w") as f:
+                        json.dump(stub_body, f)
+                except Exception as exc:
+                    Domoticz.Debug(f"Failed to write stub {stub_name}: {exc}")
 
         # Bundle Leaflet locally so the topology / map panel works even when
         # the browser's tracking-prevention blocks unpkg.com (Edge/Firefox).
@@ -656,7 +687,6 @@ class BasePlugin:
         leaflet_dst = os.path.join(dest_dir, "leaflet")
         if os.path.isdir(leaflet_src):
             try:
-                import shutil
                 os.makedirs(leaflet_dst, exist_ok=True)
                 for fname in ("leaflet.js", "leaflet.css"):
                     s = os.path.join(leaflet_src, fname)
@@ -675,7 +705,6 @@ class BasePlugin:
         domoticz_root = os.path.abspath(os.path.join(plugin_dir, "..", ".."))
         dest = os.path.join(domoticz_root, "www", "templates", "meshcore_locations.json")
         try:
-            import shutil
             shutil.copy2(src, dest)
         except Exception as exc:
             Domoticz.Debug(f"Could not install meshcore_locations.json: {exc}")
@@ -908,7 +937,6 @@ class BasePlugin:
         leaflet_dst = os.path.join(tpl_dir, "leaflet")
         if os.path.isdir(leaflet_dst):
             try:
-                import shutil
                 shutil.rmtree(leaflet_dst, ignore_errors=True)
             except Exception as exc:
                 Domoticz.Debug(f"Failed to remove leaflet dir: {exc}")
@@ -926,6 +954,7 @@ class BasePlugin:
         asyncio.set_event_loop(loop)
         self._stop_async = asyncio.Event()
         self._cmd_lock   = asyncio.Lock()
+        self._remote_query_tasks: set = set()
         try:
             loop.run_until_complete(self._run())
         except asyncio.CancelledError:
@@ -1290,7 +1319,6 @@ class BasePlugin:
             if scope_key and set(scope_key) <= {"0"}:
                 cleaned = ""
             else:
-                import re
                 m = re.match(r"^([#A-Za-z0-9_\-]+)", scope_name)
                 cleaned = m.group(1) if m else ""
             if cleaned != scope_name:
@@ -1373,6 +1401,10 @@ class BasePlugin:
         """
         channel_names = {}        # non-empty only — used by message routing
         all_slots: dict = {}      # idx → name ("" if empty) for all slots
+        # Stop probing after this many consecutive empty / error slots so a
+        # 40-slot scan doesn't burn dozens of round-trips on sparse devices.
+        consecutive_empty = 0
+        EMPTY_RUN_STOP = 4
         for idx in range(MAX_CHANNEL_SLOTS):
             try:
                 res = await asyncio.wait_for(mc.commands.get_channel(idx), timeout=2.0)
@@ -1382,10 +1414,19 @@ class BasePlugin:
                     all_slots[idx] = name
                     if name:
                         channel_names[str(idx)] = name
+                        consecutive_empty = 0
+                    else:
+                        consecutive_empty += 1
                 elif res and res.type == EventType.ERROR:
                     # ERROR usually means firmware reports no such slot —
                     # record the remaining slots as empty and stop probing.
                     for j in range(idx, MAX_CHANNEL_SLOTS):
+                        all_slots.setdefault(j, "")
+                    break
+                else:
+                    consecutive_empty += 1
+                if consecutive_empty >= EMPTY_RUN_STOP:
+                    for j in range(idx + 1, MAX_CHANNEL_SLOTS):
                         all_slots.setdefault(j, "")
                     break
             except asyncio.TimeoutError:
@@ -1419,8 +1460,10 @@ class BasePlugin:
         lock = self._cmd_lock
         try:
             if lock is not None:
-                await lock.acquire()
-            r = await asyncio.wait_for(coro, timeout=30.0)
+                async with lock:
+                    r = await asyncio.wait_for(coro, timeout=30.0)
+            else:
+                r = await asyncio.wait_for(coro, timeout=30.0)
             ok = r is not None and getattr(r, "type", None) != EventType.ERROR
             if ok:
                 payload = dict(r.payload or {}) if hasattr(r, "payload") else None
@@ -1441,12 +1484,6 @@ class BasePlugin:
             self._queue.put(("send_result", {
                 "ok": False, "target": verb, "body": name, "result": str(exc),
             }))
-        finally:
-            try:
-                if lock is not None and lock.locked():
-                    lock.release()
-            except RuntimeError:
-                pass
 
     async def _send_message_for_text(self, text: str):
         """Wrapper invoked via run_coroutine_threadsafe by onDeviceModified.
@@ -1491,10 +1528,14 @@ class BasePlugin:
         # ── Remote-contact verbs ─────────────────────────────────────────
         # Helper: resolve a contact dict by adv_name from mc.contacts.
         def _resolve_contact(name):
-            for c in mc.contacts.values():
-                if c.get("adv_name", "").strip() == name:
-                    return dict(c)
-            return None
+            matches = [c for c in mc.contacts.values()
+                       if c.get("adv_name", "").strip() == name]
+            if len(matches) > 1:
+                Domoticz.Debug(
+                    f"_resolve_contact({name!r}): {len(matches)} contacts share this "
+                    f"adv_name — first match wins; pubkey={matches[0].get('public_key','?')[:12]}"
+                )
+            return dict(matches[0]) if matches else None
 
         # !reset_path <contact name>
         if text.startswith("!reset_path "):
@@ -1542,9 +1583,13 @@ class BasePlugin:
                         "result": f"contact '{name}' not found"
                     }))
                     return
-                asyncio.create_task(self._run_remote_query(
+                # Hold a strong reference so the GC doesn't finalise a still-
+                # pending task with "Task was destroyed but it is pending".
+                _task = asyncio.create_task(self._run_remote_query(
                     verb.strip(), name, getattr(mc.commands, fn_name)(contact), kind
                 ))
+                self._remote_query_tasks.add(_task)
+                _task.add_done_callback(self._remote_query_tasks.discard)
                 # Immediate optimistic ack so the UI doesn't sit on a spinner
                 self._queue.put(("send_result", {
                     "ok": True, "target": verb.strip(), "body": name,
@@ -1579,7 +1624,7 @@ class BasePlugin:
             if len(parts) != 5:
                 self._queue.put(("send_result", {
                     "ok": False, "target": "!set_radio", "body": text,
-                    "result": "syntax: !set_radio <freq MHz> <bw kHz> <sf 7-12> <cr 5-8>"
+                    "result": f"syntax: !set_radio <freq MHz> <bw kHz> <sf {RADIO_SF_MIN}-{RADIO_SF_MAX}> <cr {RADIO_CR_MIN}-{RADIO_CR_MAX}>"
                 }))
                 return
             try:
@@ -1589,31 +1634,29 @@ class BasePlugin:
                     "ok": False, "target": "!set_radio", "body": text, "result": f"parse error: {exc}"
                 }))
                 return
-            # Sanity bounds. ISM bands cover 100-2500 MHz; MeshCore typically
-            # runs 433 / 868 / 915 MHz. SF is 7-12, CR is 5-8 (= 4/5..4/8).
-            # Wide bandwidth range to allow narrow-band experimentation.
-            if not (100.0 <= freq <= 2500.0):
+            # Sanity bounds — see module-level RADIO_* constants.
+            if not (RADIO_FREQ_MIN_MHZ <= freq <= RADIO_FREQ_MAX_MHZ):
                 self._queue.put(("send_result", {
                     "ok": False, "target": "!set_radio", "body": text,
-                    "result": "freq must be 100-2500 MHz"
+                    "result": f"freq must be {RADIO_FREQ_MIN_MHZ:.0f}-{RADIO_FREQ_MAX_MHZ:.0f} MHz"
                 }))
                 return
-            if not (5.0 <= bw <= 500.0):
+            if not (RADIO_BW_MIN_KHZ <= bw <= RADIO_BW_MAX_KHZ):
                 self._queue.put(("send_result", {
                     "ok": False, "target": "!set_radio", "body": text,
-                    "result": "bw must be 5-500 kHz"
+                    "result": f"bw must be {RADIO_BW_MIN_KHZ:.0f}-{RADIO_BW_MAX_KHZ:.0f} kHz"
                 }))
                 return
-            if not (7 <= sf <= 12):
+            if not (RADIO_SF_MIN <= sf <= RADIO_SF_MAX):
                 self._queue.put(("send_result", {
                     "ok": False, "target": "!set_radio", "body": text,
-                    "result": "sf must be 7-12"
+                    "result": f"sf must be {RADIO_SF_MIN}-{RADIO_SF_MAX}"
                 }))
                 return
-            if not (5 <= cr <= 8):
+            if not (RADIO_CR_MIN <= cr <= RADIO_CR_MAX):
                 self._queue.put(("send_result", {
                     "ok": False, "target": "!set_radio", "body": text,
-                    "result": "cr must be 5-8 (=4/5..4/8)"
+                    "result": f"cr must be {RADIO_CR_MIN}-{RADIO_CR_MAX} (=4/5..4/8)"
                 }))
                 return
             try:
@@ -1622,9 +1665,11 @@ class BasePlugin:
                 if ok:
                     Domoticz.Log(f"Radio set: freq={freq} MHz bw={bw} kHz sf={sf} cr={cr}")
                     # Optimistically update local snapshot — firmware will re-emit
-                    # SELF_INFO on next connect / advert anyway.
-                    self._self_info_full["radio_freq"] = freq
-                    self._self_info_full["radio_bw"]   = bw
+                    # SELF_INFO on next connect / advert anyway. Match the wire
+                    # types firmware uses so equality diffs don't false-positive
+                    # (freq/bw are reported as ints when integer-valued).
+                    self._self_info_full["radio_freq"] = int(freq) if freq == int(freq) else freq
+                    self._self_info_full["radio_bw"]   = int(bw)   if bw   == int(bw)   else bw
                     self._self_info_full["radio_sf"]   = sf
                     self._self_info_full["radio_cr"]   = cr
                     self._write_device_map()
@@ -1658,7 +1703,9 @@ class BasePlugin:
             # Clamp against the firmware-reported maximum to avoid bricking
             # the radio at hardware-illegal levels. Fall back to a generous
             # 22 dBm ceiling when max isn't known yet.
-            max_tx = int(self._self_info_full.get("max_tx_power", 22) or 22)
+            max_tx = int(self._self_info_full.get("max_tx_power",
+                                                   RADIO_TX_POWER_DEFAULT_MAX_DBM)
+                         or RADIO_TX_POWER_DEFAULT_MAX_DBM)
             if not (0 <= p <= max_tx):
                 self._queue.put(("send_result", {
                     "ok": False, "target": "!set_tx_power", "body": str(p),

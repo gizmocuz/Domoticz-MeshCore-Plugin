@@ -47,21 +47,29 @@ This plugin connects your **[MeshCore LoRa mesh nodes](https://meshcore.co.uk/)*
 
 - Domoticz installed and running
 - A [MeshCore](https://meshcore.co.uk/) node reachable over TCP (companion app or radio bridge)
-- Python package:
-
-```sh
-pip install -r requirements.txt
-```
+  - Alternative firmware: [MeshcoMod](https://www.meshcomod.com) — a MeshCore-compatible fork for Heltec v3 / v4 boards that adds native WiFi, so the node can expose its TCP companion port directly without a USB bridge.
 
 ### Setup
 
 ```sh
 cd ~/domoticz/plugins
 git clone https://github.com/galadril/Domoticz-MeshCore-Plugin.git MeshCore
+cd MeshCore
+pip install -r requirements.txt
 sudo service domoticz.sh restart
 ```
 
 Then go to **Setup → Hardware** and add a new hardware entry of type **MeshCore**.
+
+#### Docker / Docker Compose
+
+The plugin still needs the `meshcore` Python package installed inside the container. Clone the plugin into your mounted plugins folder as above, then edit `customstart.sh` (the Domoticz container's customisation hook) and add:
+
+```sh
+pip3 install meshcore
+```
+
+This runs on every container start, so the package survives image rebuilds. On Debian-12-based images you may need `pip3 install --break-system-packages meshcore`.
 
 ----------
 

@@ -20,6 +20,12 @@ The `Domoticz` module (imported in `plugin.py`) is provided by the Domoticz runt
 
 Domoticz calls module-level functions (`onStart`, `onStop`, `onHeartbeat`). These delegate to a singleton `BasePlugin` instance. Never block the main thread — use a worker thread for I/O.
 
+`onStop` fires on every disable AND on Domoticz shutdown — there is no separate "uninstall" hook. Cleanup logic must be idempotent and **must not delete user-visible state** that we want to survive a restart. In particular:
+
+- `meshcore.html` and `leaflet/` are re-installed on every `onStart`, so removing them in `onStop` is fine (and we do).
+- `meshcore_devices.json`, `meshcore_rx_log.json`, `meshcore_channels.json` accumulate runtime state (24 h heatmap, signal history, last-known device map). They are **deliberately not removed** on `onStop` so a restart preserves history; they're overwritten on the first heartbeat after restart anyway.
+- `meshcore_locations.json` is user-owned (manual location overrides). Treat it as read-only state that the plugin copies from `plugin_dir/` into `www/templates/`; never delete it from either location.
+
 ### Implementation (meshcore Python package over TCP)
 
 ```
