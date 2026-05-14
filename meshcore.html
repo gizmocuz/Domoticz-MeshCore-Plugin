@@ -5,6 +5,10 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>MeshCore Dashboard</title>
     <link rel="stylesheet" href="/font-awesome/css/all.min.css">
+    <!-- Leaflet from CDN. Some browsers' tracking-prevention may block this;
+         when that happens the map panel shows a fallback message instead. -->
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" crossorigin=""/>
+    <script defer src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" crossorigin=""></script>
     <style>
         :root {
             --bg: #1e1f26;
@@ -27,8 +31,31 @@
             color: var(--text);
             padding: 20px;
             min-height: 100vh;
-            color-scheme: dark;   /* makes default form controls (checkbox, etc.) render with dark theme */
+            color-scheme: dark;
         }
+        /* Bound the contacts area so the inbox below stays within reach
+           without a long page scroll. The cards/list scroll internally. */
+        #contacts-grid,
+        #contacts-list {
+            max-height: 50vh;
+            min-height: 180px;
+            overflow-y: auto;
+            overflow-x: hidden;
+        }
+        /* Make the scrollbar clearly visible against the dark surface */
+        #contacts-grid::-webkit-scrollbar,
+        #contacts-list::-webkit-scrollbar { width: 10px; }
+        #contacts-grid::-webkit-scrollbar-track,
+        #contacts-list::-webkit-scrollbar-track { background: transparent; }
+        #contacts-grid::-webkit-scrollbar-thumb,
+        #contacts-list::-webkit-scrollbar-thumb {
+            background: var(--border);
+            border-radius: 5px;
+        }
+        #contacts-grid::-webkit-scrollbar-thumb:hover,
+        #contacts-list::-webkit-scrollbar-thumb:hover { background: var(--muted); }
+        /* Keep the inbox compact so the whole page fits in a typical viewport. */
+        #inbox-history { max-height: 180px; }
 
         header {
             display: flex;
@@ -113,7 +140,7 @@
             gap: 14px;
         }
         #contacts-grid .node-card {
-            width: 280px;
+            width: 230px;
             flex-shrink: 0;
         }
 
@@ -131,11 +158,11 @@
             position: relative;
         }
         .node-header {
-            padding: 14px 18px;
-            padding-right: 96px;  /* leave room for the floating badge */
+            padding: 10px 14px 8px;
+            padding-right: 56px;  /* leave room for the floating badge */
             border-bottom: 1px solid var(--border);
         }
-        .node-name { font-weight: 600; font-size: 1rem; }
+        .node-name { font-weight: 600; font-size: 0.95rem; }
 
         /* Floating badge — top-right overlay, doesn't affect card layout */
         .node-badge {
@@ -144,6 +171,128 @@
             right: 12px;
             z-index: 2;
             pointer-events: auto;
+        }
+
+        /* Floating map-pin button — bottom-LEFT overlay, mirrors fav-toggle */
+        .map-toggle {
+            position: absolute;
+            bottom: 8px;
+            left: 10px;
+            z-index: 2;
+            background: transparent;
+            border: none;
+            color: var(--muted);
+            font-size: 1rem;
+            cursor: pointer;
+            padding: 4px 6px;
+            border-radius: 4px;
+            transition: color 0.12s, background 0.12s;
+        }
+        .map-toggle:hover { color: var(--green); background: rgba(76, 175, 125, 0.08); }
+        /* List-view map indicator before the favorite slot */
+        .row-map {
+            display: inline-flex;
+            align-items: center;
+            color: var(--green);
+            font-size: 0.9rem;
+            margin-right: 6px;
+            cursor: pointer;
+        }
+        .row-map.empty { visibility: hidden; }
+
+        /* Map side panel (slides in from the right) */
+        #map-panel {
+            position: fixed;
+            top: 0;
+            right: 0;
+            bottom: 0;
+            width: 480px;
+            max-width: 90vw;
+            background: var(--surface);
+            border-left: 1px solid var(--border);
+            z-index: 1000;
+            display: flex;
+            flex-direction: column;
+            transform: translateX(100%);
+            transition: transform 0.25s ease-out;
+            box-shadow: -4px 0 16px rgba(0, 0, 0, 0.4);
+        }
+        #map-panel.open { transform: translateX(0); }
+        #map-panel-header {
+            padding: 12px 14px;
+            border-bottom: 1px solid var(--border);
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 12px;
+        }
+        #map-panel-header h3 {
+            margin: 0;
+            font-size: 0.95rem;
+            font-weight: 600;
+            color: var(--text);
+        }
+        #map-panel-header .coords {
+            font-size: 0.72rem;
+            color: var(--muted);
+            font-family: monospace;
+            margin-top: 2px;
+        }
+        #map-panel-close {
+            background: transparent;
+            border: none;
+            color: var(--muted);
+            font-size: 1.1rem;
+            cursor: pointer;
+            padding: 4px 8px;
+            border-radius: 4px;
+        }
+        #map-panel-close:hover { color: var(--text); background: var(--border); }
+        #map-panel-body {
+            flex: 1;
+            position: relative;
+            min-height: 0;
+        }
+        #map-canvas {
+            position: absolute;
+            top: 0; left: 0; right: 0; bottom: 0;
+        }
+        #map-panel-footer {
+            padding: 10px 14px;
+            border-top: 1px solid var(--border);
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            gap: 12px;
+            font-size: 0.78rem;
+        }
+        #map-panel-footer a {
+            color: var(--accent);
+            text-decoration: none;
+        }
+        #map-panel-footer a:hover { text-decoration: underline; }
+        #map-backdrop {
+            position: fixed;
+            inset: 0;
+            background: rgba(0, 0, 0, 0.4);
+            z-index: 999;
+            display: none;
+        }
+        #map-backdrop.open { display: block; }
+
+        /* CSS-only Leaflet marker (no PNG dependency) */
+        .mc-pin {
+            background: transparent;
+            border: none;
+        }
+        .mc-pin-inner {
+            width: 20px;
+            height: 20px;
+            border-radius: 50% 50% 50% 0;
+            background: var(--accent);
+            border: 2px solid #fff;
+            transform: rotate(-45deg);
+            box-shadow: 0 2px 6px rgba(0,0,0,0.5);
         }
 
         /* Floating favorite toggle — bottom-right overlay on contact cards */
@@ -173,6 +322,8 @@
             font-size: 0.9rem;
             margin-right: 6px;
         }
+        /* visibility:hidden (not display:none) so non-favorite rows keep
+           the same name-column starting position as favorite rows */
         .row-fav.empty { visibility: hidden; }
 
         .badge {
@@ -193,21 +344,32 @@
         .badge.self    { background: #1a2e3d; color: var(--accent); }
 
         .node-metrics {
-            padding: 12px 18px;
+            /* extra bottom padding reserves room for the floating fav-star and
+               map-pin overlays so they don't sit on top of the Last Seen row */
+            padding: 8px 12px 28px;
             display: grid;
             grid-template-columns: 1fr 1fr;
-            gap: 6px 12px;
+            gap: 3px 8px;
         }
-        .metric { display: flex; flex-direction: column; gap: 2px; }
-        .metric a { text-decoration: none; color: inherit; display: contents; }
-        .metric a:hover .metric-value { color: var(--accent); }
-
-        /* Last Seen: full-width single-line row "LAST SEEN: 2026-05-13 19:55:06" */
-        .metric[data-key="last_seen"] {
-            grid-column: 1 / -1;
+        /* Single-line metric rows: "LABEL  value" inline. Compact. */
+        .metric {
+            display: flex;
             flex-direction: row;
             align-items: baseline;
             gap: 6px;
+            min-width: 0;
+        }
+        .metric a { text-decoration: none; color: inherit; display: contents; }
+        .metric a:hover .metric-value { color: var(--accent); }
+        .metric-label::after { content: ""; }
+
+        /* Hide metric rows that have no data (instead of showing a "—" placeholder). */
+        .metric.empty { display: none; }
+
+        /* Last Seen spans the full row at the bottom of the metric grid. */
+        .metric[data-key="last_seen"] {
+            grid-column: 1 / -1;
+            margin-top: 2px;
         }
         .metric[data-key="last_seen"] .metric-label::after { content: ":"; }
         .metric[data-key="last_seen"] .metric-value { font-size: 0.82rem; }
@@ -374,7 +536,8 @@
             background: var(--surface);
             border: 1px solid var(--border);
             border-radius: var(--radius);
-            overflow: hidden;
+            /* No `overflow: hidden` here — it would defeat the
+               internal scroll set higher up. */
         }
         /* Shared grid template for header + body rows so columns line up.
            cols: [checkbox] [status-dot] [name] [type] [last-seen wider] [snr] [hops] [trash] */
@@ -384,9 +547,10 @@
             grid-template-columns: 24px 18px 1fr 110px 170px 70px 60px 40px;
             align-items: center;
             gap: 12px;
-            padding: 10px 14px;
+            padding: 4px 14px;
             border-bottom: 1px solid var(--border);
-            font-size: 0.85rem;
+            font-size: 0.82rem;
+            line-height: 1.2;
         }
         .contact-row-header {
             background: var(--bg);
@@ -561,12 +725,16 @@
             text-transform: uppercase;
             letter-spacing: 0.06em;
             color: var(--muted);
+            white-space: nowrap;
         }
         .metric-value {
-            font-size: 0.9rem;
+            font-size: 0.82rem;
             font-weight: 500;
             color: var(--text);
             transition: color 0.15s;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
         }
         .metric-value.na { color: var(--muted); font-style: italic; }
 
@@ -588,7 +756,7 @@
         #status-msg { text-align: center; color: var(--muted); margin-top: 40px; font-size: 0.9rem; }
 
         /* ── Inbox history ─────────────────────────────────────── */
-        #inbox-history-section { margin-top: 32px; }
+        #inbox-history-section { margin-top: 16px; }
 
         .inbox-section-header {
             display: flex;
@@ -628,10 +796,10 @@
             display: flex;
             align-items: baseline;
             gap: 10px;
-            padding: 10px 16px;
+            padding: 4px 16px;
             border-bottom: 1px solid var(--border);
-            font-size: 0.88rem;
-            line-height: 1.4;
+            font-size: 0.85rem;
+            line-height: 1.25;
         }
         .inbox-msg:last-child { border-bottom: none; }
         .inbox-msg .msg-time {
@@ -683,6 +851,9 @@
         .msg-chan.private { background: #2a3a4a; color: #7ab; }
         .inbox-msg.sent { background: rgba(78,154,241,0.06); border-left: 3px solid var(--accent); }
         .inbox-msg.sent .msg-sender { color: var(--muted); font-weight: 500; }
+        /* Optimistic placeholder until the plugin confirms the send (~30s) */
+        .inbox-msg.pending { opacity: 0.6; font-style: italic; }
+        .inbox-msg.pending .msg-time { color: var(--yellow); font-style: normal; }
 
         /* ── Inbox filter bar ───────────────────────────────────── */
         #inbox-filters {
@@ -886,11 +1057,17 @@
         }
         .emoji-cell:hover { background: var(--border); }
 
-        /* Signal quality bar */
-        .signal-wrap { display: flex; align-items: center; gap: 6px; }
-        .signal-bars { display: flex; align-items: flex-end; gap: 2px; height: 14px; }
+        /* Signal quality bar — compact for inline metric rows */
+        .signal-wrap {
+            display: inline-flex;
+            align-items: center;
+            gap: 5px;
+            min-width: 0;
+        }
+        .signal-wrap span { font-variant-numeric: tabular-nums; }
+        .signal-bars { display: flex; align-items: flex-end; gap: 2px; height: 12px; flex-shrink: 0; }
         .signal-bars .bar {
-            width: 4px;
+            width: 3px;
             border-radius: 1px;
             background: var(--border);
             transition: background 0.3s;
@@ -1161,7 +1338,7 @@
             let directChip = "";
             if (!isSelf && slots.hops) {
                 const hopsRaw = _slotValue(slots.hops).replace(/\s*hops?$/i, "").trim();
-                if (hopsRaw === "0") directChip = `<span class="direct-chip" title="Heard directly (no repeater)"><i class="fa-solid fa-tower-broadcast"></i> Direct</span>`;
+                if (hopsRaw === "0") directChip = `<span class="direct-chip" title="Direct path learned (0 intermediate repeaters). Based on past discovery, not a live RX check."><i class="fa-solid fa-tower-broadcast"></i> Direct</span>`;
             }
 
             // Firmware info on the self-node card (from send_device_query)
@@ -1185,7 +1362,12 @@
                 const devIdx = _slotIdx(slot);
                 const raw = _slotValue(slot);
                 const numVal = raw.replace(/\s*(dBm|dB|%|V|°C|hops|min|s|pkts)$/i, "").trim();
-                const div = `<div class="metric" data-node="${escHtml(nodeName)}" data-key="${key}">`;
+                // Remote contact cards: hide metric rows that have no usable value
+                // (compact view). Self always shows everything so the user sees that
+                // their connected node is reporting all stats.
+                const hideEmpty = !isSelf && (!slot || numVal === "");
+                const cls = hideEmpty ? "metric empty" : "metric";
+                const div = `<div class="${cls}" data-node="${escHtml(nodeName)}" data-key="${key}">`;
                 const end = `</div>`;
                 if (!slot) {
                     metricsHtml += `${div}${renderMetricHtml(label, null, unit, null)}${end}`;
@@ -1211,6 +1393,9 @@
                 const icon = fav ? "fa-solid fa-star" : "fa-regular fa-star";
                 return `<button class="fav-toggle ${fav ? "active" : ""}" data-node="${escHtml(nodeName)}" title="${fav ? "Remove from favorites" : "Mark as favorite"}"><i class="${icon}"></i></button>`;
             })();
+            const mapHtml = (!isSelf && slots.lat != null && slots.lon != null && (slots.lat || slots.lon))
+                ? `<button class="map-toggle" data-node="${escHtml(nodeName)}" data-lat="${slots.lat}" data-lon="${slots.lon}" title="Show on map"><i class="fa-solid fa-location-dot"></i></button>`
+                : "";
 
             return `
         <div class="node-card" data-node="${escHtml(nodeName)}">
@@ -1223,6 +1408,7 @@
           </div>
           <div class="node-metrics">${metricsHtml}</div>
           ${settingsHtml}
+          ${mapHtml}
           ${favHtml}
         </div>`;
         }
@@ -1504,6 +1690,13 @@
             if (data && update && update !== _inboxLastUpdate) {
                 _inboxLastUpdate = update;
                 const { channel, sender, text } = _parseInboxData(data);
+                // If this is the confirmation of a recent optimistic echo,
+                // drop the pending placeholder so we don't show it twice.
+                if (sender && (sender.startsWith("> ") || sender.startsWith("▶"))) {
+                    const pIdx = _inboxHistory.findIndex(m =>
+                        m._pending && m.channel === channel && m.sender === sender && m.text === text);
+                    if (pIdx >= 0) _inboxHistory.splice(pIdx, 1);
+                }
                 _inboxHistory.unshift({ time: update, channel, sender, text });
                 if (_inboxHistory.length > 200) _inboxHistory.pop();
             }
@@ -1521,7 +1714,15 @@
                 return;
             }
 
-            _renderChannelChips(_allChannelChips());
+            const chips = _allChannelChips();
+            // If a previously-saved channel filter no longer corresponds to any
+            // existing channel/private chip, fall back to "All" so the user
+            // doesn't see a misleading "No messages match" forever.
+            if (_inboxChanFilter && !chips.includes(_inboxChanFilter)) {
+                _setChanFilter(null);
+                return;
+            }
+            _renderChannelChips(chips);
 
             const needle = _inboxSearch.toLowerCase();
             const visible = _inboxHistory.filter(m => {
@@ -1537,8 +1738,10 @@
                 return;
             }
 
-            const html = visible.map(({ time, channel, sender, text }) => {
-                const isSent = sender && sender.startsWith("▶");
+            const html = visible.map(({ time, channel, sender, text, _pending }) => {
+                // Outgoing marker may be "> " (current, ASCII-safe) or "▶" (legacy)
+                const isSent = sender && (sender.startsWith("> ") || sender.startsWith("▶"));
+                const isPending = !!_pending;
                 const chanHtml = channel
                     ? `<span class="msg-chan${channel === "Private" ? " private" : ""}">${escHtml(channel)}</span>`
                     : "";
@@ -1547,8 +1750,9 @@
                 const replyBtn = replyTarget
                     ? `<button class="msg-reply-btn" onclick="_replyTo(event,'${replyTarget}','${replyChannel}')" title="Reply to ${replyTarget}">↩ Reply</button>`
                     : "";
-                return `<div class="inbox-msg${isSent ? " sent" : ""}">
-          <span class="msg-time">${escHtml(time)}</span>
+                const timeLabel = isPending ? "sending…" : escHtml(time);
+                return `<div class="inbox-msg${isSent ? " sent" : ""}${isPending ? " pending" : ""}">
+          <span class="msg-time">${timeLabel}</span>
           ${chanHtml}
           ${sender ? `<span class="msg-sender">${escHtml(sender)}</span>` : ""}
           <span class="msg-text">${_renderMentions(text)}</span>
@@ -1727,6 +1931,10 @@
             const favHtml = fav
                 ? `<span class="row-fav" title="Favorite"><i class="fa-solid fa-star"></i></span>`
                 : `<span class="row-fav empty"></span>`;
+            const hasLoc = slots.lat != null && slots.lon != null && (slots.lat || slots.lon);
+            const mapInline = hasLoc
+                ? `<span class="row-map" data-node="${escHtml(name)}" data-lat="${slots.lat}" data-lon="${slots.lon}" title="Show on map"><i class="fa-solid fa-location-dot"></i></span>`
+                : "";
             const isDirect = hops === "0";
             const directHtml = isDirect
                 ? `<span class="row-direct" title="Direct neighbour (0 hops)"><i class="fa-solid fa-tower-broadcast"></i></span>`
@@ -1735,7 +1943,7 @@
         <div class="contact-row${selectedCls}" data-node="${escHtml(name)}">
           <span class="row-check"><span class="${checkCls}" data-node="${escHtml(name)}" data-checked="${isChecked ? 1 : 0}" role="checkbox" aria-checked="${isChecked}"><i class="fa-regular ${checkIcon}"></i></span></span>
           <span class="row-status ${online ? "online" : "offline"}" title="${online ? "Online" : "Offline"}"></span>
-          <div class="row-name">${favHtml}${escHtml(name)}${directHtml}</div>
+          <div class="row-name">${favHtml}${mapInline}${escHtml(name)}${directHtml}</div>
           <div class="row-type">${escHtml(typeLabel)}</div>
           <div class="row-meta">${escHtml(lastSeen || "—")}</div>
           <div class="row-snr">${snr ? escHtml(snr) + " dB" : "—"}</div>
@@ -2002,6 +2210,14 @@
                     _toggleFavorite(favBtn.dataset.node);
                     return;
                 }
+                // Map button (card overlay or list-row icon)
+                const mapBtn = ev.target.closest(".map-toggle, .row-map");
+                if (mapBtn) {
+                    ev.stopPropagation();
+                    ev.preventDefault();
+                    _openMapPanel(mapBtn.dataset.node, Number(mapBtn.dataset.lat), Number(mapBtn.dataset.lon));
+                    return;
+                }
                 // Remove button (single)
                 const removeBtn = ev.target.closest(".row-remove");
                 if (removeBtn) {
@@ -2131,6 +2347,89 @@
             _rerenderContacts();
             if (failures.length) alert("Some removals failed:\n\n" + failures.join("\n"));
         }
+
+        // ── Map side panel (Leaflet) ─────────────────────────────────────────────
+        let _leafletMap = null;
+        let _leafletMarker = null;
+
+        function _openMapPanel(name, lat, lon) {
+            const panel = document.getElementById("map-panel");
+            const backdrop = document.getElementById("map-backdrop");
+            const title = document.getElementById("map-panel-title");
+            const coords = document.getElementById("map-panel-coords");
+            const ext = document.getElementById("map-panel-external");
+            if (!panel || !backdrop) return;
+
+            title.textContent = name;
+            coords.textContent = `${lat.toFixed(6)}, ${lon.toFixed(6)}`;
+            // meshcore.co.uk/map.html may or may not honour lat/lon params — link out anyway
+            ext.href = `https://meshcore.co.uk/map.html?lat=${lat}&lon=${lon}`;
+
+            panel.classList.add("open");
+            backdrop.classList.add("open");
+            panel.setAttribute("aria-hidden", "false");
+
+            // Defer until Leaflet is loaded; give up after ~5s with a fallback message
+            const canvas = document.getElementById("map-canvas");
+            let tries = 0;
+            const init = () => {
+                if (typeof L === "undefined") {
+                    if (++tries > 50) {
+                        canvas.innerHTML = `<div style="padding:24px;color:var(--muted);font-size:0.85rem;text-align:center;">
+                            Leaflet failed to load from CDN.<br>Your browser may be blocking external scripts.<br>
+                            Coordinates: <code>${lat.toFixed(6)}, ${lon.toFixed(6)}</code>
+                        </div>`;
+                        return;
+                    }
+                    setTimeout(init, 100); return;
+                }
+                if (!_leafletMap) {
+                    _leafletMap = L.map(canvas, { zoomControl: true }).setView([lat, lon], 13);
+                    // OpenStreetMap default tiles — broadly compatible and not on tracker
+                    // block lists. CartoDB's dark tiles were getting blocked by Edge/Firefox
+                    // tracking prevention.
+                    L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+                        attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors',
+                        maxZoom: 19,
+                    }).addTo(_leafletMap);
+                } else {
+                    _leafletMap.setView([lat, lon], 13);
+                }
+                if (_leafletMarker) _leafletMarker.remove();
+                // CSS-only marker — avoids bundling Leaflet's PNG icons
+                const pinIcon = L.divIcon({
+                    className: "mc-pin",
+                    html: '<div class="mc-pin-inner"></div>',
+                    iconSize: [20, 20],
+                    iconAnchor: [10, 20],
+                    popupAnchor: [0, -16],
+                });
+                _leafletMarker = L.marker([lat, lon], { icon: pinIcon }).addTo(_leafletMap).bindPopup(name).openPopup();
+                // Force a redraw — the panel just animated in, container size may be stale
+                setTimeout(() => _leafletMap.invalidateSize(), 280);
+            };
+            init();
+        }
+
+        function _closeMapPanel() {
+            const panel = document.getElementById("map-panel");
+            const backdrop = document.getElementById("map-backdrop");
+            if (!panel || !backdrop) return;
+            panel.classList.remove("open");
+            backdrop.classList.remove("open");
+            panel.setAttribute("aria-hidden", "true");
+        }
+
+        // Hook up close interactions once on script load
+        (function _bindMapPanel() {
+            const close = document.getElementById("map-panel-close");
+            const backdrop = document.getElementById("map-backdrop");
+            if (close)    close.addEventListener("click", _closeMapPanel);
+            if (backdrop) backdrop.addEventListener("click", _closeMapPanel);
+            document.addEventListener("keydown", (e) => {
+                if (e.key === "Escape") _closeMapPanel();
+            });
+        })();
 
         async function _toggleFavorite(name) {
             if (!name) return;
@@ -2287,6 +2586,9 @@
                     input.value = "";
                     _clearReply();
                     _setComposeStatus(status, "ok", "✓ Sent");
+                    // Optimistic inbox echo so the user doesn't wait for the next
+                    // plugin heartbeat (~30s) to see their own message appear.
+                    _addPendingInboxEcho(target, body);
                 } else {
                     _setComposeStatus(status, "err", data.message || "Error");
                 }
@@ -2301,6 +2603,38 @@
         function _setComposeStatus(el, cls, text) {
             el.className = `compose-status ${cls}`.trim();
             el.textContent = text;
+        }
+
+        // Add a pending placeholder to the inbox so the user sees their own
+        // outgoing message immediately. Real send_result will replace this on
+        // the next refresh; if no real entry arrives within 90s, drop it.
+        function _addPendingInboxEcho(target, body) {
+            let channel, sender;
+            if (target.startsWith("#")) {
+                channel = target.slice(1) || "Public";
+                sender = "> Me";
+            } else {
+                channel = "Private";
+                sender = "> " + target;
+            }
+            const now = new Date();
+            const pad = n => String(n).padStart(2, "0");
+            const time = `${now.getFullYear()}-${pad(now.getMonth()+1)}-${pad(now.getDate())} `
+                       + `${pad(now.getHours())}:${pad(now.getMinutes())}:${pad(now.getSeconds())}`;
+            const id = `pending-${now.getTime()}-${Math.random().toString(36).slice(2,7)}`;
+            _inboxHistory.unshift({ time, channel, sender, text: body, _pending: id });
+            if (_inboxHistory.length > 200) _inboxHistory.pop();
+            _lastRenderedInboxHtml = "";
+            const container = document.getElementById("inbox-history");
+            if (container) _renderInbox(container);
+            setTimeout(() => {
+                const idx = _inboxHistory.findIndex(m => m._pending === id);
+                if (idx >= 0) {
+                    _inboxHistory.splice(idx, 1);
+                    _lastRenderedInboxHtml = "";
+                    if (container) _renderInbox(container);
+                }
+            }, 90000);
         }
 
         // ── Emoji picker ──────────────────────────────────────────────────────────
@@ -2502,5 +2836,26 @@
         window._replyTo            = _replyTo;
     })();
     </script>
+
+    <!-- ── Map side panel ─────────────────────────────────────── -->
+    <div id="map-backdrop"></div>
+    <div id="map-panel" aria-hidden="true">
+        <div id="map-panel-header">
+            <div>
+                <h3 id="map-panel-title">Map</h3>
+                <div class="coords" id="map-panel-coords"></div>
+            </div>
+            <button id="map-panel-close" title="Close (Esc)"><i class="fa-solid fa-xmark"></i></button>
+        </div>
+        <div id="map-panel-body">
+            <div id="map-canvas"></div>
+        </div>
+        <div id="map-panel-footer">
+            <span style="color: var(--muted);">Powered by Leaflet · OpenStreetMap</span>
+            <a id="map-panel-external" href="https://meshcore.co.uk/map.html" target="_blank" rel="noopener">
+                View on meshcore.co.uk <i class="fa-solid fa-arrow-up-right-from-square"></i>
+            </a>
+        </div>
+    </div>
 </body>
 </html>

@@ -114,6 +114,9 @@ BACKOFF_LOG_THRESH = 3      # after this many consecutive failures, downgrade Er
 # manual_add_contacts/telemetry/adv_loc_policy for this many seconds. Some
 # firmware briefly returns the prior value while flushing to flash, which
 # would otherwise undo the user's change on the very next poll.
+# Note: this only guards self_info-sourced settings. The default flood scope
+# comes from a separate get_default_flood_scope() round-trip and the device
+# returns the just-written value reliably there, so no grace needed for it.
 SETTINGS_GRACE_S = 45
 
 
@@ -484,6 +487,13 @@ class BasePlugin:
         if text == self._last_sent_text:
             return
         self._last_sent_text = text
+
+        # ── Short-circuit purely-local commands that don't need a radio session.
+        # !favorite only touches plugin-side state + the favorites JSON file, so
+        # spawning a full connect/disconnect worker would be pointless 1-3s lag.
+        if self._handle_local_only_command(text):
+            return
+
         Domoticz.Log(f"Sending message immediately: {text}")
         t = threading.Thread(
             target=self._immediate_send_worker, args=(text,),
@@ -492,6 +502,35 @@ class BasePlugin:
         self._worker_thread = t
         self._worker_started = time.monotonic()
         t.start()
+
+    def _handle_local_only_command(self, text: str) -> bool:
+        """Handle commands that don't require an MC connection. Returns True if
+        consumed (caller should not spawn a send worker).
+
+        Note: we intentionally don't enqueue a "send_result" here — the
+        dashboard already performs an optimistic update of its local
+        _deviceMap.favorites array on click, so it doesn't need confirmation
+        roundtripping through the queue.
+        """
+        if not text.startswith("!favorite "):
+            return False
+        try:
+            _, action, name = text.split(None, 2)
+        except ValueError:
+            Domoticz.Error("!favorite syntax: !favorite add|remove <name>")
+            return True
+        action = action.lower()
+        if action == "add":
+            self._favorites.add(name)
+        elif action == "remove":
+            self._favorites.discard(name)
+        else:
+            Domoticz.Error(f"!favorite unknown action: {action}")
+            return True
+        self._save_favorites()
+        self._write_device_map()
+        Domoticz.Debug(f"Favorite {action}: {name}")
+        return True
 
     # ── Device creation ───────────────────────────────────────────────────────
 
@@ -581,24 +620,38 @@ class BasePlugin:
                 (OFF_HOPS,     f"{node_name} Hops",      "Custom", {"Custom": "1;hops"}),
             ]
         created = False
+        skipped = False
         for offset, name, typename, opts in specs:
             unit = self._node_unit(idx, offset)
+            # Domoticz only allows units 1..255 per plugin instance. With the
+            # current 20-slot block size that caps us at ~11 remote contacts.
+            # Beyond that we silently skip Device creation — the contact still
+            # appears in the dashboard via the device map JSON.
+            if unit < 1 or unit > 255:
+                skipped = True
+                continue
             if unit not in Devices:
                 Domoticz.Device(Name=name, Unit=unit, TypeName=typename, Options=opts).Create()
                 created = True
         if created:
             Domoticz.Log(f"Created devices for node '{node_name}' (idx={idx})")
             self._write_device_map()
+        elif skipped and not getattr(self, "_warned_overflow", False):
+            Domoticz.Log(
+                f"Skipping Domoticz devices for node '{node_name}' (idx={idx}) — "
+                "unit numbers would exceed 255. The contact still appears on the dashboard."
+            )
+            self._warned_overflow = True
 
     # ── Custom dashboard page ──────────────────────────────────────────────────
 
     def _install_custom_page(self):
-        template = os.path.join(os.path.dirname(os.path.abspath(__file__)), "meshcore.html")
+        plugin_dir = os.path.dirname(os.path.abspath(__file__))
+        template = os.path.join(plugin_dir, "meshcore.html")
         if not os.path.isfile(template):
             Domoticz.Error("meshcore.html template not found — dashboard not installed.")
             return
 
-        plugin_dir    = os.path.dirname(os.path.abspath(__file__))
         domoticz_root = os.path.abspath(os.path.join(plugin_dir, "..", ".."))
         dest_dir      = os.path.join(domoticz_root, "www", "templates")
         dest          = os.path.join(dest_dir, "meshcore.html")
@@ -1094,30 +1147,9 @@ class BasePlugin:
           "#flood: hello"        → broadcast on channel 0 (alias)
           "!remove <name>"       → remove the named contact from the device
         """
-        # ── Special: toggle favorite contact ───────────────────────────────
-        # Syntax: "!favorite add <name>"  or  "!favorite remove <name>"
-        if text.startswith("!favorite "):
-            try:
-                _, action, name = text.split(None, 2)
-            except ValueError:
-                self._queue.put(("send_result", {"ok": False, "target": "!favorite", "body": text, "result": "syntax: !favorite add|remove <name>"}))
-                return
-            action = action.lower()
-            if action not in ("add", "remove"):
-                self._queue.put(("send_result", {"ok": False, "target": "!favorite", "body": text, "result": f"unknown action '{action}'"}))
-                return
-            if action == "add":
-                self._favorites.add(name)
-            else:
-                self._favorites.discard(name)
-            self._save_favorites()
-            self._write_device_map()
-            self._queue.put(("send_result", {
-                "ok": True, "target": "!favorite",
-                "body": f"{action} {name}",
-                "result": "applied",
-            }))
-            return
+        # Note: "!favorite ..." is intentionally NOT handled here — it is consumed
+        # locally by onDeviceModified()/_handle_local_only_command() without
+        # opening an MC session, since the operation only touches plugin state.
 
         # ── Special: set default flood scope ───────────────────────────────
         # Syntax: "!flood_scope <name>"  (empty name = reset to global flood)
@@ -1401,7 +1433,8 @@ class BasePlugin:
                     Devices[UNIT_MSGS_SENT_].Update(nValue=0, sValue=str(self._sent_count))
                 # Show sent message in the inbox so the user gets confirmation.
                 # Use the same [ChannelName|sender] / [P|sender] format as incoming msgs
-                # with a ▶ prefix on the sender to mark it as outgoing.
+                # with a leading "> " on the sender to mark it as outgoing. Stick to
+                # ASCII so Windows/cp1252 stored text isn't mangled.
                 if UNIT_INBOX in Devices:
                     tgt = d["target"]
                     me = self._self_name or "Me"
@@ -1411,12 +1444,12 @@ class BasePlugin:
                         chan_tag = self._channel_names.get(chan_idx_int, f"C{chan_idx_str}") if chan_idx_int is not None else f"C{chan_idx_str}"
                         Devices[UNIT_INBOX].Update(
                             nValue=0,
-                            sValue=f"[{chan_tag}|▶ {me}] {d['body']}"
+                            sValue=f"[{chan_tag}|> {me}] {d['body']}"
                         )
                     else:
                         Devices[UNIT_INBOX].Update(
                             nValue=0,
-                            sValue=f"[P|▶ {tgt}] {d['body']}"
+                            sValue=f"[P|> {tgt}] {d['body']}"
                         )
             else:
                 Domoticz.Error(f"Send failed to '{d['target']}': {d['result']}")

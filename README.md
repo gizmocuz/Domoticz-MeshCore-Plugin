@@ -141,6 +141,27 @@ Write to the **Mesh Send** device via the Domoticz API, a script, or the custom 
 
 > **Tip:** Channel names are resolved automatically by the plugin — you don't need to look up numeric indices. Available channels are logged on startup (e.g. `MeshCore channels: #0 = General, #1 = MyRoom`).
 
+### Internal control commands
+
+The **Mesh Send** device also accepts `!`-prefixed commands that configure the
+device or plugin state instead of transmitting a message. They never appear in
+the inbox or count towards the sent-messages counter. Useful for scripting.
+
+| Command | Result |
+|---|---|
+| `!remove <name>` | Remove the named contact from the connected device |
+| `!favorite add <name>` | Mark `<name>` as a favorite (sorted first on the dashboard, persisted to `meshcore_favorites.json`) |
+| `!favorite remove <name>` | Drop favorite |
+| `!manual_add on` / `!manual_add off` | Enable/disable manual-add-contacts on the device (off = auto-add adverts) |
+| `!set telemetry_base <0\|1\|2>` | Off / Public / Always |
+| `!set telemetry_env <0\|1\|2>` | Same, for environmental telemetry |
+| `!set telemetry_loc <0\|1\|2>` | Same, for location telemetry |
+| `!set adv_loc_policy <0\|1>` | Never share / Share location in adverts |
+| `!flood_scope <#tag>` | Set the device's default flood scope (empty = global flood, e.g. `!flood_scope #nl`) |
+
+`!favorite` is handled entirely in the plugin — no MC session is opened.
+The other `!` commands open a short radio session to apply the change.
+
 ----------
 
 ## 📜 dzVents Example Scripts
@@ -209,7 +230,7 @@ Setup → More Options → Custom Pages → meshcore
 - **Node cards** — online/offline badge, battery bar, signal quality bars (SNR), hops, last seen — every value links to its Domoticz device log
 - **Signal quality bars** — color-coded visual SNR indicator (green = excellent, yellow = fair, red = poor)
 - **Uptime formatting** — human-readable display like "2d 5h 12m" instead of raw minutes
-- **Node map** — collapsible interactive Leaflet.js map with dark CARTO tiles showing all nodes that report GPS coordinates — auto-hidden when no location data is available, supports manual coordinate overrides
+- **Node map** — click the 📍 icon on any contact card / list row to open a Leaflet map side-panel centered on that node (OpenStreetMap tiles loaded from `unpkg.com`; if your browser's tracking-prevention blocks the CDN, the panel shows a fallback message with the raw coordinates)
 - **Manual node locations** — place a `meshcore_locations.json` in the plugin folder to pin nodes without GPS on the map (see below)
 - **Message inbox** — full scrollable history with timestamps, channel tags and sender names
 - **Channel & search filters** — filter messages by channel or search by sender / text
