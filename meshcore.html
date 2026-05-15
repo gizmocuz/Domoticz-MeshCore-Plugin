@@ -1802,6 +1802,9 @@
         const NODE_METRICS = [
             { key: "hops",      label: "Hops",      unit: ""   },
             { key: "snr",       label: "SNR",       unit: "dB", special: "snr" },
+            // RSSI is hidden (empty) for normal contacts — no reliable value —
+            // but heard nodes carry a real advert RSSI, so the row appears.
+            { key: "rssi",      label: "RSSI",      unit: "dBm" },
             { key: "last_seen", label: "Last Seen", unit: ""   },
         ];
 
@@ -3011,6 +3014,7 @@
                     type:      h.type || 0,
                     status:    { online: false },
                     snr:       (h.snr != null) ? { value: `${h.snr} dB` } : null,
+                    rssi:      (h.rssi != null) ? { value: `${h.rssi} dBm` } : null,
                     hops:      (h.path_len != null && h.path_len >= 0) ? { value: String(h.path_len) } : null,
                     last_seen: lastSeen ? { value: lastSeen } : null,
                     last_advert: h.node_ts || 0,
@@ -4757,6 +4761,7 @@ Larger = more reliable routing but smaller mesh diameter.">Path hash size</label
                 pubkey: h.pubkey || "",
                 type:   h.type || 0,
                 snr:    (h.snr != null) ? { value: `${h.snr} dB` } : null,
+                rssi:   (h.rssi != null) ? { value: `${h.rssi} dBm` } : null,
                 hops:   (h.path_len != null && h.path_len >= 0) ? { value: String(h.path_len) } : null,
                 lat:    h.lat ?? null,
                 lon:    h.lon ?? null,
@@ -4772,7 +4777,10 @@ Larger = more reliable routing but smaller mesh diameter.">Path hash size</label
                        || _heardNodeShape(name) || {};
             const query = node.query || {};
             const hops  = node.hops && node.hops.value || "?";
-            const snr   = node.snr  && node.snr.value  || "?";
+            // Values already carry their unit ("4.5 dB" / "-88 dBm") — strip
+            // it so we don't render a doubled unit in the panel.
+            const snr   = (node.snr  && String(node.snr.value).replace(/\s*dB$/i, "").trim())  || "?";
+            const rssiV = (node.rssi && String(node.rssi.value).replace(/\s*dBm$/i, "").trim()) || "";
             const cLat = node.lat, cLon = node.lon;
             const cHasLoc = (cLat != null && cLon != null) && (cLat || cLon);
             // Distance from us — only if both we and the node have GPS.
@@ -4828,6 +4836,7 @@ Larger = more reliable routing but smaller mesh diameter.">Path hash size</label
                 <div class="self-row"><label>Type</label><span class="self-value">${escHtml(({1:"Contact",2:"Repeater",3:"Room Server",4:"Sensor"})[node.type] || node.type || "?")}</span></div>
                 <div class="self-row"><label>Hops</label><span class="self-value">${escHtml(hops)}</span></div>
                 <div class="self-row"><label>SNR</label><span class="self-value">${escHtml(snr)} dB</span></div>
+                ${rssiV ? `<div class="self-row"><label>RSSI</label><span class="self-value">${escHtml(rssiV)} dBm</span></div>` : ""}
                 <div class="self-row"><label>Public key</label>
                     <div class="self-input-wrap">
                         <input type="text" readonly value="${escHtml(node.pubkey || "")}">
