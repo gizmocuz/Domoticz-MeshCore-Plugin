@@ -272,6 +272,24 @@ class BasePlugin:
         # duplicate-flood copies repeat with the same sender_timestamp/text
         # on a different path). 300 entries ≈ plenty at mesh message rates.
         self._recent_msg_sigs = collections.deque(maxlen=300)
+        # Lifetime statistics (persisted to meshcore_stats.json, flushed on
+        # the rx-log cadence + on stop, reloaded on start). Sender class is
+        # derived from the contact type: Repeater(2) / Room Server(3) /
+        # everything else (incl. unknown) = client. Mutations are guarded by
+        # self._rx_log_lock (same lock as the heard/rx-log writers).
+        self._stats = {
+            "adverts_total":  0,
+            "messages_total": 0,
+            "client_total":   0,
+            "repeater_total": 0,
+            "server_total":   0,
+            "msg_by_sender":  {},   # sender name -> message count
+            "adv_by_sender":  {},   # advert name -> advert count
+            "hops_record":    {"hops": -1, "name": "", "date": "", "channel": ""},
+            "today":          {"date": "", "messages": 0,
+                               "client": 0, "repeater": 0, "server": 0},
+        }
+        self._stats_dirty = False
         # Persistent "heard nodes" — adverts from nodes NOT in our contacts.
         # full pubkey hex → {pubkey, name, type, lat, lon, snr, rssi,
         #   path_len, first_heard, last_heard}. Survives restarts via
@@ -393,6 +411,7 @@ class BasePlugin:
         self._load_favorites()
         self._load_heard()
         self._load_rx_log()
+        self._load_stats()
 
         if Parameters.get("Mode4", "true") == "true":
             self._install_custom_page()
@@ -748,6 +767,9 @@ class BasePlugin:
             ("meshcore_rx_log.json",  {"entries": [], "stats": {}}),
             ("meshcore_channels.json", {}),
             ("meshcore_heard.json",   {"nodes": {}}),
+            ("meshcore_stats.json",   {"messages_total": 0, "adverts_total": 0,
+                                       "msg_by_sender": {}, "adv_by_sender": {},
+                                       "today": {}}),
         ):
             stub_path = os.path.join(dest_dir, stub_name)
             if not os.path.isfile(stub_path):
@@ -1031,6 +1053,109 @@ class BasePlugin:
             Domoticz.Log(f"Restored {len(self._packet_times)} packet timestamp(s) for the heatmap")
         except Exception as exc:
             Domoticz.Error(f"Could not load packet times from meshcore_rx_log.json: {exc}")
+
+    def _stats_path(self) -> str:
+        plugin_dir    = os.path.dirname(os.path.abspath(__file__))
+        domoticz_root = os.path.abspath(os.path.join(plugin_dir, "..", ".."))
+        return os.path.join(domoticz_root, "www", "templates", "meshcore_stats.json")
+
+    def _load_stats(self):
+        """Restore lifetime statistics on startup. Today's counters reset
+        when the stored day != the current local day."""
+        path = self._stats_path()
+        if not os.path.isfile(path):
+            return
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if not isinstance(data, dict):
+                return
+            s = self._stats
+            for k in ("adverts_total", "messages_total", "client_total",
+                      "repeater_total", "server_total"):
+                if isinstance(data.get(k), int):
+                    s[k] = data[k]
+            for k in ("msg_by_sender", "adv_by_sender"):
+                if isinstance(data.get(k), dict):
+                    s[k] = {str(n): int(c) for n, c in data[k].items()
+                            if isinstance(c, (int, float))}
+            hr = data.get("hops_record")
+            if isinstance(hr, dict) and isinstance(hr.get("hops"), int):
+                s["hops_record"] = {
+                    "hops": hr.get("hops", -1), "name": hr.get("name", ""),
+                    "date": hr.get("date", ""), "channel": hr.get("channel", ""),
+                }
+            today = time.strftime("%Y-%m-%d")
+            td = data.get("today")
+            if isinstance(td, dict) and td.get("date") == today:
+                s["today"] = {
+                    "date": today,
+                    "messages": int(td.get("messages", 0)),
+                    "client":   int(td.get("client", 0)),
+                    "repeater": int(td.get("repeater", 0)),
+                    "server":   int(td.get("server", 0)),
+                }
+            Domoticz.Log(
+                f"Restored stats: {s['messages_total']} msgs / "
+                f"{s['adverts_total']} adverts lifetime")
+        except Exception as exc:
+            Domoticz.Error(f"Could not load meshcore_stats.json: {exc}")
+
+    def _write_stats(self):
+        """Atomically persist lifetime statistics (also fetched by the
+        dashboard to render the statistics side panel)."""
+        dest = self._stats_path()
+        with self._rx_log_lock:
+            payload = dict(self._stats)
+            payload["msg_by_sender"] = dict(self._stats["msg_by_sender"])
+            payload["adv_by_sender"] = dict(self._stats["adv_by_sender"])
+            payload["hops_record"]   = dict(self._stats["hops_record"])
+            payload["today"]         = dict(self._stats["today"])
+            payload["written_at"]    = int(time.time())
+        try:
+            tmp = dest + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(payload, f)
+            os.replace(tmp, dest)
+        except Exception as exc:
+            Domoticz.Debug(f"Could not write stats: {exc}")
+
+    def _classify_sender(self, name: str) -> str:
+        """client / repeater / server from the contact's MeshCore type.
+        Unknown or any other type counts as client (per design)."""
+        t = self._node_types.get(name, 0)
+        if t == 2:
+            return "repeater"
+        if t == 3:
+            return "server"
+        return "client"
+
+    def _bump_msg_stats(self, sender: str, hops, channel: str):
+        cls = self._classify_sender(sender)
+        today = time.strftime("%Y-%m-%d")
+        with self._rx_log_lock:
+            s = self._stats
+            if s["today"].get("date") != today:
+                s["today"] = {"date": today, "messages": 0,
+                              "client": 0, "repeater": 0, "server": 0}
+            s["messages_total"] += 1
+            s["today"]["messages"] += 1
+            s[f"{cls}_total"] += 1
+            s["today"][cls] += 1
+            if sender:
+                s["msg_by_sender"][sender] = s["msg_by_sender"].get(sender, 0) + 1
+            if isinstance(hops, int) and hops >= 0 and hops > s["hops_record"]["hops"]:
+                s["hops_record"] = {"hops": hops, "name": sender or "?",
+                                    "date": today, "channel": channel or ""}
+            self._stats_dirty = True
+
+    def _bump_adv_stats(self, name: str):
+        with self._rx_log_lock:
+            s = self._stats
+            s["adverts_total"] += 1
+            if name:
+                s["adv_by_sender"][name] = s["adv_by_sender"].get(name, 0) + 1
+            self._stats_dirty = True
 
     def _heard_path(self) -> str:
         plugin_dir    = os.path.dirname(os.path.abspath(__file__))
@@ -1357,9 +1482,16 @@ class BasePlugin:
                     if self._heard_dirty:
                         self._heard_dirty = False
                         self._write_heard()
+                    if self._stats_dirty:
+                        self._stats_dirty = False
+                        self._write_stats()
         finally:
             try:
                 self._write_heard()
+            except Exception:
+                pass
+            try:
+                self._write_stats()
             except Exception:
                 pass
             try:
@@ -2565,9 +2697,8 @@ class BasePlugin:
             # Ambient advertisement — used by handlers that want a hint that
             # a node is alive even before its first message. We don't update
             # any Domoticz device from this directly; the next contacts refresh
-            # handles status/last_advert. Keeping the hook so dashboards can
-            # tap into it later via the device map's last_advert field.
-            pass
+            # handles status/last_advert. We do tally it for lifetime stats.
+            self._bump_adv_stats((item[1].get("adv_name") or "").strip())
         elif kind == "contacts":
             self._handle_contacts(item[1])
             # First contacts batch processed — bump heartbeat back to a
@@ -2910,6 +3041,12 @@ class BasePlugin:
             msg_ts, ts_bad = int(st), False
         else:
             msg_ts, ts_bad = now_i, True
+
+        # Lifetime statistics (leaderboard + client/repeater/server split).
+        _hops = msg.get("path_len")
+        self._bump_msg_stats(node_name or display_name,
+                             _hops if isinstance(_hops, int) else -1,
+                             chan_tag)
 
         # Update global inbox — [chan|sender|<epoch>[|x]] text
         self._set(MESH_DID, UNIT_INBOX, 0,

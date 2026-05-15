@@ -91,6 +91,60 @@
 
         #last-updated { font-size: 0.8rem; color: var(--muted); }
 
+        #header-stats {
+            flex: 1 1 auto;
+            min-width: 0;
+            font-size: 0.82rem;
+            color: var(--muted);
+            display: flex;
+            align-items: center;
+            gap: 4px 14px;
+            flex-wrap: wrap;
+            padding-left: 6px;
+        }
+        #header-stats .hs-label { color: var(--muted); }
+        #header-stats b { color: var(--text); font-weight: 600; }
+        #header-stats .hs-client   { color: var(--green); }
+        #header-stats .hs-repeater { color: var(--yellow); }
+        #header-stats .hs-server   { color: var(--accent); }
+        #header-stats .hs-client b,
+        #header-stats .hs-repeater b,
+        #header-stats .hs-server b { color: inherit; }
+        #header-stats .hs-sep { opacity: 0.4; }
+
+        /* ── Statistics side panel ── */
+        .stats-cards { display: flex; gap: 10px; margin: 10px 0 4px; }
+        .stats-card {
+            flex: 1; text-align: center; padding: 12px 6px;
+            background: var(--surface); border: 1px solid var(--border);
+            border-radius: var(--radius);
+        }
+        .stats-card .sc-label { font-size: 0.72rem; color: var(--muted);
+            text-transform: uppercase; letter-spacing: 0.04em; }
+        .stats-card .sc-value { font-size: 1.5rem; font-weight: 700;
+            color: var(--accent); margin-top: 3px; }
+        .stats-tot { font-size: 0.92rem; margin: 4px 0 2px; }
+        .stats-tot b { color: var(--text); }
+        .stats-tot .st-adv { color: var(--yellow); }
+        .stats-tot .st-msg { color: var(--accent); }
+        .lb-row { margin: 7px 0; }
+        .lb-top {
+            display: flex; justify-content: space-between;
+            font-size: 0.82rem; color: var(--text); margin-bottom: 3px;
+        }
+        .lb-top .lb-count { color: var(--accent); font-weight: 600; }
+        .lb-bar { height: 7px; border-radius: 4px; background: var(--bg); overflow: hidden; }
+        .lb-fill { height: 100%; border-radius: 4px; background: var(--green); }
+        .lb-fill.adv { background: var(--yellow); }
+        .hops-rec {
+            margin: 12px 0; padding: 12px 14px;
+            background: var(--surface); border: 1px solid var(--border);
+            border-radius: var(--radius);
+        }
+        .hops-rec .hr-title { color: var(--yellow); font-weight: 600; margin-bottom: 6px; }
+        .hops-rec .hr-line { font-size: 0.85rem; color: var(--text); line-height: 1.6; }
+        .hops-rec .hr-line b { color: var(--accent); }
+
         #refresh-btn {
             background: var(--surface);
             border: 1px solid var(--border);
@@ -1613,8 +1667,10 @@
 
     <header>
         <h1><span class="logo">MC</span> MeshCore Dashboard</h1>
+        <div id="header-stats" title="Messages received today (since local midnight)"></div>
         <div style="display:flex;align-items:center;gap:10px">
             <div class="rx-toolbar">
+                <button class="rx-tool-btn" onclick="_openSidePanel('stats')" title="Statistics — lifetime totals & leaderboards"><i class="fa-solid fa-ranking-star"></i></button>
                 <button class="rx-tool-btn" onclick="_openSidePanel('firehose')" title="Live RF firehose (RX_LOG_DATA)"><i class="fa-solid fa-tower-broadcast"></i></button>
                 <button class="rx-tool-btn" onclick="_openSidePanel('traffic')" title="Traffic stats by payload type"><i class="fa-solid fa-chart-column"></i></button>
                 <button class="rx-tool-btn" onclick="_openSidePanel('heatmap')" title="24h packet rate heatmap"><i class="fa-solid fa-grip"></i></button>
@@ -1804,6 +1860,89 @@
                 const r = await fetch("/templates/meshcore_heard.json?_=" + Date.now());
                 if (r.ok) _heard = await r.json();
             } catch (_) { }
+        }
+
+        let _stats = null;
+        async function _loadStats() {
+            try {
+                const r = await fetch("/templates/meshcore_stats.json?_=" + Date.now());
+                if (r.ok) _stats = await r.json();
+            } catch (_) { }
+            _renderHeaderStats();
+        }
+
+        function _renderHeaderStats() {
+            const el = document.getElementById("header-stats");
+            if (!el) return;
+            const t = (_stats && _stats.today) || {};
+            const m = t.messages || 0, c = t.client || 0,
+                  rp = t.repeater || 0, sv = t.server || 0;
+            el.innerHTML =
+                `<span class="hs-label">Today</span> `
+              + `<span><i class="fa-solid fa-envelope"></i> <b>${m}</b> msgs</span>`
+              + `<span class="hs-sep">·</span>`
+              + `<span class="hs-client">Client <b>${c}</b></span>`
+              + `<span class="hs-repeater">Repeater <b>${rp}</b></span>`
+              + `<span class="hs-server">Server <b>${sv}</b></span>`;
+        }
+
+        function _statsLeaderboard(map, limit, cls) {
+            const rows = Object.entries(map || {})
+                .filter(([, c]) => c > 0)
+                .sort((a, b) => b[1] - a[1])
+                .slice(0, limit);
+            if (!rows.length) return `<div class="dd-chart-unconfigured">No data yet.</div>`;
+            const max = rows[0][1] || 1;
+            return rows.map(([name, n]) => `
+                <div class="lb-row">
+                    <div class="lb-top"><span>${escHtml(name)}</span><span class="lb-count">${n}</span></div>
+                    <div class="lb-bar"><div class="lb-fill ${cls}" style="width:${Math.max(2, Math.round(n / max * 100))}%"></div></div>
+                </div>`).join("");
+        }
+
+        function _renderStatsPanel() {
+            const view = document.getElementById("stats-view");
+            if (!view) return;
+            if (!_stats) {
+                view.innerHTML = `<div class="dd-chart-unconfigured">Statistics not available yet.</div>`;
+                return;
+            }
+            const s = _stats;
+            const hr = s.hops_record || {};
+            const hopsHtml = (hr.hops != null && hr.hops >= 0) ? `
+                <div class="hops-rec">
+                    <div class="hr-title">🏆 Hops record</div>
+                    <div class="hr-line">
+                        All-time max: <b>${hr.hops}</b> hops<br>
+                        Name: <b>${escHtml(hr.name || "?")}</b><br>
+                        Date: <b>${escHtml(hr.date || "?")}</b><br>
+                        Channel: <b>${escHtml(hr.channel || "?")}</b>
+                    </div>
+                </div>` : "";
+            view.innerHTML = `
+                <div class="self-section">Totals</div>
+                <div class="stats-tot">
+                    Adverts: <b class="st-adv">${s.adverts_total || 0}</b>
+                    &nbsp;|&nbsp;
+                    Messages: <b class="st-msg">${s.messages_total || 0}</b>
+                </div>
+                <div class="stats-cards">
+                    <div class="stats-card"><div class="sc-label">Client</div>
+                        <div class="sc-value">${s.client_total || 0}</div></div>
+                    <div class="stats-card"><div class="sc-label">Repeater</div>
+                        <div class="sc-value">${s.repeater_total || 0}</div></div>
+                    <div class="stats-card"><div class="sc-label">Server</div>
+                        <div class="sc-value">${s.server_total || 0}</div></div>
+                </div>
+
+                <div class="self-section">Top message senders</div>
+                ${_statsLeaderboard(s.msg_by_sender, 30, "")}
+
+                ${hopsHtml}
+
+                <div class="self-section">Top advert senders</div>
+                ${_statsLeaderboard(s.adv_by_sender, 15, "adv")}
+            `;
         }
 
         // Heuristic: match an inbox message to an RX log entry.
@@ -3537,6 +3676,11 @@
                 coords.textContent = "Adverts from nodes not in your contacts";
                 body.innerHTML = `<div class="panel-view" id="heard-view"></div>`;
                 _renderHeardIfOpen();
+            } else if (view === "stats") {
+                title.textContent  = "Statistics";
+                coords.textContent = "Lifetime totals & leaderboards";
+                body.innerHTML = `<div class="panel-view" id="stats-view"></div>`;
+                _loadStats().then(_renderStatsPanel);
             } else if (view === "self") {
                 title.textContent  = "Connected node";
                 coords.textContent = "Identity, radio, advert, telemetry";
@@ -4631,6 +4775,31 @@ Larger = more reliable routing but smaller mesh diameter.">Path hash size</label
             const snr   = node.snr  && node.snr.value  || "?";
             const cLat = node.lat, cLon = node.lon;
             const cHasLoc = (cLat != null && cLon != null) && (cLat || cLon);
+            // Distance from us — only if both we and the node have GPS.
+            // Our own coords live in self_info (adv_lat/adv_lon); the self
+            // node usually has no lat/lon under nodes[]. Fall back to that.
+            const _si = (_deviceMap && _deviceMap.self_info) || {};
+            const _selfNode = (_deviceMap && _deviceMap.self
+                && _deviceMap.nodes && _deviceMap.nodes[_deviceMap.self]) || null;
+            // Coerce to numbers — JSON values may arrive as strings; a
+            // non-finite or null-island (0,0) coord is treated as "no fix".
+            const sLat = Number(_si.adv_lat != null ? _si.adv_lat
+                          : (_selfNode ? _selfNode.lat : NaN));
+            const sLon = Number(_si.adv_lon != null ? _si.adv_lon
+                          : (_selfNode ? _selfNode.lon : NaN));
+            const cLatN = Number(cLat), cLonN = Number(cLon);
+            const sHasLoc = isFinite(sLat) && isFinite(sLon) && (sLat || sLon);
+            const cFix    = isFinite(cLatN) && isFinite(cLonN) && (cLatN || cLonN);
+            let distHtml = "";
+            if (cFix && sHasLoc) {
+                const R = 6371, toR = d => d * Math.PI / 180;
+                const dLat = toR(cLatN - sLat), dLon = toR(cLonN - sLon);
+                const a = Math.sin(dLat/2)**2
+                        + Math.cos(toR(sLat)) * Math.cos(toR(cLatN)) * Math.sin(dLon/2)**2;
+                const km = R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+                const txt = km < 1 ? `${Math.round(km * 1000)} m` : `${km.toFixed(km < 10 ? 2 : 1)} km`;
+                distHtml = `<div class="self-row"><label>Distance</label><span class="self-value">${txt} from us</span></div>`;
+            }
 
             const fmtAge = (t) => {
                 if (!t) return "never";
@@ -4668,6 +4837,7 @@ Larger = more reliable routing but smaller mesh diameter.">Path hash size</label
                 <div class="self-row"><label>Coordinates</label>
                     <span class="self-value">${cHasLoc ? `${cLat}, ${cLon}` : "—"}</span>
                 </div>
+                ${distHtml}
                 ${cHasLoc ? `<div id="contact-map"></div>` : ""}
                 ${_convDevIdx(name) ? `
                 <div class="self-input-wrap">
@@ -5031,7 +5201,7 @@ Larger = more reliable routing but smaller mesh diameter.">Path hash size</label
         }
 
         // Init: load JSON files, render snapshot instantly, then start live refresh loop.
-        Promise.all([_loadChannelNames(), _loadDeviceMap(), _loadRxLog(), _loadHeard()]).then(async () => {
+        Promise.all([_loadChannelNames(), _loadDeviceMap(), _loadRxLog(), _loadHeard(), _loadStats()]).then(async () => {
             _deviceMapFreshFromInit = true;
             _populateComposeTargets();
             await initialRender();   // instant — no API call
@@ -5052,6 +5222,10 @@ Larger = more reliable routing but smaller mesh diameter.">Path hash size</label
                 });
                 if (_isOpen("heard")) _loadHeard().then(_renderHeardIfOpen);
             }, 3000);
+            // Stats: refresh the header strip + (if open) the stats panel.
+            setInterval(() => {
+                _loadStats().then(() => { if (_isOpen("stats")) _renderStatsPanel(); });
+            }, 15000);
         });
 
         // ── Compose bar ───────────────────────────────────────────────────────────
