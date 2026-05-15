@@ -110,6 +110,7 @@ OFF_UPTIME    = 11  # Custom (min): node uptime
 OFF_AIRTIME   = 12  # Custom (%):  TX airtime utilization
 OFF_MSGS_SENT = 13  # Custom:      total messages sent
 OFF_MSGS_RECV = 14  # Custom:      total messages received
+OFF_MSGS      = 15  # Text:        per-contact DM conversation history
 
 # Cayenne LPP sensor type codes (used in self_telemetry LPP list entries)
 LPP_TEMPERATURE = 103
@@ -265,6 +266,22 @@ class BasePlugin:
         self._dup_floods:          dict = collections.defaultdict(list)
         # 24h × 1h heatmap: hour-of-day → count for past 24h (timestamps trimmed on read)
         self._packet_times = collections.deque(maxlen=2000)  # raw ts list, trimmed to last 24h
+        # Recent incoming-message signatures for de-duplication. The same
+        # message can arrive twice: as an unsolicited push AND via the
+        # get_msg() drain that start_auto_message_fetching() performs (and
+        # duplicate-flood copies repeat with the same sender_timestamp/text
+        # on a different path). 300 entries ≈ plenty at mesh message rates.
+        self._recent_msg_sigs = collections.deque(maxlen=300)
+        # Persistent "heard nodes" — adverts from nodes NOT in our contacts.
+        # full pubkey hex → {pubkey, name, type, lat, lon, snr, rssi,
+        #   path_len, first_heard, last_heard}. Survives restarts via
+        # meshcore_heard.json (flushed on the rx-log cadence + on stop).
+        # Updated from RX_LOG ADVERT frames on the worker thread under
+        # _rx_log_lock; _known_pubkeys is swapped wholesale by _handle_contacts
+        # so the worker can cheaply skip nodes that are already contacts.
+        self._heard_nodes: dict = {}
+        self._heard_dirty = False
+        self._known_pubkeys: set = set()
 
     def _force_close_serial(self, mc):
         """Synchronously close the underlying pyserial port.
@@ -374,6 +391,8 @@ class BasePlugin:
         self._create_base_devices()
         self._load_manual_locations()
         self._load_favorites()
+        self._load_heard()
+        self._load_rx_log()
 
         if Parameters.get("Mode4", "true") == "true":
             self._install_custom_page()
@@ -515,7 +534,7 @@ class BasePlugin:
             Domoticz.Error("Send failed: not connected to MeshCore device yet (will retry on reconnect).")
             self._queue.put(("send_result", {
                 "ok": False, "target": "?", "body": text,
-                "result": "not connected — auto-reconnect in progress"
+                "result": "not connected - auto-reconnect in progress"
             }))
             return
 
@@ -688,6 +707,7 @@ class BasePlugin:
                 (OFF_SNR,      f"{node_name} SNR",       "Custom", {"Custom": "1;dB"}),
                 (OFF_LASTSEEN, f"{node_name} Last Seen", "Text",   {}),
                 (OFF_HOPS,     f"{node_name} Hops",      "Custom", {"Custom": "1;hops"}),
+                (OFF_MSGS,     f"{node_name} Messages",  "Text",   {}),
             ]
         created = False
         existing_units = (Devices[did].Units if did in Devices else {})
@@ -727,6 +747,7 @@ class BasePlugin:
             ("meshcore_devices.json", {"inbox": None, "nodes": {}}),
             ("meshcore_rx_log.json",  {"entries": [], "stats": {}}),
             ("meshcore_channels.json", {}),
+            ("meshcore_heard.json",   {"nodes": {}}),
         ):
             stub_path = os.path.join(dest_dir, stub_name)
             if not os.path.isfile(stub_path):
@@ -841,6 +862,7 @@ class BasePlugin:
                 "snr":       _slot(did, OFF_SNR),
                 "noise":     _slot(did, OFF_NOISE),
                 "last_seen": ls_slot,
+                "msgs":      _slot(did, OFF_MSGS),
                 "hops":      _slot(did, OFF_HOPS),
                 "uptime":    _slot(did, OFF_UPTIME),
                 "airtime":   _slot(did, OFF_AIRTIME),
@@ -921,9 +943,7 @@ class BasePlugin:
         detail panel, RF firehose, signal sparklines, packet-rate heatmap,
         duplicate-flood and channel-discovery views.
         """
-        plugin_dir    = os.path.dirname(os.path.abspath(__file__))
-        domoticz_root = os.path.abspath(os.path.join(plugin_dir, "..", ".."))
-        dest = os.path.join(domoticz_root, "www", "templates", "meshcore_rx_log.json")
+        dest = self._rx_log_path()
 
         now = time.time()
         with self._rx_log_lock:
@@ -939,6 +959,9 @@ class BasePlugin:
             heatmap = [0] * 24
             for t in self._packet_times:
                 heatmap[time.localtime(t).tm_hour] += 1
+            # Persist the (already 24h-trimmed) timestamps so the heatmap can
+            # be restored on the next plugin start instead of resetting.
+            packet_times = [int(t) for t in self._packet_times]
 
         # Build a JSON-safe view of each entry (already normalized in _on_rx_log)
         out_entries = []
@@ -964,6 +987,7 @@ class BasePlugin:
                 "dup_floods":          dup_floods,
                 "heatmap_24h":         heatmap,
             },
+            "packet_times":   packet_times,
             "known_channels": self._channel_names,
         }
 
@@ -974,6 +998,76 @@ class BasePlugin:
             os.replace(tmp, dest)
         except Exception as exc:
             Domoticz.Debug(f"Could not write rx log: {exc}")
+
+    def _rx_log_path(self) -> str:
+        plugin_dir    = os.path.dirname(os.path.abspath(__file__))
+        domoticz_root = os.path.abspath(os.path.join(plugin_dir, "..", ".."))
+        return os.path.join(domoticz_root, "www", "templates", "meshcore_rx_log.json")
+
+    def _load_rx_log(self):
+        """Restore the packet-time history on startup so the packets/hour
+        heatmap survives a plugin restart instead of resetting to zero.
+        Only the heatmap source (packet_times) is restored; the rolling
+        frame buffer / sparklines rebuild from live RX events."""
+        # Only seed an empty buffer. On a warm disable→enable (Domoticz still
+        # running) _packet_times may already hold live samples; appending the
+        # persisted ones again would double-count the heatmap.
+        if self._packet_times:
+            return
+        path = self._rx_log_path()
+        if not os.path.isfile(path):
+            return
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            pts = data.get("packet_times") if isinstance(data, dict) else None
+            if not isinstance(pts, list):
+                return
+            cutoff = time.time() - 86400
+            pts = sorted(int(t) for t in pts if isinstance(t, (int, float)))
+            pts = [t for t in pts if t >= cutoff]
+            # Respect the deque's maxlen — keep the most recent samples.
+            self._packet_times.extend(pts)
+            Domoticz.Log(f"Restored {len(self._packet_times)} packet timestamp(s) for the heatmap")
+        except Exception as exc:
+            Domoticz.Error(f"Could not load packet times from meshcore_rx_log.json: {exc}")
+
+    def _heard_path(self) -> str:
+        plugin_dir    = os.path.dirname(os.path.abspath(__file__))
+        domoticz_root = os.path.abspath(os.path.join(plugin_dir, "..", ".."))
+        return os.path.join(domoticz_root, "www", "templates", "meshcore_heard.json")
+
+    def _load_heard(self):
+        """Load the persisted heard-nodes store on startup."""
+        path = self._heard_path()
+        if not os.path.isfile(path):
+            return
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            nodes = data.get("nodes") if isinstance(data, dict) else None
+            if isinstance(nodes, dict):
+                self._heard_nodes = nodes
+                Domoticz.Log(f"Loaded {len(nodes)} heard node(s) from meshcore_heard.json")
+        except Exception as exc:
+            Domoticz.Error(f"Could not load meshcore_heard.json: {exc}")
+
+    def _write_heard(self):
+        """Atomically persist the heard-nodes store. Also the file the
+        dashboard fetches to render the Heard-nodes side panel."""
+        dest = self._heard_path()
+        with self._rx_log_lock:
+            payload = {
+                "written_at": int(time.time()),
+                "nodes": {k: dict(v) for k, v in self._heard_nodes.items()},
+            }
+        try:
+            tmp = dest + ".tmp"
+            with open(tmp, "w") as f:
+                json.dump(payload, f)
+            os.replace(tmp, dest)
+        except Exception as exc:
+            Domoticz.Debug(f"Could not write heard nodes: {exc}")
 
     def _remove_custom_page(self):
         plugin_dir    = os.path.dirname(os.path.abspath(__file__))
@@ -1135,6 +1229,30 @@ class BasePlugin:
         except Exception as exc:
             Domoticz.Error(f"Worker: subscribe failed: {exc}")
 
+        # Catch up on anything the firmware queued while we were disconnected
+        # (or before we subscribed). _drain_push_events() logs how many it
+        # pulled, so the user can SEE the missed-message count on (re)connect.
+        try:
+            n_missed = await self._drain_push_events(mc)
+            if n_missed:
+                Domoticz.Log(f"Reconnect catch-up: received {n_missed} message(s) "
+                             f"that were queued while disconnected.")
+            else:
+                Domoticz.Log("Reconnect catch-up: no messages were missed.")
+        except Exception as exc:
+            Domoticz.Debug(f"Worker: connect-time drain error: {exc}")
+
+        # Keep draining on every MESSAGES_WAITING signal for the life of this
+        # connection. start_auto_message_fetching() also does one immediate
+        # get_msg() (harmless — the drain above already emptied the queue, and
+        # the _handle_message signature de-dup collapses any redelivery, so
+        # this no longer causes duplicate inbox entries). Re-armed on every
+        # reconnect (bound to this mc); mc.disconnect() tears it down.
+        try:
+            await mc.start_auto_message_fetching()
+        except Exception as exc:
+            Domoticz.Error(f"Worker: start_auto_message_fetching failed: {exc}")
+
         # ── Initial fetches ───────────────────────────────────────────────
         if mc.self_info:
             name = mc.self_info.get("name", "")
@@ -1164,12 +1282,11 @@ class BasePlugin:
         except Exception as exc:
             Domoticz.Debug(f"Initial device_info error: {exc}")
 
-        # NOTE: Intentionally NOT calling _drain_push_events(mc) here. Calls
-        # to get_msg trigger the same EventType.CONTACT_MSG_RECV /
-        # CHANNEL_MSG_RECV events that our push subscriptions consume,
-        # producing duplicate inbox entries. The push handlers above are
-        # enough — they fire for both newly arriving traffic and any messages
-        # the firmware queued before we subscribed.
+        # Missed-message catch-up is handled by start_auto_message_fetching()
+        # above (immediate get_msg() + MESSAGES_WAITING drain loop); the
+        # _handle_message signature de-dup prevents the historical
+        # duplicate-inbox problem. _drain_push_events() is kept as a manual
+        # fallback but is no longer needed on the connect path.
 
         try:
             await self._poll_self_stats(mc)
@@ -1237,7 +1354,14 @@ class BasePlugin:
                     # main thread and lets the dashboard see fresh data
                     # without waiting for the next heartbeat tick.
                     self._write_rx_log()
+                    if self._heard_dirty:
+                        self._heard_dirty = False
+                        self._write_heard()
         finally:
+            try:
+                self._write_heard()
+            except Exception:
+                pass
             try:
                 await self._disconnect_mc(mc)
             except Exception:
@@ -1330,6 +1454,29 @@ class BasePlugin:
                 hist.append({"t": t, "snr": snr, "rssi": rssi, "path_len": p.get("path_len", -1), "kind": "ADVERT"})
                 if len(hist) > 60:
                     del hist[: len(hist) - 60]
+            # Persistent heard-nodes store: ADVERTs from nodes that are NOT
+            # already contacts. If it's a contact, the contacts poll tracks
+            # it — skip. If already heard, just refresh last_heard + signal.
+            if (p.get("payload_typename") == "ADVERT" and adv_key
+                    and adv_key not in self._known_pubkeys):
+                h = self._heard_nodes.get(adv_key)
+                if h is None:
+                    h = {"pubkey": adv_key, "first_heard": t}
+                    self._heard_nodes[adv_key] = h
+                h["name"]      = p.get("adv_name") or h.get("name", "")
+                h["type"]      = p.get("adv_type", h.get("type", 0))
+                lat, lon = p.get("adv_lat"), p.get("adv_lon")
+                if lat or lon:
+                    h["lat"], h["lon"] = lat, lon
+                h["snr"]       = snr
+                h["rssi"]      = rssi
+                h["path_len"]  = p.get("path_len", -1)
+                h["last_heard"] = t          # OUR local receive time
+                # The node's own advertised clock — used by the dashboard to
+                # flag a wrong RTC (compared against last_heard).
+                if p.get("adv_timestamp"):
+                    h["node_ts"] = p.get("adv_timestamp")
+                self._heard_dirty = True
             # Duplicate-flood detection: keep last few timestamps per raw_hex
             raw = p.get("raw_hex")
             if raw and p.get("route_typename") in ("TC_FLOOD", "FLOOD"):
@@ -1409,6 +1556,7 @@ class BasePlugin:
                 break
         if fetched:
             Domoticz.Log(f"Fetched {fetched} pending message(s) from device — added to inbox.")
+        return fetched
 
     async def _poll_self_stats(self, mc):
         """Poll all available stats from the connected node itself."""
@@ -1459,13 +1607,19 @@ class BasePlugin:
         EMPTY_RUN_STOP = 4
         for idx in range(MAX_CHANNEL_SLOTS):
             try:
-                res = await asyncio.wait_for(mc.commands.get_channel(idx), timeout=2.0)
+                res = await asyncio.wait_for(mc.commands.get_channel(idx), timeout=5.0)
                 Domoticz.Debug(f"get_channel({idx}): type={res.type if res else None} payload={res.payload if res else None}")
                 if res and res.type == EventType.CHANNEL_INFO:
+                    # Trust the index the firmware reports in the response, NOT
+                    # the loop variable. Under a slow link a late CHANNEL_INFO
+                    # can be matched to a later get_channel() wait, so keying
+                    # off `idx` shifts/drops channels. channel_idx is
+                    # authoritative (reader.py decodes it from the response).
+                    rep_idx = res.payload.get("channel_idx", idx)
                     name = res.payload.get("channel_name", "").strip("\x00").strip()
-                    all_slots[idx] = name
+                    all_slots[rep_idx] = name
                     if name:
-                        channel_names[str(idx)] = name
+                        channel_names[str(rep_idx)] = name
                         consecutive_empty = 0
                     else:
                         consecutive_empty += 1
@@ -1518,10 +1672,16 @@ class BasePlugin:
                 r = await asyncio.wait_for(coro, timeout=30.0)
             ok = r is not None and getattr(r, "type", None) != EventType.ERROR
             if ok:
-                payload = dict(r.payload or {}) if hasattr(r, "payload") else None
-                # neighbours payload may be a list — preserve as-is
-                if r.payload is not None and not isinstance(r.payload, dict):
-                    payload = r.payload
+                # The sync helpers may return either an Event (has .payload)
+                # or a raw list/dict (telemetry/neighbours). Don't touch
+                # r.payload unless r actually has it.
+                if hasattr(r, "payload"):
+                    p = r.payload
+                    payload = dict(p) if isinstance(p, dict) else (p if p is not None else None)
+                elif isinstance(r, (list, dict)):
+                    payload = r
+                else:
+                    payload = None
                 self._queue.put((kind, {"name": name, "data": payload}))
             self._queue.put(("send_result", {
                 "ok": ok, "target": verb, "body": name,
@@ -1530,7 +1690,7 @@ class BasePlugin:
         except asyncio.TimeoutError:
             self._queue.put(("send_result", {
                 "ok": False, "target": verb, "body": name,
-                "result": "timeout — remote did not respond within 30s",
+                "result": "timeout - remote did not respond within 30s",
             }))
         except Exception as exc:
             self._queue.put(("send_result", {
@@ -1552,7 +1712,7 @@ class BasePlugin:
         if mc is None or not getattr(mc, "is_connected", False):
             self._queue.put(("send_result", {
                 "ok": False, "target": "?", "body": text,
-                "result": "not connected — auto-reconnect in progress",
+                "result": "not connected - auto-reconnect in progress",
             }))
             return
         lock = self._cmd_lock
@@ -2133,7 +2293,7 @@ class BasePlugin:
                 if is_empty_scope_quirk:
                     result_str = ("firmware refused empty-scope set while a scope is active. "
                                   "Workaround: clear scope via the MeshCore phone app and save, "
-                                  "or send !reboot — the scope clears on startup.")
+                                  "or send !reboot - the scope clears on startup.")
                 else:
                     result_str = "applied" if ok else str(result)
                 self._queue.put(("send_result", {
@@ -2253,6 +2413,67 @@ class BasePlugin:
                 self._queue.put(("send_result", {"ok": False, "target": "!remove", "body": name, "result": str(exc)}))
             return
 
+        # ── Special: add a heard node to contacts ──────────────────────────
+        # Syntax: "!heard_add <full_pubkey_hex>"
+        if text.startswith("!heard_add "):
+            pk = text[len("!heard_add "):].strip()
+            h = self._heard_nodes.get(pk)
+            if h is None:
+                self._queue.put(("send_result", {
+                    "ok": False, "target": "!heard_add", "body": pk[:12],
+                    "result": "heard node not found (rescan?)"}))
+                return
+            contact = {
+                "public_key":         pk,
+                "type":               int(h.get("type") or 1),
+                "flags":              0,
+                "out_path":           "",
+                "out_path_len":       -1,     # flood — no direct path known
+                "out_path_hash_mode": 0,
+                "adv_name":           h.get("name") or pk[:12],
+                "last_advert":        int(h.get("last_heard") or time.time()),
+                "adv_lat":            float(h.get("lat") or 0.0),
+                "adv_lon":            float(h.get("lon") or 0.0),
+            }
+            try:
+                result = await asyncio.wait_for(
+                    mc.commands.add_contact(contact), timeout=10.0)
+                ok = result is not None and result.type == EventType.OK
+                if ok:
+                    # _heard_nodes is also touched by _on_rx_log under this
+                    # lock. Hold it only for the mutation — _write_heard()
+                    # below re-acquires it (non-reentrant Lock).
+                    with self._rx_log_lock:
+                        self._heard_nodes.pop(pk, None)
+                    self._known_pubkeys = self._known_pubkeys | {pk}
+                    self._heard_dirty = True
+                    self._write_heard()
+                    Domoticz.Log(f"Added heard node '{contact['adv_name']}' to contacts.")
+                    # Refresh contacts so the new device/dashboard entry appears
+                    await asyncio.wait_for(self._refresh_contacts(mc), timeout=COMMAND_TIMEOUT)
+                self._queue.put(("send_result", {
+                    "ok": ok, "target": "!heard_add",
+                    "body": contact["adv_name"],
+                    "result": "added" if ok else str(result)}))
+            except Exception as exc:
+                self._queue.put(("send_result", {
+                    "ok": False, "target": "!heard_add",
+                    "body": pk[:12], "result": str(exc)}))
+            return
+
+        # ── Special: delete a heard node from the heard list ───────────────
+        if text.startswith("!heard_delete "):
+            pk = text[len("!heard_delete "):].strip()
+            with self._rx_log_lock:
+                existed = self._heard_nodes.pop(pk, None) is not None
+            if existed:
+                self._heard_dirty = True
+                self._write_heard()
+            self._queue.put(("send_result", {
+                "ok": existed, "target": "!heard_delete", "body": pk[:12],
+                "result": "deleted" if existed else "not in heard list"}))
+            return
+
         target = None
         body   = text
 
@@ -2288,7 +2509,7 @@ class BasePlugin:
                     )
                     ok = result is not None and result.type == EventType.OK
                     self._queue.put(("send_result", {"ok": ok, "target": f"#{chan_idx}", "body": body,
-                                                    "result": "TX busy — try again" if tx_busy else str(result)}))
+                                                    "result": "TX busy - try again" if tx_busy else str(result)}))
                 except Exception as exc:
                     self._queue.put(("send_result", {"ok": False, "target": f"#{chan_idx}", "body": body, "result": str(exc)}))
                 return
@@ -2329,7 +2550,7 @@ class BasePlugin:
             )
             ok = result is not None and result.type == EventType.MSG_SENT
             self._queue.put(("send_result", {"ok": ok, "target": target, "body": body,
-                                             "result": "TX busy — try again" if tx_busy else str(result)}))
+                                             "result": "TX busy - try again" if tx_busy else str(result)}))
         except Exception as exc:
             self._queue.put(("send_result", {"ok": False, "target": target, "body": body, "result": str(exc)}))
 
@@ -2458,13 +2679,18 @@ class BasePlugin:
                 # ASCII so Windows/cp1252 stored text isn't mangled.
                 tgt = d["target"]
                 me = self._self_name or "Me"
+                out_ts = int(time.time())   # our own message, our clock
                 if tgt.startswith("#"):
                     chan_idx_str = tgt[1:]
                     chan_idx_int = int(chan_idx_str) if chan_idx_str.isdigit() else None
                     chan_tag = self._channel_names.get(chan_idx_int, f"C{chan_idx_str}") if chan_idx_int is not None else f"C{chan_idx_str}"
-                    self._set(MESH_DID, UNIT_INBOX, 0, f"[{chan_tag}|> {me}] {d['body']}")
+                    self._set(MESH_DID, UNIT_INBOX, 0,
+                              self._inbox_line(chan_tag, f"> {me}", d['body'], out_ts))
                 else:
-                    self._set(MESH_DID, UNIT_INBOX, 0, f"[P|> {tgt}] {d['body']}")
+                    self._set(MESH_DID, UNIT_INBOX, 0,
+                              self._inbox_line("P", f"> {tgt}", d['body'], out_ts))
+                    self._log_contact_dm(tgt,
+                        self._inbox_line("P", f"> {tgt}", d['body'], out_ts))
             else:
                 Domoticz.Error(f"Send failed to '{d['target']}': {d['result']}")
 
@@ -2478,6 +2704,21 @@ class BasePlugin:
             c.get("public_key", "")[:12]: c.get("adv_name", "").strip()
             for c in contacts.values()
         }
+
+        # Refresh the worker-readable set of known contact pubkeys (wholesale
+        # reassignment is atomic for the _on_rx_log reader) and prune any
+        # heard-node entry that is now a real contact.
+        self._known_pubkeys = {
+            c.get("public_key", "") for c in contacts.values() if c.get("public_key")
+        }
+        if self._heard_nodes:
+            # _heard_nodes is also mutated by _on_rx_log on the worker thread;
+            # take the lock so the snapshot/pop here can't race a concurrent
+            # insert ("dictionary changed size during iteration").
+            with self._rx_log_lock:
+                for pk in [k for k in self._heard_nodes if k in self._known_pubkeys]:
+                    self._heard_nodes.pop(pk, None)
+                    self._heard_dirty = True
 
         # Register any new contacts (non-self) in discovery order
         for contact in contacts.values():
@@ -2500,19 +2741,35 @@ class BasePlugin:
             last_advert = contact.get("last_advert", 0)
             if last_advert < 1_577_836_800:
                 last_advert = 0
+            # "Last Seen" must reflect OUR local clock, never the node's
+            # advertised timestamp (some nodes have a bad RTC and advertise a
+            # future time). When the node's advertised time changes vs what we
+            # last stored, a fresh advert arrived ~now, so record local now.
+            # The raw node-reported time is kept separately (_node_last_advert)
+            # so the dashboard can flag a wrong clock without corrupting our
+            # reliable "last seen".
+            prev_advert = self._node_last_advert.get(node_name, 0)
+            if last_advert and last_advert != prev_advert:
+                if prev_advert == 0:
+                    # First time we see this node this session (e.g. right
+                    # after a plugin restart). The contact-list snapshot is
+                    # NOT a fresh advert that arrived "now" — it's the node's
+                    # last-known advert from before. Estimating last-seen from
+                    # the node's own advert time (bounded to not exceed now)
+                    # keeps "Last Seen" sane across restarts and avoids
+                    # flagging every contact as clock-wrong. A node with a
+                    # genuinely future (bad) clock still clamps to now, so the
+                    # node-vs-our time gap is preserved and correctly flagged.
+                    self._node_last_activity[node_name] = min(now, last_advert)
+                else:
+                    self._node_last_activity[node_name] = now
             last_activity = self._node_last_activity.get(node_name, 0)
-            effective_ts  = max(last_advert, last_activity)
-            # Mirror the effective_ts into _node_last_activity so the device
-            # map's last_seen field (which now reads from this dict) reflects
-            # advert-based activity even when no messages have arrived.
-            if effective_ts > last_activity:
-                self._node_last_activity[node_name] = effective_ts
-            advert_online = effective_ts > 0 and (now - effective_ts) < ONLINE_THRESHOLD_S
+            advert_online = last_activity > 0 and (now - last_activity) < ONLINE_THRESHOLD_S
 
             path_len    = contact.get("out_path_len", -1)
             path_online = path_len >= 0
             online      = advert_online or path_online
-            age_s       = int(now - effective_ts) if effective_ts > 0 else -1
+            age_s       = int(now - last_activity) if last_activity > 0 else -1
 
             # Store pubkey / DeviceID BEFORE ensuring devices — the DeviceID
             # is derived from the pubkey, so it must be known first.
@@ -2533,8 +2790,8 @@ class BasePlugin:
             if path_len >= 0:
                 self._set(did, OFF_HOPS, 0, str(path_len))
 
-            if effective_ts > 0:
-                ts = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(effective_ts))
+            if last_activity > 0:
+                ts = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(last_activity))
                 self._set(did, OFF_LASTSEEN, 0, ts)
 
             la = self._node_last_activity.get(node_name, 0)
@@ -2560,10 +2817,57 @@ class BasePlugin:
 
         self._write_device_map()
 
+    @staticmethod
+    def _inbox_line(chan_tag, sender, body, ts, bad=False):
+        """Build the inbox / conversation wire string with an embedded send
+        time so the dashboard can show the real time a message was sent (not
+        the time Domoticz happened to log it — which for messages drained on
+        reconnect is the catch-up time, not the original time).
+
+        Format:
+          [chan|sender|<epoch>]     <epoch> = trusted send time
+          [chan|sender|<epoch>|x]   <epoch> = OUR receive time, substituted
+                                    because the node's reported time was
+                                    missing/implausible (bad RTC).
+        """
+        return f"[{chan_tag}|{sender}|{int(ts)}{'|x' if bad else ''}] {body}"
+
+    def _log_contact_dm(self, node_name: str, line: str):
+        """Append a DM line to a favourite contact's persistent Messages text
+        device. The single-value Mesh Inbox loses messages in a burst; the
+        per-contact text device keeps the full conversation in the Domoticz
+        log so it survives restarts and nothing is lost."""
+        if not node_name:
+            return
+        did = self._device_id_for(node_name)
+        if did is None or did == SELF_DID:
+            return
+        units = Devices[did].Units if did in Devices else {}
+        if OFF_MSGS not in units:
+            return
+        self._set(did, OFF_MSGS, 0, line)
+
     def _handle_message(self, msg: dict):
         """Handle an incoming message — update Inbox and per-node RSSI/SNR/LastSeen."""
         msg_type  = msg.get("type", "")
         text      = msg.get("text", "")
+
+        # De-duplicate. The sender stamps each message with sender_timestamp;
+        # (sender, channel, timestamp, text) uniquely identifies it, so a
+        # message redelivered via the get_msg() drain or repeated by a
+        # duplicate flood (different path, same content/timestamp) is dropped.
+        # Runs on the single main _dispatch thread, so no lock needed.
+        sig = (
+            msg_type,
+            msg.get("pubkey_prefix", ""),
+            msg.get("channel_idx"),
+            msg.get("sender_timestamp"),
+            text,
+        )
+        if sig in self._recent_msg_sigs:
+            Domoticz.Debug(f"Duplicate message dropped: {sig!r}")
+            return
+        self._recent_msg_sigs.append(sig)
 
         # Resolve sender name
         prefix    = msg.get("pubkey_prefix", "")
@@ -2595,8 +2899,27 @@ class BasePlugin:
         else:
             chan_tag = "P"
 
-        # Update global inbox — format: [ChannelName|sender] text  or  [P|sender] text
-        self._set(MESH_DID, UNIT_INBOX, 0, f"[{chan_tag}|{display_name}] {text_body}")
+        # Decide the send time to embed. The sender stamps each message with
+        # its own RTC (sender_timestamp). Trust it only if it's plausible:
+        # not before 2020-01-01 and not more than 1h in the future relative
+        # to our clock. Otherwise the node's RTC is wrong — fall back to our
+        # system time and flag it so the dashboard can show that.
+        now_i = int(time.time())
+        st = msg.get("sender_timestamp") or 0
+        if st and 1_577_836_800 <= st <= now_i + 3600:
+            msg_ts, ts_bad = int(st), False
+        else:
+            msg_ts, ts_bad = now_i, True
+
+        # Update global inbox — [chan|sender|<epoch>[|x]] text
+        self._set(MESH_DID, UNIT_INBOX, 0,
+                  self._inbox_line(chan_tag, display_name, text_body, msg_ts, ts_bad))
+
+        # Persist private (DM) messages to the sender's per-contact Messages
+        # device so a favourite's conversation history is never lost.
+        if chan_tag == "P" and node_name:
+            self._log_contact_dm(node_name,
+                self._inbox_line("P", display_name, text_body, msg_ts, ts_bad))
 
         # Update per-node devices for any known contact
         if node_name:

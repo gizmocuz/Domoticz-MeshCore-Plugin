@@ -18,12 +18,19 @@
             --green: #4caf7d;
             --red: #e05555;
             --yellow: #f0a832;
+            --heard: #b07cff;
             --text: #e2e4ed;
             --muted: #7c7f93;
             --radius: 10px;
         }
 
         * { box-sizing: border-box; margin: 0; padding: 0; }
+
+        .clock-wrong,
+        .clock-wrong .metric-value,
+        .clock-wrong .row-meta,
+        .row-meta.clock-wrong,
+        .heard-extra.clock-wrong span { color: var(--red) !important; cursor: help; }
 
         body {
             font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
@@ -819,6 +826,31 @@
         }
         #inbox-log-link:hover { background: var(--border); }
 
+        #conv-banner {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 8px;
+            margin: 6px 0;
+            padding: 6px 10px;
+            font-size: 0.82rem;
+            color: var(--text);
+            background: rgba(176, 124, 255, 0.12);
+            border: 1px solid var(--heard);
+            border-radius: 6px;
+        }
+        #conv-banner-label { font-weight: 600; }
+        #conv-banner-exit {
+            font-size: 0.78rem;
+            color: var(--text);
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: 6px;
+            padding: 3px 9px;
+            cursor: pointer;
+        }
+        #conv-banner-exit:hover { background: var(--border); }
+
         #inbox-history {
             background: var(--surface);
             border: 1px solid var(--border);
@@ -1185,7 +1217,62 @@
         .chan-row.known  .name { color: var(--text); opacity: 1; font-style: normal; }
 
         /* Heard-nodes list */
-        .heard-list { display: flex; flex-direction: column; gap: 4px; }
+        .heard-list {
+            display: flex;
+            flex-direction: column;
+            gap: 4px;
+        }
+        /* Heard side panel: intro fixed at top, list scrolls, map pinned to
+           the bottom so it's always visible regardless of list length. */
+        #heard-view {
+            position: absolute;
+            inset: 0;
+            overflow: hidden;
+        }
+        #heard-view > div:first-child { flex: 0 0 auto; }
+        #heard-view #heard-list-wrap {
+            flex: 1 1 auto;
+            min-height: 0;
+            overflow-y: auto;
+        }
+        #heard-view #heard-map {
+            flex: 0 0 240px;
+        }
+        .heard-row-top {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 6px;
+        }
+        .heard-acts { display: flex; gap: 4px; flex-shrink: 0; }
+        .heard-act {
+            width: 24px;
+            height: 24px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 0.78rem;
+            background: var(--bg);
+            color: var(--text);
+            border: 1px solid var(--border);
+            border-radius: 5px;
+            cursor: pointer;
+        }
+        .heard-act.add:hover  { color: #26c47c; border-color: #26c47c; }
+        .heard-act.del:hover  { color: #e63946; border-color: #e63946; }
+        .heard-act.gps:hover  { color: var(--accent); border-color: var(--accent); }
+        #heard-map, #contact-map {
+            height: 240px;
+            margin-top: 8px;
+            border: 1px solid var(--border);
+            border-radius: 6px;
+            overflow: hidden;
+        }
+        /* Heard nodes blended into the contacts grid/list — same card/row
+           markup, distinguished only by a different name colour. */
+        .heard-name-color { color: var(--heard) !important; }
+        .row-fav.heard-add-star { cursor: pointer; color: var(--heard); visibility: visible; }
+        .row-fav.heard-add-star:hover { color: var(--accent); }
         .heard-row {
             display: grid;
             grid-template-columns: 1fr;
@@ -1214,6 +1301,11 @@
             color: var(--accent);
             opacity: 0.85;
             cursor: help;
+            display: block;
+            max-width: 100%;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
         }
         .heard-extra {
             display: flex;
@@ -1553,6 +1645,7 @@
                         <button id="view-cards" class="view-btn active" title="Card view"><i class="fa-solid fa-grip"></i></button>
                         <button id="view-list"  class="view-btn"        title="List view"><i class="fa-solid fa-list"></i></button>
                     </div>
+                    <button id="view-heard" class="view-btn" title="Also show heard (non-contact) nodes"><i class="fa-solid fa-satellite-dish"></i></button>
                     <div class="search-wrap">
                         <i class="fa-solid fa-magnifying-glass"></i>
                         <input id="filter-name" type="search" placeholder="Filter by name, type...">
@@ -1569,6 +1662,10 @@
         <div class="inbox-section-header">
             <h2>📨 Message Inbox</h2>
             <a id="inbox-log-link" href="#" target="_top" style="display:none">📋 View full log</a>
+        </div>
+        <div id="conv-banner" style="display:none">
+            <span id="conv-banner-label"></span>
+            <button id="conv-banner-exit" title="Back to all messages">✕ All messages</button>
         </div>
         <!-- filter / search -->
         <div id="inbox-filters">
@@ -1697,6 +1794,18 @@
             } catch (_) { }
         }
 
+        // ── Persistent heard-nodes store ─────────────────────────────────────
+        // Written by the plugin from RX_LOG ADVERT frames for nodes that are
+        // NOT in our contacts. Shape: { nodes: { <pubkey>: {pubkey, name,
+        // type, lat, lon, snr, rssi, path_len, first_heard, last_heard} } }
+        let _heard = { nodes: {} };
+        async function _loadHeard() {
+            try {
+                const r = await fetch("/templates/meshcore_heard.json?_=" + Date.now());
+                if (r.ok) _heard = await r.json();
+            } catch (_) { }
+        }
+
         // Heuristic: match an inbox message to an RX log entry.
         // We have message text, channel and approximate time; the RX log entry
         // has snr/rssi/recv_time + raw header fields. Match by:
@@ -1814,6 +1923,36 @@
                 : inner;
         }
 
+        // A node's advert carries a timestamp set by the advertising node's
+        // own RTC. We display OUR local receive time as "Last Seen" (slots
+        // .last_seen), but if the node-reported advert time (slots.last_advert)
+        // drifts from our receive time by more than this, the node's clock is
+        // wrong — flag it red with a tooltip showing both times.
+        const CLOCK_WRONG_TOLERANCE_S = 3600;   // 1 hour
+
+        function _clockSkew(slots) {
+            const nodeAdv = Number(slots && slots.last_advert) || 0;
+            if (!nodeAdv) return { wrong: false, tip: "" };
+            // Our local receive time of the latest advert == last_seen.
+            let oursSec = 0;
+            const lsRaw = _slotValue(slots.last_seen);
+            if (lsRaw) {
+                const d = new Date(String(lsRaw).replace(" ", "T"));
+                if (!isNaN(d.getTime())) oursSec = Math.floor(d.getTime() / 1000);
+            }
+            if (!oursSec) oursSec = Math.floor(Date.now() / 1000);
+            if (Math.abs(nodeAdv - oursSec) <= CLOCK_WRONG_TOLERANCE_S) {
+                return { wrong: false, tip: "" };
+            }
+            const fmt = s => s ? new Date(s * 1000).toLocaleString() : "?";
+            return {
+                wrong: true,
+                tip: `Node clock looks wrong (off by >1h).  `
+                   + `Node-reported advert time: ${fmt(nodeAdv)}  |  `
+                   + `We last heard it: ${fmt(oursSec)}`,
+            };
+        }
+
         // Build a raw value string from a slot object (from either JSON snapshot or live API).
         // slot = { idx, value, online } from JSON  OR  a Domoticz API device object.
         function _slotValue(slot) {
@@ -1890,6 +2029,7 @@
             }
 
             const metrics = isSelf ? SELF_METRICS : NODE_METRICS;
+            const _skew = isSelf ? { wrong: false, tip: "" } : _clockSkew(slots);
             let metricsHtml = "";
             for (const { key, label, unit, special } of metrics) {
                 const slot = slots[key] || null;
@@ -1900,8 +2040,10 @@
                 // (compact view). Self always shows everything so the user sees that
                 // their connected node is reporting all stats.
                 const hideEmpty = !isSelf && (!slot || numVal === "");
-                const cls = hideEmpty ? "metric empty" : "metric";
-                const div = `<div class="${cls}" data-node="${escHtml(nodeName)}" data-key="${key}">`;
+                const _ckw = (key === "last_seen" && _skew.wrong);
+                const cls = (hideEmpty ? "metric empty" : "metric") + (_ckw ? " clock-wrong" : "");
+                const titleAttr = _ckw ? ` title="${escHtml(_skew.tip)}"` : "";
+                const div = `<div class="${cls}" data-node="${escHtml(nodeName)}" data-key="${key}"${titleAttr}>`;
                 const end = `</div>`;
                 if (!slot) {
                     metricsHtml += `${div}${renderMetricHtml(label, null, unit, null)}${end}`;
@@ -1947,10 +2089,14 @@
                 ? `<button class="card-action-btn" data-action="open-self" title="Self-node info & radio settings"><i class="fa-solid fa-sliders"></i></button>`
                 : `<button class="card-action-btn" data-action="open-contact" data-node="${escHtml(nodeName)}" title="Contact info & remote queries"><i class="fa-solid fa-circle-info"></i></button>`;
 
+            const _hpk = slots && slots._heardPk;
+            const heardAttrs = _hpk ? ` data-heard="1" data-pk="${escHtml(_hpk)}"` : "";
+            const heardCls = _hpk ? " heard-node" : "";
+            const nameCls = _hpk ? "node-name heard-name-color" : "node-name";
             return `
-        <div class="node-card" data-node="${escHtml(nodeName)}">
+        <div class="node-card${heardCls}" data-node="${escHtml(nodeName)}"${heardAttrs}>
           <div class="node-header">
-            <div class="node-name">${escHtml(nodeName)}</div>
+            <div class="${nameCls}">${escHtml(nodeName)}</div>
             ${typeChip}
             ${directChip}
             ${fwLine}
@@ -2144,6 +2290,14 @@
         let _inboxLastUpdate = null;  // LastUpdate of the last recorded entry
         let _inboxDevIdx2 = null;
         let _inboxLoaded = false; // true once initial history has been fetched
+        // When set, the inbox shows a single favourite contact's stored DM
+        // history (from its per-contact Messages text device) instead of the
+        // global Mesh Inbox. null = normal global inbox.
+        let _convNode = null;
+        // LastUpdate of the conversation device at the last fetch, so the
+        // poll-driven refresh skips a full text-log re-fetch when nothing
+        // changed. null forces a fetch (set on enter).
+        let _convLastUpdate = null;
         const LS_INBOX_CHAN = "meshcore.inboxChanFilter";
         // Restore the last channel filter from localStorage; "" / null means "All"
         let _inboxChanFilter = (() => {
@@ -2169,30 +2323,51 @@
             return isNaN(n) ? `Ch ${idxStr}` : `Ch ${n}`;
         }
 
+        function _fmtEpoch(sec) {
+            if (!sec) return "";
+            const d = new Date(sec * 1000);
+            const p = n => String(n).padStart(2, "0");
+            return `${d.getFullYear()}-${p(d.getMonth()+1)}-${p(d.getDate())} `
+                 + `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
+        }
+
         function _parseInboxData(raw) {
-            // Format: [ChannelName|sender] text  or  [P|sender] text
-            // Legacy: [C0|sender] text  or  [sender] text  (no pipe)
+            // Format:  [chan|sender|<epoch>]      <epoch> = trusted send time
+            //          [chan|sender|<epoch>|x]    <epoch> = our receive time
+            //                                     (node RTC was wrong)
+            // Legacy:  [chan|sender] text  /  [C0|sender] text  /  [sender] text
 
             const m = raw.match(/^\[([^\]]+)\]\s*(.*)/s);
-            if (!m) return { channel: null, sender: "", text: raw };
+            if (!m) return { channel: null, sender: "", text: raw, ts: null, tsWrong: false };
             const meta = m[1], text = m[2];
             const pipe = meta.indexOf("|");
-            if (pipe >= 0) {
-                const chanPart = meta.slice(0, pipe);
-                const sender = meta.slice(pipe + 1);
-                let channel;
-                if (chanPart === "P") {
-                    channel = "Private";
-                } else if (/^C\d+$/.test(chanPart)) {
-                    // Legacy C<idx> format — resolve via _chanLabel
-                    channel = _chanLabel(chanPart.slice(1));
-                } else {
-                    // New format — channel name is already in the tag
-                    channel = chanPart;
-                }
-                return { channel, sender, text };
+            if (pipe < 0) {
+                return { channel: null, sender: meta, text, ts: null, tsWrong: false };
             }
-            return { channel: null, sender: meta, text };
+            const parts = meta.split("|");
+            const chanPart = parts[0];
+            let rest = parts.slice(1);
+            let ts = null, tsWrong = false;
+            // Trailing "x" flag → previous part is the (substituted) epoch.
+            if (rest.length >= 2 && rest[rest.length - 1] === "x"
+                && /^\d{6,}$/.test(rest[rest.length - 2])) {
+                tsWrong = true;
+                ts = Number(rest[rest.length - 2]);
+                rest = rest.slice(0, -2);
+            } else if (rest.length >= 1 && /^\d{6,}$/.test(rest[rest.length - 1])) {
+                ts = Number(rest[rest.length - 1]);
+                rest = rest.slice(0, -1);
+            }
+            const sender = rest.join("|");   // sender itself never contains "|"
+            let channel;
+            if (chanPart === "P") {
+                channel = "Private";
+            } else if (/^C\d+$/.test(chanPart)) {
+                channel = _chanLabel(chanPart.slice(1));
+            } else {
+                channel = chanPart;
+            }
+            return { channel, sender, text, ts, tsWrong };
         }
 
         async function _fetchTextLog(idx) {
@@ -2204,9 +2379,16 @@
             } catch (_) { return []; }
         }
 
-        async function loadInboxHistory(inboxDev) {
+        async function loadInboxHistory(inboxDev, byIdx) {
             const container = document.getElementById("inbox-history");
             const logLink = document.getElementById("inbox-log-link");
+
+            // Conversation mode: the inbox is pinned to one favourite's stored
+            // DM history. Refresh from that device instead of the global inbox.
+            if (_convNode) {
+                await loadConversation(_convNode, byIdx);
+                return;
+            }
 
             if (!inboxDev || !inboxDev.idx) {
                 container.innerHTML = `<div id="inbox-empty">No messages yet.</div>`;
@@ -2228,8 +2410,12 @@
                     const raw = e.Data || e.Value || "";
                     const time = e.Date || "";
                     if (!raw) continue;
-                    const { channel, sender, text } = _parseInboxData(raw);
-                    _inboxHistory.push({ time, channel, sender, text });   // API returns oldest-first
+                    const p = _parseInboxData(raw);
+                    _inboxHistory.push({                       // API returns oldest-first
+                        time: p.ts ? _fmtEpoch(p.ts) : time,
+                        channel: p.channel, sender: p.sender, text: p.text,
+                        tsWrong: p.tsWrong,
+                    });
                 }
                 // After loading history, record the current LastUpdate so we don't
                 // double-add the most recent entry on the next refresh.
@@ -2241,7 +2427,8 @@
             const data = inboxDev.Data || "";
             if (data && update && update !== _inboxLastUpdate) {
                 _inboxLastUpdate = update;
-                const { channel, sender, text } = _parseInboxData(data);
+                const _p = _parseInboxData(data);
+                const { channel, sender, text } = _p;
                 // If this is the confirmation of a recent optimistic echo,
                 // drop the pending placeholder so we don't show it twice.
                 // Match on channel + text only — sender comparison is unreliable
@@ -2249,13 +2436,99 @@
                 // placeholder was created before we knew that.
                 if (sender && (sender.startsWith("> ") || sender.startsWith("▶"))) {
                     const pIdx = _inboxHistory.findIndex(m =>
-                        m._pending && m.channel === channel && m.text === text);
+                        (m._pending || m._settled) && m.channel === channel && m.text === text);
                     if (pIdx >= 0) _inboxHistory.splice(pIdx, 1);
                 }
-                _inboxHistory.unshift({ time: update, channel, sender, text });
+                _inboxHistory.unshift({
+                    time: _p.ts ? _fmtEpoch(_p.ts) : update,
+                    channel, sender, text, tsWrong: _p.tsWrong,
+                });
                 if (_inboxHistory.length > 200) _inboxHistory.pop();
             }
 
+            _renderInbox(container);
+        }
+
+        // Resolve a favourite contact's per-contact Messages device idx.
+        function _convDevIdx(name) {
+            const n = _deviceMap && _deviceMap.nodes && _deviceMap.nodes[name];
+            return (n && n.msgs && n.msgs.idx) || null;
+        }
+
+        // Pin the inbox to one favourite's stored DM history.
+        function _enterConversation(name) {
+            _convNode = name;
+            _inboxLoaded = false;
+            // Conversation rows are all "Private"; a stale channel filter would
+            // hide them. Clear it in-memory (don't touch the saved preference).
+            _inboxChanFilter = null;
+            _lastRenderedInboxHtml = "";
+            const banner = document.getElementById("conv-banner");
+            const label = document.getElementById("conv-banner-label");
+            if (label) label.textContent = `💬 Conversation with ${name}`;
+            if (banner) banner.style.display = "flex";
+            const sec = document.getElementById("inbox-history-section");
+            if (sec) sec.scrollIntoView({ behavior: "smooth", block: "start" });
+            _convLastUpdate = null;   // force the first fetch
+            loadConversation(name);
+        }
+
+        function _exitConversation() {
+            _convNode = null;
+            _inboxLoaded = false;          // force a fresh global-inbox reload
+            _inboxLastUpdate = null;
+            _inboxHistory.length = 0;
+            _lastRenderedInboxHtml = "";
+            const banner = document.getElementById("conv-banner");
+            if (banner) banner.style.display = "none";
+            const c = document.getElementById("inbox-history");
+            if (c) c.innerHTML = `<div id="inbox-empty">Loading…</div>`;
+            if (typeof loadData === "function") loadData();
+        }
+
+        // Load (and on every poll, refresh) a favourite's DM history from its
+        // per-contact Messages text device. The full conversation is persisted
+        // in the Domoticz device log, so nothing is lost even if the global
+        // single-value Mesh Inbox dropped it.
+        async function loadConversation(name, byIdx) {
+            const container = document.getElementById("inbox-history");
+            const logLink = document.getElementById("inbox-log-link");
+            const idx = _convDevIdx(name);
+            if (!idx) {
+                _inboxHistory.length = 0;
+                _lastRenderedInboxHtml = "";
+                container.innerHTML =
+                    `<div id="inbox-empty">No stored conversation for ${escHtml(name)}.<br>`
+                  + `Add this contact to your favourites to start logging its messages.</div>`;
+                if (logLink) logLink.style.display = "none";
+                return;
+            }
+            if (logLink) {
+                logLink.href = `/index.html#/Devices/${idx}/Log`;
+                logLink.style.display = "";
+            }
+            // Skip the full text-log re-fetch when the device hasn't changed
+            // since the last load (byIdx is only available on poll-driven
+            // refreshes; the initial enter has no byIdx → always fetches).
+            const dev = byIdx && byIdx[idx];
+            if (dev && _inboxHistory.length && dev.LastUpdate === _convLastUpdate) {
+                return;
+            }
+            _convLastUpdate = dev ? dev.LastUpdate : null;
+            const entries = await _fetchTextLog(idx);   // API: oldest-first
+            _inboxHistory.length = 0;
+            for (const e of entries) {
+                const raw = e.Data || e.Value || "";
+                if (!raw) continue;
+                const p = _parseInboxData(raw);
+                // Newest-first to match the global inbox ordering.
+                _inboxHistory.unshift({
+                    time: p.ts ? _fmtEpoch(p.ts) : (e.Date || ""),
+                    channel: p.channel, sender: p.sender, text: p.text,
+                    tsWrong: p.tsWrong,
+                });
+            }
+            _lastRenderedInboxHtml = "";
             _renderInbox(container);
         }
 
@@ -2279,7 +2552,13 @@
             }
             _renderChannelChips(chips);
 
-            const needle = _inboxSearch.toLowerCase();
+            // The search input is the single source of truth — read it live
+            // on every render so a new message can never bypass an active
+            // filter (the _inboxSearch var can desync from the box). Keep the
+            // var in sync for any other readers.
+            const _searchEl = document.getElementById("inbox-search");
+            if (_searchEl) _inboxSearch = _searchEl.value;
+            const needle = (_inboxSearch || "").trim().toLowerCase();
             const visible = _inboxHistory.filter(m => {
                 if (_inboxChanFilter && m.channel !== _inboxChanFilter) return false;
                 if (needle && !(m.sender || "").toLowerCase().includes(needle)
@@ -2293,7 +2572,7 @@
                 return;
             }
 
-            const html = visible.map(({ time, channel, sender, text, _pending }) => {
+            const html = visible.map(({ time, channel, sender, text, _pending, tsWrong }) => {
                 // Outgoing marker may be "> " (current, ASCII-safe) or "▶" (legacy)
                 const isSent = sender && (sender.startsWith("> ") || sender.startsWith("▶"));
                 const isPending = !!_pending;
@@ -2306,6 +2585,14 @@
                     ? `<button class="msg-reply-btn" onclick="_replyTo(event,'${replyTarget}','${replyChannel}')" title="Reply to ${replyTarget}">↩ Reply</button>`
                     : "";
                 const timeLabel = isPending ? "sending…" : escHtml(time);
+                // The sender's RTC was wrong, so this is the time WE received
+                // the message, not when it was actually sent.
+                const tsWrongTip = "Sender's clock was wrong — showing the time we received this message, not the sender's reported time.";
+                const timeCls = (!isPending && tsWrong) ? "msg-time clock-wrong" : "msg-time";
+                const timeAttr = (!isPending && tsWrong) ? ` title="${escHtml(tsWrongTip)}"` : "";
+                const tsWrongIcon = (!isPending && tsWrong)
+                    ? ` <i class="fa-solid fa-triangle-exclamation" title="${escHtml(tsWrongTip)}"></i>`
+                    : "";
                 // Stash the message in a data attribute we can read on click;
                 // base64-encode so JSON quotes don't break the attribute.
                 // Best-effort parse of the Domoticz timestamp to Unix seconds so
@@ -2326,7 +2613,7 @@
                         <i class="fa-solid fa-circle-info"></i>
                     </button>`;
                 return `<div class="inbox-msg${isSent ? " sent" : ""}${isPending ? " pending" : ""}">
-          <span class="msg-time">${timeLabel}</span>
+          <span class="${timeCls}"${timeAttr}>${timeLabel}${tsWrongIcon}</span>
           ${chanHtml}
           ${sender ? `<span class="msg-sender">${escHtml(sender)}</span>` : ""}
           <span class="msg-text">${_renderMentions(text)}</span>
@@ -2435,6 +2722,10 @@
         // ── Contacts filter / sort / view state ──────────────────────────────────────
 
         let _viewMode = "cards";      // "cards" or "list"
+        const LS_INCLUDE_HEARD = "meshcore.includeHeard";
+        let _includeHeard = (() => {
+            try { return localStorage.getItem(LS_INCLUDE_HEARD) === "1"; } catch (_) { return false; }
+        })();
         let _filterName = "";         // matches against name + type label
         const _selectedContacts = new Set();   // contact names checked in list view
         // Cached live-resolver from the last loadData() call so view-toggling /
@@ -2444,7 +2735,7 @@
 
         // Build sorted/filtered groups for the contacts area.
         // Returns an array of { groupLabel, contacts: [{name, slots, type, online, lastTs}] }
-        function _buildContactGroups(remoteNodes, liveSlotsOf) {
+        function _buildContactGroups(remoteNodes, liveSlotsOf, extraItems = []) {
             const items = remoteNodes.map(name => {
                 const slots = liveSlotsOf(name);
                 const type = Number(slots.type) || 0;
@@ -2460,6 +2751,10 @@
                 }
                 return { name, slots, type, online, lastTs, favorite: _isFavorite(name) };
             });
+            // Merge heard nodes into the SAME list so they sort together with
+            // real contacts (online/favorite/type/last-seen) rather than being
+            // appended at the bottom.
+            if (extraItems.length) items.push(...extraItems);
 
             // Apply filter — matches against name and type label (e.g. "repeater")
             const q = _filterName.trim().toLowerCase();
@@ -2494,6 +2789,7 @@
         function _renderListRow(item) {
             const { name, slots, type, online, lastTs } = item;
             const lastSeen = slots.last_seen ? _slotValue(slots.last_seen) : "";
+            const _skew = _clockSkew(slots);
             const snr = slots.snr ? _slotValue(slots.snr).replace(/\s*dB$/i, "") : "";
             // Strip the " hops" unit suffix Domoticz adds — we already render "hops" ourselves.
             const hops = slots.hops ? _slotValue(slots.hops).replace(/\s*hops?$/i, "").trim() : "";
@@ -2502,10 +2798,14 @@
             const selectedCls = isChecked ? " row-selected" : "";
             const checkIcon = isChecked ? "fa-square-check" : "fa-square";
             const checkCls  = isChecked ? "row-check-box checked" : "row-check-box";
+            const _hpk = slots && slots._heardPk;
             const fav = _isFavorite(name);
-            const favHtml = fav
-                ? `<span class="row-fav" title="Favorite"><i class="fa-solid fa-star"></i></span>`
-                : `<span class="row-fav empty"></span>`;
+            // Heard nodes: the star is a clickable "add to contacts" action.
+            const favHtml = _hpk
+                ? `<span class="row-fav heard-add-star" title="Add to contacts"><i class="fa-regular fa-star"></i></span>`
+                : (fav
+                    ? `<span class="row-fav" title="Favorite"><i class="fa-solid fa-star"></i></span>`
+                    : `<span class="row-fav empty"></span>`);
             const hasLoc = slots.lat != null && slots.lon != null && (slots.lat || slots.lon);
             const mapInline = hasLoc
                 ? `<span class="row-map" data-node="${escHtml(name)}" data-lat="${slots.lat}" data-lon="${slots.lon}" title="Show on map"><i class="fa-solid fa-location-dot"></i></span>`
@@ -2514,16 +2814,19 @@
             const directHtml = isDirect
                 ? `<span class="row-direct" title="Direct neighbour (0 hops)"><i class="fa-solid fa-tower-broadcast"></i></span>`
                 : "";
+            const heardAttrs = _hpk ? ` data-heard="1" data-pk="${escHtml(_hpk)}"` : "";
+            const heardCls = _hpk ? " heard-node" : "";
+            const nameCls = _hpk ? "row-name heard-name-color" : "row-name";
             return `
-        <div class="contact-row${selectedCls}" data-node="${escHtml(name)}">
+        <div class="contact-row${selectedCls}${heardCls}" data-node="${escHtml(name)}"${heardAttrs}>
           <span class="row-check"><span class="${checkCls}" data-node="${escHtml(name)}" data-checked="${isChecked ? 1 : 0}" role="checkbox" aria-checked="${isChecked}"><i class="fa-regular ${checkIcon}"></i></span></span>
           <span class="row-status ${online ? "online" : "offline"}" title="${online ? "Online" : "Offline"}"></span>
-          <div class="row-name">${favHtml}${mapInline}${escHtml(name)}${directHtml}</div>
+          <div class="${nameCls}">${favHtml}${mapInline}${escHtml(name)}${directHtml}</div>
           <div class="row-type">${escHtml(typeLabel)}</div>
-          <div class="row-meta">${escHtml(lastSeen || "—")}</div>
+          <div class="row-meta${_skew.wrong ? " clock-wrong" : ""}"${_skew.wrong ? ` title="${escHtml(_skew.tip)}"` : ""}>${escHtml(lastSeen || "—")}</div>
           <div class="row-snr">${snr ? escHtml(snr) + " dB" : "—"}</div>
           <div class="row-hops">${hops !== "" ? hops + " hops" : "—"}</div>
-          <button class="row-remove" title="Remove contact" data-node="${escHtml(name)}"><i class="fa-solid fa-trash"></i></button>
+          <button class="row-remove" title="${_hpk ? "Delete from heard list" : "Remove contact"}" data-node="${escHtml(name)}"><i class="fa-solid fa-trash"></i></button>
         </div>`;
         }
 
@@ -2547,8 +2850,48 @@
         </div>`;
         }
 
+        // Synthesize contact-pipeline items for heard nodes so they render
+        // with the SAME card/row markup as real contacts (they just get a
+        // distinct name colour + a star that ADDS them to contacts).
+        function _heardSyntheticItems() {
+            if (!_includeHeard) return [];
+            let hl = _heardList();
+            const f = (_filterName || "").trim().toLowerCase();
+            if (f) hl = hl.filter(h =>
+                (h.name || "").toLowerCase().includes(f) ||
+                (_HEARD_ADV_TYPE[h.type] || "").toLowerCase().includes(f));
+            return hl.map(h => {
+                const pad = n => String(n).padStart(2, "0");
+                let lastSeen = "";
+                if (h.last_heard) {
+                    const d = new Date(h.last_heard * 1000);
+                    lastSeen = `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())} `
+                             + `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+                }
+                const slots = {
+                    type:      h.type || 0,
+                    status:    { online: false },
+                    snr:       (h.snr != null) ? { value: `${h.snr} dB` } : null,
+                    hops:      (h.path_len != null && h.path_len >= 0) ? { value: String(h.path_len) } : null,
+                    last_seen: lastSeen ? { value: lastSeen } : null,
+                    last_advert: h.node_ts || 0,
+                    lat:       h.lat ?? null,
+                    lon:       h.lon ?? null,
+                    _heardPk:  h.pubkey,
+                };
+                return {
+                    name: h.name || h.pubkey.slice(0, 12),
+                    slots, type: h.type || 0, online: false,
+                    lastTs: h.last_heard || 0, favorite: false, _heardPk: h.pubkey,
+                };
+            });
+        }
+
         function _renderContacts(remoteNodes, liveSlotsOf) {
-            const items = _buildContactGroups(remoteNodes, liveSlotsOf);
+            const heardItems = _heardSyntheticItems();
+            // Heard nodes are merged INTO the same list inside
+            // _buildContactGroups so they sort together with real contacts.
+            const items = _buildContactGroups(remoteNodes, liveSlotsOf, heardItems);
             const grid = document.getElementById("contacts-grid");
             const list = document.getElementById("contacts-list");
             if (!grid || !list) return;
@@ -2557,8 +2900,11 @@
             const countEl = document.getElementById("contacts-count");
             if (countEl) {
                 const total = remoteNodes.length;
-                const shown = items.length;
-                countEl.textContent = shown === total ? `(${total})` : `(${shown} / ${total})`;
+                const heardShown = items.filter(it => it._heardPk).length;
+                const shown = items.length - heardShown;
+                let txt = shown === total ? `(${total})` : `(${shown} / ${total})`;
+                if (heardShown) txt += ` + ${heardShown} heard`;
+                countEl.textContent = txt;
             }
 
             const empty = !items.length;
@@ -2570,7 +2916,7 @@
                 if (empty) {
                     list.innerHTML = emptyHtml;
                 } else {
-                    const visibleNames = items.map(it => it.name);
+                    const visibleNames = items.filter(it => !it._heardPk).map(it => it.name);
                     list.innerHTML = _renderListHeader(visibleNames) + items.map(_renderListRow).join("");
                 }
             } else {
@@ -2645,9 +2991,13 @@
             // Show snapshot inbox entry immediately as a placeholder (no timestamp yet).
             // Use a flag so loadInboxHistory knows to drop this entry once real history arrives.
             if (_deviceMap.inbox_value && !_inboxHistory.length) {
-                const { channel, sender, text } = _parseInboxData(_deviceMap.inbox_value);
+                const p = _parseInboxData(_deviceMap.inbox_value);
                 const container = document.getElementById("inbox-history");
-                _inboxHistory.push({ time: "", channel, sender, text, _snapshot: true });
+                _inboxHistory.push({
+                    time: p.ts ? _fmtEpoch(p.ts) : "",
+                    channel: p.channel, sender: p.sender, text: p.text,
+                    tsWrong: p.tsWrong, _snapshot: true,
+                });
                 _renderInbox(container);
             }
 
@@ -2735,7 +3085,7 @@
                 // Inbox — load in background so the node grid update is not blocked
                 const inboxIdx = _deviceMap && _deviceMap.inbox;
                 const inboxDev = inboxIdx ? byIdx[inboxIdx] : (all.find(d => d.Name === "Mesh Inbox") || null);
-                loadInboxHistory(inboxDev);
+                loadInboxHistory(inboxDev, byIdx);
 
                 const now = new Date();
                 document.getElementById("last-updated").textContent =
@@ -2777,12 +3127,18 @@
                     }
                     return;
                 }
-                // Favorite toggle (card overlay)
-                const favBtn = ev.target.closest(".fav-toggle");
+                // Favorite toggle (card overlay) / heard-add star (list).
+                // For heard nodes the star ADDS them to contacts instead.
+                const favBtn = ev.target.closest(".fav-toggle, .row-fav.heard-add-star");
                 if (favBtn) {
                     ev.stopPropagation();
                     ev.preventDefault();
-                    _toggleFavorite(favBtn.dataset.node);
+                    const card = ev.target.closest(".node-card, .contact-row");
+                    if (card && card.dataset.heard === "1") {
+                        _heardAdd(card.dataset.pk, card.dataset.node);
+                    } else {
+                        _toggleFavorite(favBtn.dataset.node);
+                    }
                     return;
                 }
                 // Map button (card overlay or list-row icon)
@@ -2797,7 +3153,12 @@
                 const removeBtn = ev.target.closest(".row-remove");
                 if (removeBtn) {
                     ev.stopPropagation();
-                    _removeContact(removeBtn.dataset.node);
+                    const row = ev.target.closest(".node-card, .contact-row");
+                    if (row && row.dataset.heard === "1") {
+                        _heardDelete(row.dataset.pk);
+                    } else {
+                        _removeContact(removeBtn.dataset.node);
+                    }
                     return;
                 }
                 // Don't hijack clicks on metric links
@@ -2852,6 +3213,18 @@
             if (btnList && !btnList._bound) {
                 btnList._bound = true;
                 btnList.addEventListener("click", () => { _viewMode = "list"; btnList.classList.add("active"); btnCards.classList.remove("active"); _rerenderContacts(); });
+            }
+            const btnHeard = document.getElementById("view-heard");
+            if (btnHeard && !btnHeard._bound) {
+                btnHeard._bound = true;
+                btnHeard.classList.toggle("active", _includeHeard);
+                btnHeard.addEventListener("click", () => {
+                    _includeHeard = !_includeHeard;
+                    try { localStorage.setItem(LS_INCLUDE_HEARD, _includeHeard ? "1" : "0"); } catch (_) {}
+                    btnHeard.classList.toggle("active", _includeHeard);
+                    if (_includeHeard) _loadHeard().then(_rerenderContacts);
+                    else _rerenderContacts();
+                });
             }
         }
 
@@ -3106,8 +3479,8 @@
                 if (view === "traffic")  _renderTrafficIfOpen();
                 if (view === "channels") _renderChannelsIfOpen();
                 if (view === "heatmap")  _renderHeatmapIfOpen();
-                if (view === "heard")    _renderHeardIfOpen();
             });
+            if (view === "heard") _loadHeard().then(_renderHeardIfOpen);
             if (view === "firehose") {
                 title.textContent  = "RF firehose";
                 coords.textContent = "Every RX_LOG_DATA frame, live";
@@ -3460,75 +3833,192 @@
             try { _renderChannelChips(_allChannelChips()); } catch (_) { /* before inbox render */ }
         }
 
-        // Build the "heard but not in contacts" list. We scan recent ADVERT
-        // entries in the RX log, dedupe by adv_key (full pubkey), and filter
-        // out any pubkey that's already in the device map's contact nodes.
+        // Heard-nodes panel. Backed by the plugin's persistent
+        // meshcore_heard.json (survives restarts), not the rolling RX log.
+        const _HEARD_ADV_TYPE = { 1: "Contact", 2: "Repeater", 3: "Room Server", 4: "Sensor" };
+        let _heardMap = null;          // Leaflet instance for the bottom map
+        let _heardMapPk = null;        // pubkey currently shown on the map
+        let _contactMap = null;        // Leaflet instance for the contact panel
+
+        function _heardList() {
+            // Defensive: hide anything that's already a contact.
+            const knownPks = new Set();
+            for (const n of Object.values((_deviceMap && _deviceMap.nodes) || {})) {
+                if (n.pubkey) knownPks.add(n.pubkey);
+            }
+            return Object.values((_heard && _heard.nodes) || {})
+                .filter(h => h.pubkey && !knownPks.has(h.pubkey))
+                .sort((a, b) => (b.last_heard || 0) - (a.last_heard || 0));
+        }
+
         function _renderHeardIfOpen() {
             if (!_isOpen("heard")) return;
             const view = document.getElementById("heard-view");
             if (!view) return;
-            const ADV_TYPE = { 1: "Contact", 2: "Repeater", 3: "Room Server", 4: "Sensor" };
-            const knownPks = new Set();
-            const nodes = (_deviceMap && _deviceMap.nodes) || {};
-            for (const n of Object.values(nodes)) {
-                if (n.pubkey) knownPks.add(n.pubkey);
-            }
-            // Aggregate by pubkey — keep most recent advert per node
-            const heard = {};
-            for (const e of (_rxLog.entries || [])) {
-                if (e.payload_typename !== "ADVERT" || !e.adv_key) continue;
-                if (knownPks.has(e.adv_key)) continue;   // already a contact
-                const prev = heard[e.adv_key];
-                if (!prev || (e._t || 0) > (prev._t || 0)) heard[e.adv_key] = e;
-            }
-            const list = Object.values(heard).sort((a, b) => (b._t || 0) - (a._t || 0));
-            if (!list.length) {
+
+            // Build the shell ONCE per panel open. The 3 s refresh only
+            // rewrites #heard-list-wrap — the #heard-map element is left
+            // untouched so its Leaflet instance stays bound to a live DOM
+            // node (rebuilding it every tick made the map flash and die).
+            let listWrap = document.getElementById("heard-list-wrap");
+            if (!listWrap) {
+                // Fresh shell — any prior Leaflet instance is now orphaned.
+                if (_heardMap) { try { _heardMap.remove(); } catch (_) {} _heardMap = null; }
                 view.innerHTML = `
                     <div style="font-size:0.82rem;color:var(--text);opacity:0.85;line-height:1.5">
-                        No unknown adverts heard in the rolling RX log window
-                        (last ~250 frames). Try waiting for repeaters to beacon,
-                        or trigger a flood-advert from a friend.
+                        Nodes heard over the air whose pubkey isn't in your
+                        contacts. This list is persistent. Use
+                        <i class="fa-solid fa-user-plus"></i> to add a node to
+                        your contacts, <i class="fa-solid fa-trash"></i> to drop
+                        it from this list, or
+                        <i class="fa-solid fa-location-dot"></i> to show its
+                        position on the map below.
+                    </div>
+                    <div id="heard-list-wrap"></div>
+                    <div id="heard-map" style="display:none"></div>`;
+                listWrap = document.getElementById("heard-list-wrap");
+            }
+
+            const list = _heardList();
+            if (!list.length) {
+                listWrap.innerHTML = `<div style="color:var(--text);opacity:.7;padding-top:10px">
+                    Nothing heard yet — wait for repeaters to beacon.</div>`;
+            } else {
+                listWrap.innerHTML = `<div class="heard-list">` + list.map(h => {
+                    const pk   = h.pubkey;
+                    const t    = h.last_heard ? new Date(h.last_heard * 1000).toLocaleString() : "?";
+                    const sig  = `${h.snr ?? "?"}/${h.rssi ?? "?"}`;
+                    const kind = _HEARD_ADV_TYPE[h.type] || "?";
+                    const hops = (h.path_len !== undefined && h.path_len >= 0) ? `${h.path_len}h` : "?";
+                    let skewWrong = false, skewTip = "";
+                    if (h.node_ts && h.last_heard
+                        && Math.abs(h.node_ts - h.last_heard) > CLOCK_WRONG_TOLERANCE_S) {
+                        skewWrong = true;
+                        skewTip = `Node clock looks wrong (off by >1h).  `
+                                + `Node-reported advert time: ${new Date(h.node_ts * 1000).toLocaleString()}  |  `
+                                + `We last heard it: ${new Date(h.last_heard * 1000).toLocaleString()}`;
+                    }
+                    const hasLoc = !!(h.lat || h.lon);
+                    const gpsBtn = hasLoc
+                        ? `<button class="heard-act gps" data-pk="${escHtml(pk)}" title="Show on map (${h.lat}, ${h.lon})"><i class="fa-solid fa-location-dot"></i></button>`
+                        : "";
+                    return `<div class="heard-row">
+                        <div class="heard-row-top">
+                            <div class="heard-name">${escHtml(h.name || "(unnamed)")}</div>
+                            <div class="heard-acts">
+                                ${gpsBtn}
+                                <button class="heard-act add" data-pk="${escHtml(pk)}" data-name="${escHtml(h.name || "")}" title="Add to contacts"><i class="fa-solid fa-user-plus"></i></button>
+                                <button class="heard-act del" data-pk="${escHtml(pk)}" title="Delete from heard list"><i class="fa-solid fa-trash"></i></button>
+                            </div>
+                        </div>
+                        <div class="heard-meta">
+                            <span class="heard-chip">${escHtml(kind)}</span>
+                            <span class="heard-chip">${hops}</span>
+                            <span class="heard-chip">${escHtml(sig)} dB/dBm</span>
+                        </div>
+                        <div class="heard-pk" title="${escHtml(pk)}">${escHtml(pk)}</div>
+                        <div class="heard-extra${skewWrong ? " clock-wrong" : ""}"><span title="${skewWrong ? escHtml(skewTip) : "Last heard at"}">${escHtml(t)}</span></div>
                     </div>`;
+                }).join("") + `</div>`;
+
+                listWrap.querySelectorAll(".heard-act.add").forEach(b =>
+                    b.onclick = () => _heardAdd(b.dataset.pk, b.dataset.name));
+                listWrap.querySelectorAll(".heard-act.del").forEach(b =>
+                    b.onclick = () => _heardDelete(b.dataset.pk));
+                listWrap.querySelectorAll(".heard-act.gps").forEach(b =>
+                    b.onclick = () => _heardToggleMap(b.dataset.pk));
+            }
+
+            // Keep an open map visible if its node is still present.
+            // force=false → don't reset the user's zoom/pan on refresh.
+            if (_heardMapPk && list.some(h => h.pubkey === _heardMapPk)) {
+                _heardShowMap(_heardMapPk, false);
+            } else if (_heardMapPk) {
+                _heardMapPk = null;
+                const el = document.getElementById("heard-map");
+                if (el) el.style.display = "none";
+            }
+        }
+
+        async function _heardAdd(pk, name) {
+            if (!confirm(`Add "${name || pk.slice(0,12)}" to your contacts?`)) return;
+            // Optimistic: drop locally so it disappears immediately.
+            if (_heard.nodes) delete _heard.nodes[pk];
+            if (_heardMapPk === pk) _heardToggleMap(pk);
+            _renderHeardIfOpen();
+            if (_includeHeard) _rerenderContacts();
+            await _sendDeviceCmd(`!heard_add ${pk}`);
+            // Refresh contacts/map shortly so the new contact card shows up.
+            setTimeout(() => {
+                _loadDeviceMap();
+                _loadHeard().then(() => { _renderHeardIfOpen(); _rerenderContacts(); });
+            }, 2500);
+        }
+
+        async function _heardDelete(pk) {
+            if (_heard.nodes) delete _heard.nodes[pk];
+            if (_heardMapPk === pk) _heardToggleMap(pk);
+            _renderHeardIfOpen();
+            if (_includeHeard) _rerenderContacts();
+            await _sendDeviceCmd(`!heard_delete ${pk}`);
+        }
+
+        function _heardToggleMap(pk) {
+            if (_heardMapPk === pk) {           // toggle off
+                _heardMapPk = null;
+                const el = document.getElementById("heard-map");
+                if (el) el.style.display = "none";
                 return;
             }
-            const rows = list.map(e => {
-                const t  = e._t ? new Date(e._t * 1000).toLocaleTimeString() : "?";
-                const sig = `${e.snr ?? "?"}/${e.rssi ?? "?"}`;
-                const loc = (e.adv_lat && e.adv_lon)
-                    ? `${e.adv_lat.toFixed(4)}, ${e.adv_lon.toFixed(4)}`
-                    : "—";
-                const kind = ADV_TYPE[e.adv_type] || "?";
-                const hops = e.path_len !== undefined ? `${e.path_len}h` : "?";
-                return `<div class="heard-row">
-                    <div class="heard-name">${escHtml(e.adv_name || "(unnamed)")}</div>
-                    <div class="heard-meta">
-                        <span class="heard-chip">${escHtml(kind)}</span>
-                        <span class="heard-chip">${hops}</span>
-                        <span class="heard-chip">${escHtml(sig)} dB/dBm</span>
-                    </div>
-                    <div class="heard-pk" title="${escHtml(e.adv_key)}">${escHtml(e.adv_key.slice(0, 16))}…</div>
-                    <div class="heard-extra">
-                        <span title="Last heard at">${escHtml(t)}</span>
-                        <span>${escHtml(loc)}</span>
-                    </div>
-                </div>`;
-            }).join("");
-            view.innerHTML = `
-                <div style="font-size:0.82rem;color:var(--text);opacity:0.85;line-height:1.5">
-                    Adverts from nodes whose pubkey isn't in your contacts.
-                    One row per pubkey, with the most recent advert's signal
-                    and path-length. Nodes can stay off the contact list for
-                    a few reasons:
-                    <ul style="margin:4px 0 4px 16px;padding:0">
-                      <li>Auto-add contacts is disabled (Connected Node Settings).</li>
-                      <li>The contact slot table on the device is full.</li>
-                      <li>Filtering by advert type — some firmware versions
-                          skip auto-adding repeaters / room servers.</li>
-                      <li>The advert arrived between connect cycles before
-                          the contact list refresh ran.</li>
-                    </ul>
-                </div>
-                <div class="heard-list">${rows}</div>`;
+            _heardShowMap(pk, true);   // explicit click → (re)center
+        }
+
+        function _heardShowMap(pk, force) {
+            const node = (_heard.nodes || {})[pk];
+            const el = document.getElementById("heard-map");
+            if (!node || !el || (!node.lat && !node.lon)) return;
+            _heardMapPk = pk;
+            el.style.display = "";
+            let tries = 0;
+            const init = () => {
+                if (typeof L === "undefined") {
+                    if (++tries > LEAFLET_MAX_TRIES) {
+                        el.innerHTML = `<div style="padding:16px;color:var(--muted);font-size:0.8rem;text-align:center">Map library unavailable.</div>`;
+                        return;
+                    }
+                    setTimeout(init, LEAFLET_POLL_MS);
+                    return;
+                }
+                const fresh = !_heardMap;
+                if (fresh) {
+                    _heardMap = L.map(el, { zoomControl: true }).setView([node.lat, node.lon], 12);
+                    L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+                        attribution: '&copy; OpenStreetMap', maxZoom: 19,
+                    }).addTo(_heardMap);
+                }
+                // Only (re)center + (re)place the marker when the displayed
+                // node actually changes or the user explicitly clicked the
+                // pin. The 3 s refresh calls this with force=false, so it
+                // must NOT fight the user's manual zoom / pan.
+                if (fresh || force || _heardMap._shownPk !== pk) {
+                    _heardMap.setView([node.lat, node.lon], 12);
+                    if (_heardMap._hmMarker) _heardMap._hmMarker.remove();
+                    // CSS-only pin — the self-hosted Leaflet bundle has no
+                    // marker PNGs, so the default icon would render broken.
+                    const pinIcon = L.divIcon({
+                        className: "mc-pin",
+                        html: '<div class="mc-pin-inner"></div>',
+                        iconSize: [20, 20],
+                        iconAnchor: [10, 20],
+                        popupAnchor: [0, -16],
+                    });
+                    _heardMap._hmMarker = L.marker([node.lat, node.lon], { icon: pinIcon })
+                        .addTo(_heardMap).bindPopup(node.name || pk.slice(0, 12)).openPopup();
+                    _heardMap._shownPk = pk;
+                }
+                setTimeout(() => _heardMap.invalidateSize(), 200);
+            };
+            init();
         }
 
         function _renderHeatmapIfOpen() {
@@ -4112,13 +4602,35 @@ Larger = more reliable routing but smaller mesh diameter.">Path hash size</label
         }
 
         // ── Remote-contact side panel ────────────────────────────────────
+        // Build a _deviceMap-node-shaped object from the heard store so the
+        // contact panel can show pubkey/type/snr/hops/coords for a heard node
+        // that isn't a real contact (and so has no _deviceMap.nodes entry).
+        function _heardNodeShape(name) {
+            const hl = (typeof _heardList === "function") ? _heardList() : [];
+            const h = hl.find(x => (x.name || (x.pubkey || "").slice(0, 12)) === name);
+            if (!h) return null;
+            return {
+                pubkey: h.pubkey || "",
+                type:   h.type || 0,
+                snr:    (h.snr != null) ? { value: `${h.snr} dB` } : null,
+                hops:   (h.path_len != null && h.path_len >= 0) ? { value: String(h.path_len) } : null,
+                lat:    h.lat ?? null,
+                lon:    h.lon ?? null,
+                query:  {},
+                _heard: true,
+            };
+        }
+
         function _renderContactPanel(name) {
             const view = document.getElementById("contact-view");
             if (!view) return;
-            const node = (_deviceMap && _deviceMap.nodes && _deviceMap.nodes[name]) || {};
+            const node = (_deviceMap && _deviceMap.nodes && _deviceMap.nodes[name])
+                       || _heardNodeShape(name) || {};
             const query = node.query || {};
             const hops  = node.hops && node.hops.value || "?";
             const snr   = node.snr  && node.snr.value  || "?";
+            const cLat = node.lat, cLon = node.lon;
+            const cHasLoc = (cLat != null && cLon != null) && (cLat || cLon);
 
             const fmtAge = (t) => {
                 if (!t) return "never";
@@ -4153,7 +4665,26 @@ Larger = more reliable routing but smaller mesh diameter.">Path hash size</label
                         <button class="self-btn" data-action="copy-pubkey">Copy</button>
                     </div>
                 </div>
+                <div class="self-row"><label>Coordinates</label>
+                    <span class="self-value">${cHasLoc ? `${cLat}, ${cLon}` : "—"}</span>
+                </div>
+                ${cHasLoc ? `<div id="contact-map"></div>` : ""}
+                ${_convDevIdx(name) ? `
+                <div class="self-input-wrap">
+                    <button class="self-btn primary" data-action="show-conversation" style="flex:1">
+                        💬 Show conversation in inbox
+                    </button>
+                </div>` : ""}
 
+                ${node._heard ? `
+                <div class="self-section">Heard node</div>
+                <div style="font-size:0.78rem;color:var(--text);opacity:0.8;line-height:1.5">
+                    This node was heard over the air but is not in your contacts,
+                    so remote queries aren't available. Add it to contacts
+                    (star it in the list or the Heard-nodes panel) to enable
+                    status / telemetry / neighbour queries.
+                </div>
+                ` : `
                 <div class="self-section">Remote queries</div>
                 <div style="font-size:0.78rem;color:var(--text);opacity:0.8;line-height:1.5">
                     Each query sends a packet over the mesh and waits up to 60s
@@ -4167,10 +4698,52 @@ Larger = more reliable routing but smaller mesh diameter.">Path hash size</label
                     <button class="self-btn primary" data-action="req-neighbours">Get neighbours</button>
                 </div>
                 ${statusHtml}${telemHtml}${neighHtml}
+                `}
             `;
+
+            // Location map. innerHTML above replaced the DOM, so any prior
+            // Leaflet instance is now orphaned — drop it and rebuild. This
+            // panel has no periodic refresh, so a plain rebuild is fine.
+            if (_contactMap) { try { _contactMap.remove(); } catch (_) {} _contactMap = null; }
+            if (cHasLoc) {
+                const el = document.getElementById("contact-map");
+                let tries = 0;
+                const init = () => {
+                    if (typeof L === "undefined") {
+                        if (++tries > LEAFLET_MAX_TRIES) {
+                            if (el) el.innerHTML = `<div style="padding:16px;color:var(--muted);font-size:0.8rem;text-align:center">Map library unavailable.</div>`;
+                            return;
+                        }
+                        setTimeout(init, LEAFLET_POLL_MS);
+                        return;
+                    }
+                    if (!el) return;
+                    _contactMap = L.map(el, { zoomControl: true }).setView([cLat, cLon], 12);
+                    L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+                        attribution: '&copy; OpenStreetMap', maxZoom: 19,
+                    }).addTo(_contactMap);
+                    const pinIcon = L.divIcon({
+                        className: "mc-pin",
+                        html: '<div class="mc-pin-inner"></div>',
+                        iconSize: [20, 20],
+                        iconAnchor: [10, 20],
+                        popupAnchor: [0, -16],
+                    });
+                    L.marker([cLat, cLon], { icon: pinIcon })
+                        .addTo(_contactMap).bindPopup(name).openPopup();
+                    setTimeout(() => _contactMap.invalidateSize(), 200);
+                };
+                init();
+            }
+
             view.querySelectorAll(".self-btn").forEach(btn => {
                 btn.onclick = async () => {
                     const action = btn.dataset.action;
+                    if (action === "show-conversation") {
+                        _closeMapPanel();
+                        _enterConversation(name);
+                        return;
+                    }
                     if (action === "copy-pubkey") {
                         const el = btn.previousElementSibling;
                         if (el && el.value) {
@@ -4458,11 +5031,13 @@ Larger = more reliable routing but smaller mesh diameter.">Path hash size</label
         }
 
         // Init: load JSON files, render snapshot instantly, then start live refresh loop.
-        Promise.all([_loadChannelNames(), _loadDeviceMap(), _loadRxLog()]).then(async () => {
+        Promise.all([_loadChannelNames(), _loadDeviceMap(), _loadRxLog(), _loadHeard()]).then(async () => {
             _deviceMapFreshFromInit = true;
             _populateComposeTargets();
             await initialRender();   // instant — no API call
             _initContactClickToCompose();
+            const _ce = document.getElementById("conv-banner-exit");
+            if (_ce) _ce.onclick = _exitConversation;
             loadData();              // kick off first live refresh immediately
             setInterval(loadData, 10000);
             // Faster cadence for the RX log: drives the firehose / sparklines /
@@ -4473,9 +5048,9 @@ Larger = more reliable routing but smaller mesh diameter.">Path hash size</label
                     _renderTrafficIfOpen();
                     _renderChannelsIfOpen();
                     _renderHeatmapIfOpen();
-                    _renderHeardIfOpen();
                     _refreshCardSparklines();
                 });
+                if (_isOpen("heard")) _loadHeard().then(_renderHeardIfOpen);
             }, 3000);
         });
 
@@ -4657,7 +5232,16 @@ Larger = more reliable routing but smaller mesh diameter.">Path hash size</label
             setTimeout(() => {
                 const idx = _inboxHistory.findIndex(m => m._pending === id);
                 if (idx >= 0) {
-                    _inboxHistory.splice(idx, 1);
+                    // The Mesh Inbox is a single-value Domoticz device, so a
+                    // burst of messages can overwrite our own send-echo before
+                    // the dashboard polls it — the confirmation is then never
+                    // seen. The send DID succeed (the plugin logged it), so
+                    // don't delete the message: settle it into a permanent
+                    // "sent" row. Keep a marker so a late real echo still
+                    // dedups against it instead of duplicating.
+                    const m = _inboxHistory[idx];
+                    m._pending = null;
+                    m._settled = id;
                     _lastRenderedInboxHtml = "";
                     if (container) _renderInbox(container);
                 }
