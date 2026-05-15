@@ -5431,7 +5431,20 @@ Larger = more reliable routing but smaller mesh diameter.">Path hash size</label
             const selfName = (_deviceMap && _deviceMap.self) || "Me";
             let channel, sender;
             if (target.startsWith("#")) {
-                channel = target.slice(1) || "Public";
+                // The plugin echoes the channel tag as the stored channel
+                // name (which itself includes the leading "#", e.g.
+                // "#amersfoort", or "Public" for ch0). The compose target
+                // may be "#name", "#idx" or legacy "##name" — resolve it to
+                // that exact stored name so the placeholder's channel matches
+                // the real echo and the dedup can reconcile them (otherwise
+                // "amersfoort" vs "#amersfoort" → duplicate row + extra chip).
+                const raw = target.replace(/^#+/, "");
+                let nm = /^\d+$/.test(raw) ? _channelNames[raw] : null;
+                if (!nm) {
+                    nm = Object.values(_channelNames).find(v =>
+                        String(v).replace(/^#+/, "").toLowerCase() === raw.toLowerCase());
+                }
+                channel = nm || (raw ? `#${raw}` : "Public");
                 // For channel sends the plugin uses the connected-node's own name
                 // when echoing back, so mirror that to keep placeholder/real visually identical.
                 sender = "> " + selfName;
