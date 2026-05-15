@@ -134,6 +134,9 @@ RECONNECT_DELAY_S  = 30
 # Periodic refresh intervals on the persistent connection
 STATS_REFRESH_S    = 300   # self-node stats (battery, radio, packets)
 CONTACTS_REFRESH_S = 60    # contact list refresh (catches new contacts + path changes)
+MSG_DRAIN_S        = 10    # periodic get_msg() drain — safety net for firmware
+                           # that doesn't emit MESSAGES_WAITING / unsolicited
+                           # push, so the node's message queue never piles up
 
 # Rolling RX log buffer size (per-event detail kept in memory for the dashboard)
 RX_LOG_BUFFER      = 250
@@ -1424,9 +1427,10 @@ class BasePlugin:
         # serial_asyncio_fast's executor tasks (open/close) drain so the
         # default thread pool can shut down cleanly on plugin stop.
         try:
-            last_stats    = time.monotonic()
-            last_contacts = time.monotonic()
-            last_rx_write = 0.0
+            last_stats     = time.monotonic()
+            last_contacts  = time.monotonic()
+            last_msg_drain = time.monotonic()   # connect-time drain just ran
+            last_rx_write  = 0.0
 
             while not self._stop_event.is_set():
                 stopped = await self._wait_or_stop(1.0)
@@ -1469,6 +1473,18 @@ class BasePlugin:
                         await _locked(self._refresh_contacts(mc))
                     except Exception as exc:
                         Domoticz.Debug(f"Periodic contacts error: {exc}")
+
+                # Safety-net message drain. start_auto_message_fetching()
+                # only pulls on MESSAGES_WAITING / unsolicited push; some
+                # firmware emits neither, so without this the node's queue
+                # grows unbounded and the plugin silently misses everything
+                # until reconnect. Polling get_msg() guarantees delivery.
+                if now - last_msg_drain >= MSG_DRAIN_S:
+                    last_msg_drain = now
+                    try:
+                        await _locked(self._drain_push_events(mc))
+                    except Exception as exc:
+                        Domoticz.Debug(f"Periodic msg drain error: {exc}")
 
                 if self._rx_log_dirty and (now - last_rx_write) >= RX_LOG_WRITE_S:
                     last_rx_write = now
@@ -2620,10 +2636,14 @@ class BasePlugin:
                 elif chan_part.isdigit():
                     chan_idx = int(chan_part)
                 else:
-                    # Resolve channel name → index (case-insensitive)
+                    # Resolve channel name → index (case- and #-insensitive).
+                    # Stored names include the leading "#" (e.g. "#test");
+                    # the target may arrive as "#test" or "##test" depending
+                    # on the caller, so normalise both sides.
+                    want = chan_part.lstrip("#").lower()
                     chan_idx = None
                     for idx, name in self._channel_names.items():
-                        if name.lower() == chan_part.lower():
+                        if name.lstrip("#").lower() == want:
                             chan_idx = idx
                             break
                     if chan_idx is None:

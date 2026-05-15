@@ -1701,6 +1701,9 @@
                         <button id="view-cards" class="view-btn active" title="Card view"><i class="fa-solid fa-grip"></i></button>
                         <button id="view-list"  class="view-btn"        title="List view"><i class="fa-solid fa-list"></i></button>
                     </div>
+                    <button id="view-type-1" class="view-btn" title="Show/hide Contacts (clients)"><i class="fa-solid fa-user"></i></button>
+                    <button id="view-type-2" class="view-btn" title="Show/hide Repeaters"><i class="fa-solid fa-tower-broadcast"></i></button>
+                    <button id="view-type-3" class="view-btn" title="Show/hide Room Servers"><i class="fa-solid fa-house-signal"></i></button>
                     <button id="view-heard" class="view-btn" title="Also show heard (non-contact) nodes"><i class="fa-solid fa-satellite-dish"></i></button>
                     <div class="search-wrap">
                         <i class="fa-solid fa-magnifying-glass"></i>
@@ -2868,6 +2871,13 @@
         let _includeHeard = (() => {
             try { return localStorage.getItem(LS_INCLUDE_HEARD) === "1"; } catch (_) { return false; }
         })();
+        // Per-type visibility toggles (Contacts=1, Repeaters=2, Room Servers=3).
+        // Other types (sensor/unknown) are always shown. Persisted; default on.
+        const LS_SHOW_TYPE = { 1: "meshcore.showType1", 2: "meshcore.showType2", 3: "meshcore.showType3" };
+        const _showType = (() => {
+            const get = k => { try { return localStorage.getItem(k) !== "0"; } catch (_) { return true; } };
+            return { 1: get(LS_SHOW_TYPE[1]), 2: get(LS_SHOW_TYPE[2]), 3: get(LS_SHOW_TYPE[3]) };
+        })();
         let _filterName = "";         // matches against name + type label
         const _selectedContacts = new Set();   // contact names checked in list view
         // Cached live-resolver from the last loadData() call so view-toggling /
@@ -2900,13 +2910,17 @@
 
             // Apply filter — matches against name and type label (e.g. "repeater")
             const q = _filterName.trim().toLowerCase();
-            const filtered = q
+            let filtered = q
                 ? items.filter(it => {
                     if (it.name.toLowerCase().includes(q)) return true;
                     const typeLabel = (TYPE_LABELS[it.type] || "").toLowerCase();
                     return typeLabel && typeLabel.includes(q);
                 })
                 : items;
+            // Per-type visibility toggles. Only types 1/2/3 are toggleable;
+            // anything else (sensor/unknown) is always shown.
+            filtered = filtered.filter(it =>
+                !(it.type in _showType) || _showType[it.type]);
 
             // Sort:
             //   1. online before offline
@@ -3310,6 +3324,15 @@
                 if (!el) return;
                 const name = el.dataset.node;
                 if (!name) return;
+                // Favourite with a stored conversation: clicking the card/row
+                // body (not its buttons — those returned above) shows that
+                // contact's correspondence in the Message Inbox. Clicking it
+                // again toggles back to the normal inbox. Non-favourites fall
+                // through and just get selected as the compose target.
+                if (el.dataset.heard !== "1" && _convDevIdx(name)) {
+                    if (_convNode === name) _exitConversation();
+                    else                    _enterConversation(name);
+                }
                 const sel = document.getElementById("compose-target");
                 if (!sel) return;
                 const match = [...sel.options].find(o => o.value === name);
@@ -3356,6 +3379,18 @@
             if (btnList && !btnList._bound) {
                 btnList._bound = true;
                 btnList.addEventListener("click", () => { _viewMode = "list"; btnList.classList.add("active"); btnCards.classList.remove("active"); _rerenderContacts(); });
+            }
+            for (const t of [1, 2, 3]) {
+                const b = document.getElementById(`view-type-${t}`);
+                if (!b || b._bound) continue;
+                b._bound = true;
+                b.classList.toggle("active", _showType[t]);
+                b.addEventListener("click", () => {
+                    _showType[t] = !_showType[t];
+                    try { localStorage.setItem(LS_SHOW_TYPE[t], _showType[t] ? "1" : "0"); } catch (_) {}
+                    b.classList.toggle("active", _showType[t]);
+                    _rerenderContacts();
+                });
             }
             const btnHeard = document.getElementById("view-heard");
             if (btnHeard && !btnHeard._bound) {
@@ -5264,7 +5299,9 @@ Larger = more reliable routing but smaller mesh diameter.">Path hash size</label
                 grp.label = "Channels";
                 for (const [idx, name] of chanEntries) {
                     const o = document.createElement("option");
-                    o.value = `#${name}`;
+                    // Channel names already include the leading "#"
+                    // (e.g. "#test") — don't double-prefix into "##test".
+                    o.value = String(name).startsWith("#") ? name : `#${name}`;
                     o.textContent = name;
                     grp.appendChild(o);
                 }
