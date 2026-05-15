@@ -289,6 +289,20 @@ git pull
 sudo service domoticz.sh restart
 ```
 
+> **⚠️ Breaking change — DomoticzEx migration**
+>
+> This release moves the plugin to the `DomoticzEx` framework so it is no
+> longer limited to ~11 remote contacts (the old 255-unit-per-plugin cap).
+> Devices are now keyed by a stable DeviceID (`self` for the connected node,
+> the 12-char public-key prefix for each remote contact).
+>
+> After upgrading, your **old per-node devices become orphaned** — Domoticz
+> does not auto-migrate them. Delete them once:
+> *Setup → Devices*, filter by the MeshCore hardware, and remove the old
+> entries. The plugin recreates fresh devices automatically on the next
+> contact poll. No dashboard data is lost — `meshcore.html` re-reads its
+> JSON map every tick and the historical RX log is preserved.
+
 ----------
 
 ## 🧩 Troubleshooting

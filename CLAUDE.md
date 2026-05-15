@@ -62,44 +62,53 @@ Domoticz Plugin
 
 - `pip install meshcore` — Python package for MeshCore TCP communication
 
-### Domoticz devices
+### Domoticz devices (DomoticzEx framework)
 
-| Unit range | Device | Type |
+The plugin uses `import DomoticzEx as Domoticz`. Devices are keyed by a string
+**DeviceID**; each DeviceID carries a `Units` dict. There is **no 255-unit
+cap** — the old `NODE_BASE`/`NODE_SLOTS`/`_node_unit`/`_node_index` slot math
+is gone. Access devices via the `_dev(device_id, unit)` helper and resolve a
+node name to its DeviceID via `_device_id_for(name)`.
+
+DeviceID scheme:
+
+| DeviceID | Meaning | Units |
 |---|---|---|
-| 1 | Mesh Inbox | Text |
-| 2 | Mesh Send | Text |
-| 3 | Mesh Msgs Received | Custom (msgs) |
-| 4 | Mesh Msgs Sent | Custom (msgs) |
-| 10 + (node_idx × 20) + offset | Per-node devices (see below) | various |
+| `mesh` | Global devices | `UNIT_INBOX=1`, `UNIT_SEND=2`, `UNIT_MSGS_RECV=3`, `UNIT_MSGS_SENT_=4` |
+| `self` | The connected node | `OFF_*` (see below) |
+| `<pubkey[:12]>` | A remote contact | `OFF_*` (see below) |
 
-Node index 0 = self (connected) node. Index 1..N = remote contacts (auto-discovered from mc.contacts).
+`_device_id_for(name)` returns `"self"` for the connected node, the 12-hex
+pubkey prefix for a remote contact (from `self._node_did`), or `None` if the
+pubkey isn't known yet (device is created on the next contacts poll). Units
+are 1-based because DomoticzEx requires `Unit >= 1`.
 
-#### Self node devices (index 0, units 10–29)
+#### Self node units (DeviceID `self`)
 
-| Offset | Device | Type |
+| Unit (OFF_*) | Device | Type |
 |---|---|---|
-| 0 | Status | Switch (always On when connected) |
-| 1 | Battery % | Percentage |
-| 2 | Battery V | Custom (V) |
-| 3 | RSSI | Custom (dBm) |
-| 4 | SNR | Custom (dB) |
-| 5 | Last Seen | Text |
-| 6 | Noise Floor | Custom (dBm) |
-| 10 | Uptime | Custom (min) |
-| 11 | Airtime TX | Custom (s) |
-| 12 | Pkts Sent | Custom (pkts) |
-| 13 | Pkts Recv | Custom (pkts) |
+| 1 STATUS | Status | Switch (always On when connected) |
+| 2 BATT_PCT | Battery % | Percentage |
+| 3 BATT_V | Battery V | Custom (V) |
+| 4 RSSI | RSSI | Custom (dBm) |
+| 5 SNR | SNR | Custom (dB) |
+| 6 NOISE | Noise Floor | Custom (dBm) |
+| 7 LASTSEEN | Last Seen | Text |
+| 11 UPTIME | Uptime | Custom (min) |
+| 12 AIRTIME | Airtime TX | Custom (s) |
+| 13 MSGS_SENT | Pkts Sent | Custom (pkts) |
+| 14 MSGS_RECV | Pkts Recv | Custom (pkts) |
 
-#### Remote node devices (index 1..N, units 30+)
+#### Remote node units (DeviceID = pubkey[:12])
 
 Only data that is reliably available without over-the-air requests:
 
-| Offset | Device | Type |
+| Unit (OFF_*) | Device | Type |
 |---|---|---|
-| 0 | Status | Switch (On/Off based on last_advert age < 8h) |
-| 4 | SNR | Custom (dB) — from incoming messages |
-| 6 | Last Seen | Text |
-| 9 | Hops | Custom (hops) — from contact out_path_len |
+| 1 STATUS | Status | Switch (On/Off based on last_advert age < 8h) |
+| 5 SNR | SNR | Custom (dB) — from incoming messages |
+| 7 LASTSEEN | Last Seen | Text |
+| 10 HOPS | Hops | Custom (hops) — from contact out_path_len |
 
 ### Poll intervals
 

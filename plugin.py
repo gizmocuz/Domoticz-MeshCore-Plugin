@@ -40,7 +40,7 @@
 </plugin>
 """
 
-import Domoticz
+import DomoticzEx as Domoticz
 import asyncio
 import collections
 import gc
@@ -60,16 +60,22 @@ try:
 except ImportError:
     MESHCORE_AVAILABLE = False
 
-# ── Device unit scheme ────────────────────────────────────────────────────────
-# Units 1-9: global devices
-# Units 10+: NODE_SLOTS slots per node (index 0 = self node, 1..N = tracked nodes)
+# ── Device scheme (DomoticzEx) ────────────────────────────────────────────────
+# DomoticzEx keys devices by a string DeviceID; each DeviceID carries a Units
+# dict. There is no 255-unit-per-plugin cap, so the old slot-block math is gone.
+#
+#   DeviceID = MESH_DID ("mesh")  → global devices, Unit = UNIT_* below
+#   DeviceID = "self"             → the connected node, Unit = OFF_* below
+#   DeviceID = <pubkey[:12]>      → a remote contact,  Unit = OFF_* below
+#
+# Units must be >= 1 in DomoticzEx, so OFF_* are 1-based.
+MESH_DID = "mesh"
+SELF_DID = "self"
+
 UNIT_INBOX      = 1
 UNIT_SEND       = 2   # Text device: write "[node: ]message" here to send
 UNIT_MSGS_RECV  = 3   # Custom counter: messages received today
 UNIT_MSGS_SENT_ = 4   # Custom counter: messages sent today
-
-NODE_BASE  = 10
-NODE_SLOTS = 20   # device slots reserved per node (max 11 nodes → unit 219)
 
 # MeshCore firmware exposes up to 40 channel slots. Domoticz devices are NOT
 # created per slot — they live entirely in the dashboard JSON map.
@@ -89,21 +95,21 @@ RADIO_CR_MAX       = 8
 # Default upper bound on TX power if the device hasn't reported max_tx_power.
 RADIO_TX_POWER_DEFAULT_MAX_DBM = 22
 
-# Offsets within each node's slot block
-OFF_STATUS    = 0   # Switch:      online / offline
-OFF_BATT_PCT  = 1   # Percentage:  battery %
-OFF_BATT_V    = 2   # Custom (V):  battery voltage
-OFF_RSSI      = 3   # Custom (dBm): last RSSI
-OFF_SNR       = 4   # Custom (dB):  last SNR
-OFF_NOISE     = 5   # Custom (dBm): noise floor
-OFF_LASTSEEN  = 6   # Text:        timestamp of last received message/advert
-OFF_TEMP      = 7   # Temperature: °C
-OFF_HUMID     = 8   # Humidity:    %
-OFF_HOPS      = 9   # Custom:      path length (hops)
-OFF_UPTIME    = 10  # Custom (min): node uptime
-OFF_AIRTIME   = 11  # Custom (%):  TX airtime utilization
-OFF_MSGS_SENT = 12  # Custom:      total messages sent
-OFF_MSGS_RECV = 13  # Custom:      total messages received
+# Per-node metric units (1-based — DomoticzEx requires Unit >= 1)
+OFF_STATUS    = 1   # Switch:      online / offline
+OFF_BATT_PCT  = 2   # Percentage:  battery %
+OFF_BATT_V    = 3   # Custom (V):  battery voltage
+OFF_RSSI      = 4   # Custom (dBm): last RSSI
+OFF_SNR       = 5   # Custom (dB):  last SNR
+OFF_NOISE     = 6   # Custom (dBm): noise floor
+OFF_LASTSEEN  = 7   # Text:        timestamp of last received message/advert
+OFF_TEMP      = 8   # Temperature: °C
+OFF_HUMID     = 9   # Humidity:    %
+OFF_HOPS      = 10  # Custom:      path length (hops)
+OFF_UPTIME    = 11  # Custom (min): node uptime
+OFF_AIRTIME   = 12  # Custom (%):  TX airtime utilization
+OFF_MSGS_SENT = 13  # Custom:      total messages sent
+OFF_MSGS_RECV = 14  # Custom:      total messages received
 
 # Cayenne LPP sensor type codes (used in self_telemetry LPP list entries)
 LPP_TEMPERATURE = 103
@@ -173,6 +179,10 @@ class BasePlugin:
         self._node_last_advert: dict = {}
         # node_name → contact public_key hex (needed for remove_contact)
         self._node_pubkey: dict = {}
+        # node_name → DomoticzEx DeviceID (12-hex pubkey prefix). Populated
+        # from contact pubkeys and from incoming message pubkey prefixes so a
+        # device can be created/updated before the contacts poll runs.
+        self._node_did: dict = {}
         # Current value of the connected node's manual_add_contacts setting
         # (True = node ignores adverts from unknown contacts; False = auto-add)
         self._manual_add_contacts: bool = False
@@ -281,16 +291,39 @@ class BasePlugin:
         except Exception:
             pass
 
-    def _node_index(self, node_name: str) -> int:
-        """Return slot index: 0 = self node, 1..N = contacts."""
-        if node_name == self._self_name:
-            return 0
-        if node_name in self._contact_names:
-            return self._contact_names.index(node_name) + 1
-        return -1
+    def _device_id_for(self, node_name: str):
+        """Resolve a node name to its DomoticzEx DeviceID.
 
-    def _node_unit(self, node_idx: int, offset: int) -> int:
-        return NODE_BASE + node_idx * NODE_SLOTS + offset
+        Returns "self" for the connected node, the 12-hex pubkey prefix for a
+        remote contact, or None when the pubkey isn't known yet (the device is
+        created on the next contacts poll once the pubkey arrives).
+        """
+        if node_name and node_name == self._self_name:
+            return SELF_DID
+        did = self._node_did.get(node_name)
+        return did or None
+
+    def _dev(self, device_id, unit):
+        """Safe accessor — returns the DomoticzEx Unit object or None."""
+        if not device_id or device_id not in Devices:
+            return None
+        dev = Devices[device_id]
+        if unit not in dev.Units:
+            return None
+        return dev.Units[unit]
+
+    def _set(self, device_id, unit, nValue=None, sValue=None):
+        """Update a DomoticzEx unit. Unlike the classic framework, the Ex
+        Update() does not take nValue/sValue kwargs — they're set as
+        attributes on the Unit object, then Update() is called."""
+        d = self._dev(device_id, unit)
+        if d is None:
+            return
+        if nValue is not None:
+            d.nValue = int(nValue)
+        if sValue is not None:
+            d.sValue = str(sValue)
+        d.Update()
 
     def _all_node_names(self):
         """Self node (if known) + all discovered contacts."""
@@ -459,10 +492,10 @@ class BasePlugin:
                 break
             self._dispatch(item)
 
-    def onDeviceModified(self, unit: int):
-        if unit != UNIT_SEND or self._stopping:
+    def onDeviceModified(self, device_id, unit: int):
+        if device_id != MESH_DID or unit != UNIT_SEND or self._stopping:
             return
-        dev = Devices.get(UNIT_SEND)
+        dev = self._dev(MESH_DID, UNIT_SEND)
         if not dev or not dev.sValue:
             return
         text = dev.sValue.strip()
@@ -524,8 +557,15 @@ class BasePlugin:
         action = action.lower()
         if action == "add":
             self._favorites.add(name)
+            # Create the contact's devices now instead of waiting for the
+            # next contacts poll (favourited contacts get real devices).
+            self._ensure_node_devices(name)
         elif action == "remove":
             self._favorites.discard(name)
+            # Remove the contact's now-unneeded Domoticz devices so the DB
+            # doesn't accumulate them. The contact still shows on the
+            # dashboard via the JSON map.
+            self._delete_node_devices(name)
         else:
             Domoticz.Error(f"!favorite unknown action: {action}")
             return True
@@ -534,19 +574,35 @@ class BasePlugin:
         Domoticz.Debug(f"Favorite {action}: {name}")
         return True
 
+    def _delete_node_devices(self, node_name: str):
+        """Delete all Domoticz units for a (non-self) contact's DeviceID."""
+        did = self._device_id_for(node_name)
+        if not did or did == SELF_DID or did not in Devices:
+            return
+        try:
+            for unit in list(Devices[did].Units):
+                Devices[did].Units[unit].Delete()
+            Domoticz.Log(f"Removed devices for node '{node_name}' (DeviceID={did})")
+        except Exception as exc:
+            Domoticz.Debug(f"_delete_node_devices({node_name}) error: {exc}")
+
     # ── Device creation ───────────────────────────────────────────────────────
 
     def _create_base_devices(self):
-        if UNIT_INBOX not in Devices:
-            Domoticz.Device(Name="Mesh Inbox", Unit=UNIT_INBOX, TypeName="Text").Create()
-        if UNIT_SEND not in Devices:
-            Domoticz.Device(Name="Mesh Send",  Unit=UNIT_SEND,  TypeName="Text").Create()
-        if UNIT_MSGS_RECV not in Devices:
-            Domoticz.Device(Name="Mesh Msgs Received", Unit=UNIT_MSGS_RECV,
-                            TypeName="Custom", Options={"Custom": "1;msgs"}).Create()
-        if UNIT_MSGS_SENT_ not in Devices:
-            Domoticz.Device(Name="Mesh Msgs Sent", Unit=UNIT_MSGS_SENT_,
-                            TypeName="Custom", Options={"Custom": "1;msgs"}).Create()
+        def _have(unit):
+            return MESH_DID in Devices and unit in Devices[MESH_DID].Units
+        if not _have(UNIT_INBOX):
+            Domoticz.Unit(Name="Mesh Inbox", DeviceID=MESH_DID, Unit=UNIT_INBOX,
+                          TypeName="Text").Create()
+        if not _have(UNIT_SEND):
+            Domoticz.Unit(Name="Mesh Send", DeviceID=MESH_DID, Unit=UNIT_SEND,
+                          TypeName="Text").Create()
+        if not _have(UNIT_MSGS_RECV):
+            Domoticz.Unit(Name="Mesh Msgs Received", DeviceID=MESH_DID, Unit=UNIT_MSGS_RECV,
+                          TypeName="Custom", Options={"Custom": "1;msgs"}).Create()
+        if not _have(UNIT_MSGS_SENT_):
+            Domoticz.Unit(Name="Mesh Msgs Sent", DeviceID=MESH_DID, Unit=UNIT_MSGS_SENT_,
+                          TypeName="Custom", Options={"Custom": "1;msgs"}).Create()
 
     def _favorites_path(self) -> str:
         return os.path.join(os.path.dirname(os.path.abspath(__file__)), "meshcore_favorites.json")
@@ -595,10 +651,22 @@ class BasePlugin:
 
     def _ensure_node_devices(self, node_name: str):
         """Create per-node devices on first data for that node."""
-        idx = self._node_index(node_name)
-        if idx < 0:
+        did = self._device_id_for(node_name)
+        if did is None:
+            # No pubkey yet — the contacts poll will create the device once
+            # the pubkey is known. Self always resolves to SELF_DID.
             return
-        is_self = (idx == 0)
+        is_self = (did == SELF_DID)
+        # Only the self node and favourited contacts get real Domoticz
+        # devices. The mesh can carry 300+ contacts (repeaters / room
+        # servers / sensors) you never interact with — creating ~4 devices
+        # each would bloat the DB and Domoticz UI. Non-favourite contacts
+        # still appear fully on the dashboard via meshcore_devices.json
+        # (last_seen comes from _node_last_activity, plus type/last_advert/
+        # pubkey/query are all in the map). Favourite a contact and its
+        # devices are created on the next contacts poll.
+        if not is_self and node_name not in self._favorites:
+            return
         if is_self:
             specs = [
                 (OFF_STATUS,    f"{node_name} Status",      "Switch",      {}),
@@ -622,28 +690,15 @@ class BasePlugin:
                 (OFF_HOPS,     f"{node_name} Hops",      "Custom", {"Custom": "1;hops"}),
             ]
         created = False
-        skipped = False
+        existing_units = (Devices[did].Units if did in Devices else {})
         for offset, name, typename, opts in specs:
-            unit = self._node_unit(idx, offset)
-            # Domoticz only allows units 1..255 per plugin instance. With the
-            # current 20-slot block size that caps us at ~11 remote contacts.
-            # Beyond that we silently skip Device creation — the contact still
-            # appears in the dashboard via the device map JSON.
-            if unit < 1 or unit > 255:
-                skipped = True
-                continue
-            if unit not in Devices:
-                Domoticz.Device(Name=name, Unit=unit, TypeName=typename, Options=opts).Create()
+            if offset not in existing_units:
+                Domoticz.Unit(Name=name, DeviceID=did, Unit=offset,
+                              TypeName=typename, Options=opts).Create()
                 created = True
         if created:
-            Domoticz.Log(f"Created devices for node '{node_name}' (idx={idx})")
+            Domoticz.Log(f"Created devices for node '{node_name}' (DeviceID={did})")
             self._write_device_map()
-        elif skipped and not getattr(self, "_warned_overflow", False):
-            Domoticz.Log(
-                f"Skipping Domoticz devices for node '{node_name}' (idx={idx}) — "
-                "unit numbers would exceed 255. The contact still appears on the dashboard."
-            )
-            self._warned_overflow = True
 
     # ── Custom dashboard page ──────────────────────────────────────────────────
 
@@ -747,9 +802,9 @@ class BasePlugin:
           }
         }
         """
-        def _slot(unit):
+        def _slot(did, unit):
             """Return {idx, value, online} for a device unit, or None if not created yet."""
-            d = Devices.get(unit)
+            d = self._dev(did, unit)
             if not d:
                 return None
             return {
@@ -760,18 +815,15 @@ class BasePlugin:
 
         nodes = {}
         for node_name in self._all_node_names():
-            ni = self._node_index(node_name)
-            if ni < 0:
-                continue
+            did = self._device_id_for(node_name)
             loc = self._node_locations.get(node_name, {})
             pk_full = self._node_pubkey.get(node_name, "")
             # Build the last_seen slot. _node_last_activity is the source of
             # truth — it's always updated regardless of whether the Domoticz
-            # device exists (contacts with unit > 255 don't get devices) or
-            # whether the prefix lookup matched a previous code path. We
-            # surface the matching Domoticz device idx for the click-through
-            # to the device log when the unit was created.
-            ls_slot_dev = _slot(self._node_unit(ni, OFF_LASTSEEN))
+            # device exists yet (pubkey-less contacts have no DeviceID until
+            # the contacts poll). We surface the matching device idx for the
+            # click-through to the device log when it has been created.
+            ls_slot_dev = _slot(did, OFF_LASTSEEN)
             last_activity = self._node_last_activity.get(node_name, 0)
             if last_activity:
                 ls_slot = {
@@ -782,18 +834,18 @@ class BasePlugin:
             else:
                 ls_slot = ls_slot_dev
             nodes[node_name] = {
-                "status":    _slot(self._node_unit(ni, OFF_STATUS)),
-                "battery":   _slot(self._node_unit(ni, OFF_BATT_PCT)),
-                "battery_v": _slot(self._node_unit(ni, OFF_BATT_V)),
-                "rssi":      _slot(self._node_unit(ni, OFF_RSSI)),
-                "snr":       _slot(self._node_unit(ni, OFF_SNR)),
-                "noise":     _slot(self._node_unit(ni, OFF_NOISE)),
+                "status":    _slot(did, OFF_STATUS),
+                "battery":   _slot(did, OFF_BATT_PCT),
+                "battery_v": _slot(did, OFF_BATT_V),
+                "rssi":      _slot(did, OFF_RSSI),
+                "snr":       _slot(did, OFF_SNR),
+                "noise":     _slot(did, OFF_NOISE),
                 "last_seen": ls_slot,
-                "hops":      _slot(self._node_unit(ni, OFF_HOPS)),
-                "uptime":    _slot(self._node_unit(ni, OFF_UPTIME)),
-                "airtime":   _slot(self._node_unit(ni, OFF_AIRTIME)),
-                "pkts_sent": _slot(self._node_unit(ni, OFF_MSGS_SENT)),
-                "pkts_recv": _slot(self._node_unit(ni, OFF_MSGS_RECV)),
+                "hops":      _slot(did, OFF_HOPS),
+                "uptime":    _slot(did, OFF_UPTIME),
+                "airtime":   _slot(did, OFF_AIRTIME),
+                "pkts_sent": _slot(did, OFF_MSGS_SENT),
+                "pkts_recv": _slot(did, OFF_MSGS_RECV),
                 "lat":       loc.get("lat"),
                 "lon":       loc.get("lon"),
                 # Contact metadata — used by the dashboard for type chip and sorting.
@@ -810,8 +862,8 @@ class BasePlugin:
                 "query":         self._contact_query_results.get(node_name, {}),
             }
 
-        inbox_dev = Devices.get(UNIT_INBOX)
-        send_dev  = Devices.get(UNIT_SEND)
+        inbox_dev = self._dev(MESH_DID, UNIT_INBOX)
+        send_dev  = self._dev(MESH_DID, UNIT_SEND)
         payload = {
             "inbox":        inbox_dev.ID if inbox_dev else None,
             "inbox_value":  inbox_dev.sValue if inbox_dev else None,
@@ -2190,6 +2242,7 @@ class BasePlugin:
                     self._node_types.pop(name, None)
                     self._node_last_advert.pop(name, None)
                     self._node_pubkey.pop(name, None)
+                    self._node_did.pop(name, None)
                     self._contact_query_results.pop(name, None)
                     self._node_last_activity.pop(name, None)
                     self._node_locations.pop(name, None)
@@ -2398,28 +2451,20 @@ class BasePlugin:
                     return
                 Domoticz.Log(f"Message sent to '{d['target']}': {d['body']}")
                 self._sent_count += 1
-                if UNIT_MSGS_SENT_ in Devices:
-                    Devices[UNIT_MSGS_SENT_].Update(nValue=0, sValue=str(self._sent_count))
+                self._set(MESH_DID, UNIT_MSGS_SENT_, 0, str(self._sent_count))
                 # Show sent message in the inbox so the user gets confirmation.
                 # Use the same [ChannelName|sender] / [P|sender] format as incoming msgs
                 # with a leading "> " on the sender to mark it as outgoing. Stick to
                 # ASCII so Windows/cp1252 stored text isn't mangled.
-                if UNIT_INBOX in Devices:
-                    tgt = d["target"]
-                    me = self._self_name or "Me"
-                    if tgt.startswith("#"):
-                        chan_idx_str = tgt[1:]
-                        chan_idx_int = int(chan_idx_str) if chan_idx_str.isdigit() else None
-                        chan_tag = self._channel_names.get(chan_idx_int, f"C{chan_idx_str}") if chan_idx_int is not None else f"C{chan_idx_str}"
-                        Devices[UNIT_INBOX].Update(
-                            nValue=0,
-                            sValue=f"[{chan_tag}|> {me}] {d['body']}"
-                        )
-                    else:
-                        Devices[UNIT_INBOX].Update(
-                            nValue=0,
-                            sValue=f"[P|> {tgt}] {d['body']}"
-                        )
+                tgt = d["target"]
+                me = self._self_name or "Me"
+                if tgt.startswith("#"):
+                    chan_idx_str = tgt[1:]
+                    chan_idx_int = int(chan_idx_str) if chan_idx_str.isdigit() else None
+                    chan_tag = self._channel_names.get(chan_idx_int, f"C{chan_idx_str}") if chan_idx_int is not None else f"C{chan_idx_str}"
+                    self._set(MESH_DID, UNIT_INBOX, 0, f"[{chan_tag}|> {me}] {d['body']}")
+                else:
+                    self._set(MESH_DID, UNIT_INBOX, 0, f"[P|> {tgt}] {d['body']}")
             else:
                 Domoticz.Error(f"Send failed to '{d['target']}': {d['result']}")
 
@@ -2444,11 +2489,7 @@ class BasePlugin:
         # Update self node status from self_info (always online when connected)
         if self._self_name:
             self._ensure_node_devices(self._self_name)
-            idx = self._node_index(self._self_name)
-            if idx >= 0:
-                status_unit = self._node_unit(idx, OFF_STATUS)
-                if status_unit in Devices:
-                    Devices[status_unit].Update(nValue=1, sValue="On")
+            self._set(SELF_DID, OFF_STATUS, 1, "On")
 
         # Update all remote contacts
         for contact in contacts.values():
@@ -2473,27 +2514,28 @@ class BasePlugin:
             online      = advert_online or path_online
             age_s       = int(now - effective_ts) if effective_ts > 0 else -1
 
+            # Store pubkey / DeviceID BEFORE ensuring devices — the DeviceID
+            # is derived from the pubkey, so it must be known first.
+            pk = contact.get("public_key", "")
+            if pk:
+                self._node_pubkey[node_name] = pk
+                self._node_did[node_name] = pk[:12]
+
             self._ensure_node_devices(node_name)
-            idx = self._node_index(node_name)
-            if idx < 0:
+            did = self._device_id_for(node_name)
+            if did is None:
                 continue
 
-            status_unit = self._node_unit(idx, OFF_STATUS)
-            if status_unit in Devices:
-                Devices[status_unit].Update(
-                    nValue=1 if online else 0,
-                    sValue="On" if online else "Off"
-                )
+            self._set(did, OFF_STATUS,
+                      1 if online else 0,
+                      "On" if online else "Off")
 
-            hops_unit = self._node_unit(idx, OFF_HOPS)
-            if hops_unit in Devices and path_len >= 0:
-                Devices[hops_unit].Update(nValue=0, sValue=str(path_len))
+            if path_len >= 0:
+                self._set(did, OFF_HOPS, 0, str(path_len))
 
             if effective_ts > 0:
-                ls_unit = self._node_unit(idx, OFF_LASTSEEN)
-                if ls_unit in Devices:
-                    ts = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(effective_ts))
-                    Devices[ls_unit].Update(nValue=0, sValue=ts)
+                ts = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(effective_ts))
+                self._set(did, OFF_LASTSEEN, 0, ts)
 
             la = self._node_last_activity.get(node_name, 0)
 
@@ -2501,9 +2543,6 @@ class BasePlugin:
             self._node_types[node_name] = int(contact.get("type", 0))
             if last_advert > 0:
                 self._node_last_advert[node_name] = last_advert
-            pk = contact.get("public_key", "")
-            if pk:
-                self._node_pubkey[node_name] = pk
 
             # Store GPS location if the contact advertises valid coordinates
             adv_lat = contact.get("adv_lat", 0.0)
@@ -2557,38 +2596,34 @@ class BasePlugin:
             chan_tag = "P"
 
         # Update global inbox — format: [ChannelName|sender] text  or  [P|sender] text
-        if UNIT_INBOX in Devices:
-            Devices[UNIT_INBOX].Update(nValue=0, sValue=f"[{chan_tag}|{display_name}] {text_body}")
+        self._set(MESH_DID, UNIT_INBOX, 0, f"[{chan_tag}|{display_name}] {text_body}")
 
         # Update per-node devices for any known contact
         if node_name:
+            # CONTACT_MSG_RECV carries the sender's pubkey prefix — register
+            # it as the DeviceID so the device can be created on first message
+            # even before the contacts poll runs.
+            pk_prefix = msg.get("pubkey_prefix", "")
+            if pk_prefix and node_name not in self._node_did:
+                self._node_did[node_name] = pk_prefix[:12]
+
             self._ensure_node_devices(node_name)
-            idx = self._node_index(node_name)
-            if idx >= 0:
+            did = self._device_id_for(node_name)
+            if did is not None:
                 now_ts = int(time.time())
                 # Record activity — used by _handle_contacts for online detection
                 self._node_last_activity[node_name] = now_ts
 
                 # A message means the node is clearly reachable → mark online
-                status_unit = self._node_unit(idx, OFF_STATUS)
-                if status_unit in Devices:
-                    Devices[status_unit].Update(nValue=1, sValue="On")
+                self._set(did, OFF_STATUS, 1, "On")
 
                 # Last Seen
-                ls_unit = self._node_unit(idx, OFF_LASTSEEN)
-                if ls_unit in Devices:
-                    Devices[ls_unit].Update(nValue=0, sValue=time.strftime("%Y-%m-%d %H:%M:%S"))
+                self._set(did, OFF_LASTSEEN, 0, time.strftime("%Y-%m-%d %H:%M:%S"))
 
                 # SNR from message metadata; RSSI from status poll (req_status_sync)
                 snr = msg.get("SNR") if msg.get("SNR") is not None else msg.get("snr")
                 if snr is not None:
-                    snr_unit = self._node_unit(idx, OFF_SNR)
-                    if snr_unit in Devices:
-                        Devices[snr_unit].Update(nValue=0, sValue=str(round(float(snr), 2)))
-
-                # Per-contact signal history for the dashboard sparkline.
-                # CONTACT_MSG_RECV carries the sender's pubkey_prefix directly.
-                pk_prefix = msg.get("pubkey_prefix", "")
+                    self._set(did, OFF_SNR, 0, str(round(float(snr), 2)))
                 if pk_prefix and snr is not None:
                     with self._rx_log_lock:
                         hist = self._signal_history.setdefault(pk_prefix, [])
@@ -2602,80 +2637,62 @@ class BasePlugin:
 
         # Increment message received counter
         self._recv_count += 1
-        if UNIT_MSGS_RECV in Devices:
-            Devices[UNIT_MSGS_RECV].Update(nValue=0, sValue=str(self._recv_count))
+        self._set(MESH_DID, UNIT_MSGS_RECV, 0, str(self._recv_count))
 
     def _handle_self_stats(self, stats: dict):
         """Update devices for the connected (self) node from polled stats."""
         if not self._self_name:
             return
         self._ensure_node_devices(self._self_name)
-        idx = self._node_index(self._self_name)
-        if idx < 0:
+        did = SELF_DID
+        if did not in Devices:
             return
+
+        def _upd(unit, nValue, sValue):
+            self._set(did, unit, nValue, sValue)
 
         # Battery (millivolts) — from stats_core
         bat_mv = stats.get("battery_mv", 0)
         if bat_mv:
-            pct   = _bat_pct(bat_mv)
-            v     = round(bat_mv / 1000, 2)
-            u_pct = self._node_unit(idx, OFF_BATT_PCT)
-            u_v   = self._node_unit(idx, OFF_BATT_V)
-            if u_pct in Devices:
-                Devices[u_pct].Update(nValue=pct, sValue=str(pct))
-            if u_v in Devices:
-                Devices[u_v].Update(nValue=0, sValue=str(v))
+            pct = _bat_pct(bat_mv)
+            v   = round(bat_mv / 1000, 2)
+            _upd(OFF_BATT_PCT, pct, str(pct))
+            _upd(OFF_BATT_V, 0, str(v))
 
         # Uptime (seconds → minutes)
         uptime_s = stats.get("uptime_secs", 0)
         if uptime_s:
-            u = self._node_unit(idx, OFF_UPTIME)
-            if u in Devices:
-                Devices[u].Update(nValue=0, sValue=str(round(uptime_s / 60, 1)))
+            _upd(OFF_UPTIME, 0, str(round(uptime_s / 60, 1)))
 
         # Radio stats
         noise = stats.get("noise_floor")
         if noise is not None:
-            u = self._node_unit(idx, OFF_NOISE)
-            if u in Devices:
-                Devices[u].Update(nValue=0, sValue=str(noise))
+            _upd(OFF_NOISE, 0, str(noise))
 
         rssi = stats.get("last_rssi")
         if rssi is not None:
-            u = self._node_unit(idx, OFF_RSSI)
-            if u in Devices:
-                Devices[u].Update(nValue=0, sValue=str(rssi))
+            _upd(OFF_RSSI, 0, str(rssi))
 
         snr = stats.get("last_snr")
         if snr is not None:
-            u = self._node_unit(idx, OFF_SNR)
-            if u in Devices:
-                Devices[u].Update(nValue=0, sValue=str(round(snr, 2)))
+            _upd(OFF_SNR, 0, str(round(snr, 2)))
 
         # TX air seconds
         tx_air = stats.get("tx_air_secs")
         if tx_air is not None:
-            u = self._node_unit(idx, OFF_AIRTIME)
-            if u in Devices:
-                Devices[u].Update(nValue=0, sValue=str(tx_air))
+            _upd(OFF_AIRTIME, 0, str(tx_air))
 
         # Packet counters
         pkt_sent = stats.get("sent")
         if pkt_sent is not None:
-            u = self._node_unit(idx, OFF_MSGS_SENT)
-            if u in Devices:
-                Devices[u].Update(nValue=0, sValue=str(pkt_sent))
+            _upd(OFF_MSGS_SENT, 0, str(pkt_sent))
 
         pkt_recv = stats.get("recv")
         if pkt_recv is not None:
-            u = self._node_unit(idx, OFF_MSGS_RECV)
-            if u in Devices:
-                Devices[u].Update(nValue=0, sValue=str(pkt_recv))
+            _upd(OFF_MSGS_RECV, 0, str(pkt_recv))
 
         # Last seen = now (we just got data from it)
-        ls_unit = self._node_unit(idx, OFF_LASTSEEN)
-        if ls_unit in Devices:
-            Devices[ls_unit].Update(nValue=0, sValue=time.strftime("%Y-%m-%d %H:%M:%S"))
+        _upd(OFF_LASTSEEN, 0, time.strftime("%Y-%m-%d %H:%M:%S"))
 
         Domoticz.Debug(f"Self stats updated: bat={bat_mv}mV uptime={uptime_s}s rssi={rssi} snr={stats.get('last_snr')}")
         self._write_device_map()
@@ -2688,4 +2705,4 @@ _plugin = BasePlugin()
 def onStart():            _plugin.onStart()
 def onStop():             _plugin.onStop()
 def onHeartbeat():        _plugin.onHeartbeat()
-def onDeviceModified(u):  _plugin.onDeviceModified(u)
+def onDeviceModified(DeviceID, Unit):  _plugin.onDeviceModified(DeviceID, Unit)
