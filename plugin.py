@@ -3093,7 +3093,7 @@ class BasePlugin:
 
     @staticmethod
     def _inbox_line(chan_tag, sender, body, ts, bad=False,
-                    snr=None, hops=None, rssi=None):
+                    snr=None, hops=None, rssi=None, path=None):
         """Build the inbox / conversation wire string with an embedded send
         time so the dashboard can show the real time a message was sent (not
         the time Domoticz happened to log it — which for messages drained on
@@ -3127,6 +3127,15 @@ class BasePlugin:
                 meta += f"|~r{int(rssi)}"
             except (TypeError, ValueError):
                 pass
+        # Per-hop path = concatenated hex of each repeater's pubkey-hash
+        # prefix the packet carried. Only meaningful when present (mostly
+        # channel msgs back-filled from a matched RX_LOG frame). Strip any
+        # separators the library may add; keep hex only so the token can't
+        # contain '|' / ']' and break parsing.
+        if path:
+            ph = re.sub(r"[^0-9a-fA-F]", "", str(path))
+            if ph:
+                meta += f"|~p{ph.lower()}"
         return f"[{meta}] {body}"
 
     def _log_contact_dm(self, node_name: str, line: str):
@@ -3219,12 +3228,16 @@ class BasePlugin:
         # and no RX_LOG text match, so this is the only reliable source).
         _msg_snr = msg.get("SNR") if msg.get("SNR") is not None else msg.get("snr")
         _msg_rssi = msg.get("rssi")
+        # Per-hop path hashes — present when the library back-filled it from
+        # a matched RX_LOG frame (mostly channel msgs). Lets the dashboard
+        # show / resolve the actual repeater chain.
+        _msg_path = msg.get("path")
 
-        # Update global inbox — [chan|sender|<epoch>[|x][|~h..|~s..|~r..]] text
+        # Update global inbox — [chan|sender|<epoch>[|x][|~h..|~s..|~r..|~p..]] text
         self._set(MESH_DID, UNIT_INBOX, 0,
                   self._inbox_line(chan_tag, display_name, text_body, msg_ts,
                                    ts_bad, snr=_msg_snr, hops=_hops,
-                                   rssi=_msg_rssi))
+                                   rssi=_msg_rssi, path=_msg_path))
 
         # Persist private (DM) messages to the sender's per-contact Messages
         # device so a favourite's conversation history is never lost.
@@ -3232,7 +3245,7 @@ class BasePlugin:
             self._log_contact_dm(node_name,
                 self._inbox_line("P", display_name, text_body, msg_ts,
                                  ts_bad, snr=_msg_snr, hops=_hops,
-                                 rssi=_msg_rssi))
+                                 rssi=_msg_rssi, path=_msg_path))
 
         # Update per-node devices for any known contact
         if node_name:

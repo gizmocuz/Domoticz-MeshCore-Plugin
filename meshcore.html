@@ -2543,11 +2543,11 @@
             // Legacy:  [chan|sender] text  /  [C0|sender] text  /  [sender] text
 
             const m = raw.match(/^\[([^\]]+)\]\s*(.*)/s);
-            if (!m) return { channel: null, sender: "", text: raw, ts: null, tsWrong: false, snr: null, hops: null, rssi: null };
+            if (!m) return { channel: null, sender: "", text: raw, ts: null, tsWrong: false, snr: null, hops: null, rssi: null, path: null };
             const meta = m[1], text = m[2];
             const pipe = meta.indexOf("|");
             if (pipe < 0) {
-                return { channel: null, sender: meta, text, ts: null, tsWrong: false, snr: null, hops: null, rssi: null };
+                return { channel: null, sender: meta, text, ts: null, tsWrong: false, snr: null, hops: null, rssi: null, path: null };
             }
             const parts = meta.split("|");
             const chanPart = parts[0];
@@ -2556,12 +2556,13 @@
             // ~r rssi). They are appended after the epoch/x; filtering them
             // out first leaves the epoch/x logic below untouched, and old
             // lines (no tokens) are unaffected.
-            let snr = null, hops = null, rssi = null;
+            let snr = null, hops = null, rssi = null, path = null;
             rest = rest.filter(seg => {
                 let mm;
                 if ((mm = /^~h(-?\d+)$/.exec(seg)))        { hops = Number(mm[1]); return false; }
                 if ((mm = /^~s(-?\d+(?:\.\d+)?)$/.exec(seg))) { snr  = Number(mm[1]); return false; }
                 if ((mm = /^~r(-?\d+)$/.exec(seg)))        { rssi = Number(mm[1]); return false; }
+                if ((mm = /^~p([0-9a-fA-F]+)$/.exec(seg))) { path = mm[1].toLowerCase(); return false; }
                 return true;
             });
             let ts = null, tsWrong = false;
@@ -2584,7 +2585,7 @@
             } else {
                 channel = chanPart;
             }
-            return { channel, sender, text, ts, tsWrong, snr, hops, rssi };
+            return { channel, sender, text, ts, tsWrong, snr, hops, rssi, path };
         }
 
         async function _fetchTextLog(idx) {
@@ -2635,7 +2636,7 @@
                     _inboxHistory.push({                       // API returns oldest-first
                         time: p.ts ? _fmtEpoch(p.ts) : time,
                         channel: p.channel, sender: p.sender, text: p.text,
-                        tsWrong: p.tsWrong, snr: p.snr, hops: p.hops, rssi: p.rssi,
+                        tsWrong: p.tsWrong, snr: p.snr, hops: p.hops, rssi: p.rssi, path: p.path,
                     });
                 }
                 // After loading history, record the current LastUpdate so we don't
@@ -2663,7 +2664,7 @@
                 _inboxHistory.unshift({
                     time: _p.ts ? _fmtEpoch(_p.ts) : update,
                     channel, sender, text, tsWrong: _p.tsWrong,
-                    snr: _p.snr, hops: _p.hops, rssi: _p.rssi,
+                    snr: _p.snr, hops: _p.hops, rssi: _p.rssi, path: _p.path,
                 });
                 if (_inboxHistory.length > 200) _inboxHistory.pop();
             }
@@ -2751,7 +2752,7 @@
                 _inboxHistory.push({
                     time: p.ts ? _fmtEpoch(p.ts) : (e.Date || ""),
                     channel: p.channel, sender: p.sender, text: p.text,
-                    tsWrong: p.tsWrong, snr: p.snr, hops: p.hops, rssi: p.rssi,
+                    tsWrong: p.tsWrong, snr: p.snr, hops: p.hops, rssi: p.rssi, path: p.path,
                     _sort: _se(p, e),
                 });
             }
@@ -2770,7 +2771,7 @@
                     _inboxHistory.push({
                         time: p.ts ? _fmtEpoch(p.ts) : (e.Date || ""),
                         channel: p.channel, sender: p.sender, text: p.text,
-                        tsWrong: p.tsWrong, snr: p.snr, hops: p.hops, rssi: p.rssi,
+                        tsWrong: p.tsWrong, snr: p.snr, hops: p.hops, rssi: p.rssi, path: p.path,
                         _sort: _se(p, e), _chanCtx: true,
                     });
                 }
@@ -2821,7 +2822,7 @@
                 return;
             }
 
-            const html = visible.map(({ time, channel, sender, text, _pending, tsWrong, snr, hops, rssi }) => {
+            const html = visible.map(({ time, channel, sender, text, _pending, tsWrong, snr, hops, rssi, path }) => {
                 // Outgoing marker may be "> " (current, ASCII-safe) or "▶" (legacy)
                 const isSent = sender && (sender.startsWith("> ") || sender.startsWith("▶"));
                 const isPending = !!_pending;
@@ -2855,7 +2856,7 @@
                     }
                 }
                 const payload = btoa(unescape(encodeURIComponent(JSON.stringify({
-                    time, channel, sender, text, isSent, ts, snr, hops, rssi
+                    time, channel, sender, text, isSent, ts, snr, hops, rssi, path
                 }))));
                 const infoBtn = isPending ? "" :
                     `<button class="msg-info-btn" data-msg="${payload}" title="Message details">
@@ -3255,7 +3256,7 @@
                 _inboxHistory.push({
                     time: p.ts ? _fmtEpoch(p.ts) : "",
                     channel: p.channel, sender: p.sender, text: p.text,
-                    tsWrong: p.tsWrong, snr: p.snr, hops: p.hops, rssi: p.rssi,
+                    tsWrong: p.tsWrong, snr: p.snr, hops: p.hops, rssi: p.rssi, path: p.path,
                     _snapshot: true,
                 });
                 _renderInbox(container);
@@ -3677,6 +3678,42 @@
             const senderSlots = (_deviceMap && _deviceMap.nodes && _deviceMap.nodes[msgObj.sender]) || {};
             const slotVal = k => (senderSlots[k] && senderSlots[k].value != null && senderSlots[k].value !== "")
                 ? String(senderSlots[k].value) : null;
+            // Repeater path: split the per-hop hex into path-hash-sized
+            // chunks and resolve each to a known node by matching the chunk
+            // against the start of every contact/heard node's public key
+            // (the routing hash is the pubkey prefix). Unknown hops stay as
+            // the raw hash; the all-FF/CC wildcard is labelled as such.
+            const _resolveHop = (() => {
+                const map = {};
+                const nodes = (_deviceMap && _deviceMap.nodes) || {};
+                for (const nm in nodes) {
+                    const pk = nodes[nm] && nodes[nm].pubkey;
+                    if (pk) map[String(pk).toLowerCase()] = nm;
+                }
+                const si = _deviceMap && _deviceMap.self_info;
+                if (si && si.public_key && _deviceMap.self)
+                    map[String(si.public_key).toLowerCase()] = _deviceMap.self;
+                const keys = Object.keys(map);
+                return (hex) => {
+                    const h = hex.toLowerCase();
+                    if (/^(ff)+$/.test(h) || /^(cc)+$/.test(h)) return null;   // flood/wildcard
+                    for (const pk of keys) if (pk.startsWith(h)) return map[pk];
+                    return null;
+                };
+            })();
+            let pathRow = null;
+            if (msgObj.path) {
+                const hopLen = (phm || 2) * 2;                 // hex chars per hop
+                const raw = String(msgObj.path).toLowerCase();
+                const hops = [];
+                for (let i = 0; i + hopLen <= raw.length; i += hopLen) {
+                    const tok = raw.slice(i, i + hopLen);
+                    const nm = _resolveHop(tok);
+                    hops.push(nm ? `${nm} (${tok})` : tok);
+                }
+                if (hops.length) pathRow = ["Repeater path", hops.join("  →  "), "text"];
+            }
+
             const rows = [
                 ["Direction", msgObj.isSent ? "Outgoing (sent by us)" : "Incoming", "text"],
                 ["Time",      msgObj.time || "—", ""],
@@ -3685,6 +3722,7 @@
                 ...(msgObj.hops != null ? [["Hops", `${msgObj.hops} hop(s)`, ""]] : []),
                 ...(msgObj.snr  != null ? [["SNR",  `${msgObj.snr} dB`, ""]] : []),
                 ...(msgObj.rssi != null ? [["RSSI", `${msgObj.rssi} dBm`, ""]] : []),
+                ...(pathRow ? [pathRow] : []),
                 ["Text",      msgObj.text || "", "text"],
                 ["Char count",`${chars} characters`, ""],
                 ["Path hash size", phm ? `${phm}-byte (node config)` : "—", ""],
