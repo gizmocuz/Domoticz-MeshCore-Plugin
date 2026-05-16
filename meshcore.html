@@ -1069,18 +1069,22 @@
         .msg-reply-btn {
             margin-left: auto;
             flex-shrink: 0;
-            background: none;
+            background: var(--surface);
             border: 1px solid var(--border);
-            color: var(--muted);
+            color: var(--text);
             border-radius: 4px;
             padding: 1px 7px;
             font-size: 0.72rem;
             cursor: pointer;
             opacity: 0;
-            transition: opacity 0.15s, color 0.15s;
+            transition: opacity 0.15s, color 0.15s, background 0.15s;
         }
-        .inbox-msg:hover .msg-reply-btn { color: var(--muted); }
-        .msg-reply-btn:hover { color: var(--accent); border-color: var(--accent); }
+        .inbox-msg:hover .msg-reply-btn { color: var(--text); opacity: 1; }
+        .msg-reply-btn:hover {
+            color: #fff;
+            background: var(--accent);
+            border-color: var(--accent);
+        }
         .msg-info-btn {
             flex-shrink: 0;
             display: inline-flex;
