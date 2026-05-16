@@ -3012,6 +3012,14 @@
             const si = _deviceMap && _deviceMap.self_info;
             if (si && si.public_key && _deviceMap.self
                 && String(si.public_key).toLowerCase().startsWith(h)) return _deviceMap.self;
+            // Also resolve against heard (non-contact) nodes — that's where
+            // most repeater pubkeys live, so without this almost every hop
+            // shows as "?".
+            const hn = (_heard && _heard.nodes) || {};
+            for (const pk in hn) {
+                if (String(pk).toLowerCase().startsWith(h))
+                    return (hn[pk] && hn[pk].name) || pk.slice(0, 12);
+            }
             return null;
         }
 
@@ -3768,24 +3776,6 @@
             // against the start of every contact/heard node's public key
             // (the routing hash is the pubkey prefix). Unknown hops stay as
             // the raw hash; the all-FF/CC wildcard is labelled as such.
-            const _resolveHop = (() => {
-                const map = {};
-                const nodes = (_deviceMap && _deviceMap.nodes) || {};
-                for (const nm in nodes) {
-                    const pk = nodes[nm] && nodes[nm].pubkey;
-                    if (pk) map[String(pk).toLowerCase()] = nm;
-                }
-                const si = _deviceMap && _deviceMap.self_info;
-                if (si && si.public_key && _deviceMap.self)
-                    map[String(si.public_key).toLowerCase()] = _deviceMap.self;
-                const keys = Object.keys(map);
-                return (hex) => {
-                    const h = hex.toLowerCase();
-                    if (/^(ff)+$/.test(h) || /^(cc)+$/.test(h)) return null;   // flood/wildcard
-                    for (const pk of keys) if (pk.startsWith(h)) return map[pk];
-                    return null;
-                };
-            })();
             let pathRow = null;
             if (msgObj.path) {
                 const hopLen = (phm || 2) * 2;                 // hex chars per hop
@@ -3793,8 +3783,10 @@
                 const hops = [];
                 for (let i = 0; i + hopLen <= raw.length; i += hopLen) {
                     const tok = raw.slice(i, i + hopLen);
-                    const nm = _resolveHop(tok);
-                    hops.push(nm ? `${nm} (${tok})` : tok);
+                    const nm = _resolvePathHop(tok);   // shared resolver (incl. heard nodes)
+                    if (nm) hops.push(`${nm} (${tok})`);
+                    else if (/^(ff)+$/.test(tok) || /^(cc)+$/.test(tok)) hops.push(`flood (${tok})`);
+                    else hops.push(tok);
                 }
                 if (hops.length) pathRow = ["Repeater path", hops.join("  →  "), "text"];
             }
