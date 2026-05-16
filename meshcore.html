@@ -909,8 +909,9 @@
             border: 1px solid var(--heard);
             border-radius: 6px;
         }
-        #conv-banner-label { font-weight: 600; }
-        #conv-banner-exit {
+        #conv-banner-label { font-weight: 600; margin-right: auto; }
+        #conv-banner-exit,
+        #conv-banner-chan {
             font-size: 0.78rem;
             color: var(--text);
             background: var(--surface);
@@ -919,7 +920,13 @@
             padding: 3px 9px;
             cursor: pointer;
         }
-        #conv-banner-exit:hover { background: var(--border); }
+        #conv-banner-exit:hover,
+        #conv-banner-chan:hover { background: var(--border); }
+        #conv-banner-chan.active {
+            background: rgba(78,154,241,0.22);
+            border-color: var(--accent);
+            color: var(--accent);
+        }
 
         #inbox-history {
             background: var(--surface);
@@ -1755,6 +1762,7 @@
         </div>
         <div id="conv-banner" style="display:none">
             <span id="conv-banner-label"></span>
+            <button id="conv-banner-chan" title="Also show this contact's channel posts alongside the DMs">＃ Channel posts</button>
             <button id="conv-banner-exit" title="Back to all messages">✕ All messages</button>
         </div>
         <!-- filter / search -->
@@ -2485,6 +2493,12 @@
         // history (from its per-contact Messages text device) instead of the
         // global Mesh Inbox. null = normal global inbox.
         let _convNode = null;
+        // When in conversation mode, also fold the contact's channel (non-DM)
+        // posts into the view for context. Persisted across sessions.
+        let _convInclChan = localStorage.getItem("meshcore.convInclChan") === "1";
+        // idx of the global rolling Mesh Inbox device — captured by
+        // loadInboxHistory so conversation mode can pull channel posts from it.
+        let _globalInboxIdx = null;
         // LastUpdate of the conversation device at the last fetch, so the
         // poll-driven refresh skips a full text-log re-fetch when nothing
         // changed. null forces a fetch (set on enter).
@@ -2529,15 +2543,27 @@
             // Legacy:  [chan|sender] text  /  [C0|sender] text  /  [sender] text
 
             const m = raw.match(/^\[([^\]]+)\]\s*(.*)/s);
-            if (!m) return { channel: null, sender: "", text: raw, ts: null, tsWrong: false };
+            if (!m) return { channel: null, sender: "", text: raw, ts: null, tsWrong: false, snr: null, hops: null, rssi: null };
             const meta = m[1], text = m[2];
             const pipe = meta.indexOf("|");
             if (pipe < 0) {
-                return { channel: null, sender: meta, text, ts: null, tsWrong: false };
+                return { channel: null, sender: meta, text, ts: null, tsWrong: false, snr: null, hops: null, rssi: null };
             }
             const parts = meta.split("|");
             const chanPart = parts[0];
             let rest = parts.slice(1);
+            // Pull out optional per-message signal tokens (~h hops, ~s snr,
+            // ~r rssi). They are appended after the epoch/x; filtering them
+            // out first leaves the epoch/x logic below untouched, and old
+            // lines (no tokens) are unaffected.
+            let snr = null, hops = null, rssi = null;
+            rest = rest.filter(seg => {
+                let mm;
+                if ((mm = /^~h(-?\d+)$/.exec(seg)))        { hops = Number(mm[1]); return false; }
+                if ((mm = /^~s(-?\d+(?:\.\d+)?)$/.exec(seg))) { snr  = Number(mm[1]); return false; }
+                if ((mm = /^~r(-?\d+)$/.exec(seg)))        { rssi = Number(mm[1]); return false; }
+                return true;
+            });
             let ts = null, tsWrong = false;
             // Trailing "x" flag → previous part is the (substituted) epoch.
             if (rest.length >= 2 && rest[rest.length - 1] === "x"
@@ -2558,7 +2584,7 @@
             } else {
                 channel = chanPart;
             }
-            return { channel, sender, text, ts, tsWrong };
+            return { channel, sender, text, ts, tsWrong, snr, hops, rssi };
         }
 
         async function _fetchTextLog(idx) {
@@ -2573,6 +2599,10 @@
         async function loadInboxHistory(inboxDev, byIdx) {
             const container = document.getElementById("inbox-history");
             const logLink = document.getElementById("inbox-log-link");
+
+            // Remember the global inbox device idx even while pinned to a
+            // conversation, so the "include channel posts" toggle can read it.
+            if (inboxDev && inboxDev.idx) _globalInboxIdx = inboxDev.idx;
 
             // Conversation mode: the inbox is pinned to one favourite's stored
             // DM history. Refresh from that device instead of the global inbox.
@@ -2605,7 +2635,7 @@
                     _inboxHistory.push({                       // API returns oldest-first
                         time: p.ts ? _fmtEpoch(p.ts) : time,
                         channel: p.channel, sender: p.sender, text: p.text,
-                        tsWrong: p.tsWrong,
+                        tsWrong: p.tsWrong, snr: p.snr, hops: p.hops, rssi: p.rssi,
                     });
                 }
                 // After loading history, record the current LastUpdate so we don't
@@ -2633,6 +2663,7 @@
                 _inboxHistory.unshift({
                     time: _p.ts ? _fmtEpoch(_p.ts) : update,
                     channel, sender, text, tsWrong: _p.tsWrong,
+                    snr: _p.snr, hops: _p.hops, rssi: _p.rssi,
                 });
                 if (_inboxHistory.length > 200) _inboxHistory.pop();
             }
@@ -2708,17 +2739,44 @@
             _convLastUpdate = dev ? dev.LastUpdate : null;
             const entries = await _fetchTextLog(idx);   // API: oldest-first
             _inboxHistory.length = 0;
+            // Sortable epoch: prefer the embedded send time, else the
+            // Domoticz log date.
+            const _se = (p, e) => p.ts
+                ? p.ts
+                : (Date.parse(String((e && e.Date) || "").replace(" ", "T")) / 1000 || 0);
             for (const e of entries) {
                 const raw = e.Data || e.Value || "";
                 if (!raw) continue;
                 const p = _parseInboxData(raw);
-                // Newest-first to match the global inbox ordering.
-                _inboxHistory.unshift({
+                _inboxHistory.push({
                     time: p.ts ? _fmtEpoch(p.ts) : (e.Date || ""),
                     channel: p.channel, sender: p.sender, text: p.text,
-                    tsWrong: p.tsWrong,
+                    tsWrong: p.tsWrong, snr: p.snr, hops: p.hops, rssi: p.rssi,
+                    _sort: _se(p, e),
                 });
             }
+            // Optionally fold in this contact's channel (non-DM) posts from
+            // the global rolling inbox so the conversation shows them next
+            // to the DMs for context.
+            if (_convInclChan && _globalInboxIdx) {
+                const gentries = await _fetchTextLog(_globalInboxIdx);
+                for (const e of gentries) {
+                    const raw = e.Data || e.Value || "";
+                    if (!raw) continue;
+                    const p = _parseInboxData(raw);
+                    if (!p.channel || p.channel === "Private") continue;   // channel posts only
+                    const s = (p.sender || "").replace(/^>\s*|^▶\s*/, "");
+                    if (s !== name) continue;                              // from this contact
+                    _inboxHistory.push({
+                        time: p.ts ? _fmtEpoch(p.ts) : (e.Date || ""),
+                        channel: p.channel, sender: p.sender, text: p.text,
+                        tsWrong: p.tsWrong, snr: p.snr, hops: p.hops, rssi: p.rssi,
+                        _sort: _se(p, e), _chanCtx: true,
+                    });
+                }
+            }
+            // Newest-first overall (DMs + merged channel posts).
+            _inboxHistory.sort((a, b) => (b._sort || 0) - (a._sort || 0));
             _lastRenderedInboxHtml = "";
             _renderInbox(container);
         }
@@ -2763,7 +2821,7 @@
                 return;
             }
 
-            const html = visible.map(({ time, channel, sender, text, _pending, tsWrong }) => {
+            const html = visible.map(({ time, channel, sender, text, _pending, tsWrong, snr, hops, rssi }) => {
                 // Outgoing marker may be "> " (current, ASCII-safe) or "▶" (legacy)
                 const isSent = sender && (sender.startsWith("> ") || sender.startsWith("▶"));
                 const isPending = !!_pending;
@@ -2797,7 +2855,7 @@
                     }
                 }
                 const payload = btoa(unescape(encodeURIComponent(JSON.stringify({
-                    time, channel, sender, text, isSent, ts
+                    time, channel, sender, text, isSent, ts, snr, hops, rssi
                 }))));
                 const infoBtn = isPending ? "" :
                     `<button class="msg-info-btn" data-msg="${payload}" title="Message details">
@@ -3197,7 +3255,8 @@
                 _inboxHistory.push({
                     time: p.ts ? _fmtEpoch(p.ts) : "",
                     channel: p.channel, sender: p.sender, text: p.text,
-                    tsWrong: p.tsWrong, _snapshot: true,
+                    tsWrong: p.tsWrong, snr: p.snr, hops: p.hops, rssi: p.rssi,
+                    _snapshot: true,
                 });
                 _renderInbox(container);
             }
@@ -3623,6 +3682,9 @@
                 ["Time",      msgObj.time || "—", ""],
                 ["Channel",   msgObj.channel || "—", "text"],
                 ["Sender",    msgObj.sender || "—", "text"],
+                ...(msgObj.hops != null ? [["Hops", `${msgObj.hops} hop(s)`, ""]] : []),
+                ...(msgObj.snr  != null ? [["SNR",  `${msgObj.snr} dB`, ""]] : []),
+                ...(msgObj.rssi != null ? [["RSSI", `${msgObj.rssi} dBm`, ""]] : []),
                 ["Text",      msgObj.text || "", "text"],
                 ["Char count",`${chars} characters`, ""],
                 ["Path hash size", phm ? `${phm}-byte (node config)` : "—", ""],
@@ -3639,8 +3701,9 @@
             // When there's no exact on-air match for this message, fall back to
             // the sender contact's latest known signal so the card still shows
             // hops/SNR/RSSI instead of nothing.
+            const hasMsgSig = msgObj.hops != null || msgObj.snr != null || msgObj.rssi != null;
             const sigRows = [];
-            if (!rxEntry && !msgObj.isSent) {
+            if (!rxEntry && !msgObj.isSent && !hasMsgSig) {
                 const _h = slotVal("hops"), _s = slotVal("snr"), _r = slotVal("rssi");
                 if (_h != null) sigRows.push(["Hops", _h]);
                 if (_s != null) sigRows.push(["SNR",  _s.includes("dB") ? _s : `${_s} dB`]);
@@ -3696,8 +3759,10 @@
                 ).join("") : "") +
             (rxEntry ? "" : `
                 <div style="font-size:0.72rem;color:var(--muted);font-style:italic;padding-top:4px">
-                    No matching RX_LOG_DATA entry found for this message, so the
-                    on-air header/path can't be decoded. ${sigRows.length
+                    No matching RX_LOG_DATA entry found, so the on-air
+                    header/path can't be decoded. ${hasMsgSig
+                        ? "Hops/SNR/RSSI above are the exact values reported with this message."
+                        : sigRows.length
                         ? "Signal values above are the sender contact's latest known reading, not this exact message."
                         : "(Outgoing messages, very old messages, or text that doesn't match any recent on-air frame won't be enriched.)"}
                 </div>`) + `</div>`;
@@ -5328,6 +5393,20 @@ Larger = more reliable routing but smaller mesh diameter.">Path hash size</label
             _initContactClickToCompose();
             const _ce = document.getElementById("conv-banner-exit");
             if (_ce) _ce.onclick = _exitConversation;
+            const _cc = document.getElementById("conv-banner-chan");
+            if (_cc) {
+                _cc.classList.toggle("active", _convInclChan);
+                _cc.onclick = () => {
+                    _convInclChan = !_convInclChan;
+                    localStorage.setItem("meshcore.convInclChan", _convInclChan ? "1" : "0");
+                    _cc.classList.toggle("active", _convInclChan);
+                    if (_convNode) {
+                        _convLastUpdate = null;          // force a re-fetch
+                        _lastRenderedInboxHtml = "";
+                        loadConversation(_convNode);
+                    }
+                };
+            }
             loadData();              // kick off first live refresh immediately
             setInterval(loadData, 10000);
             // Faster cadence for the RX log: drives the firehose / sparklines /

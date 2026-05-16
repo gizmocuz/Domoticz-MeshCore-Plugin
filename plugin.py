@@ -3076,19 +3076,42 @@ class BasePlugin:
         self._write_device_map()
 
     @staticmethod
-    def _inbox_line(chan_tag, sender, body, ts, bad=False):
+    def _inbox_line(chan_tag, sender, body, ts, bad=False,
+                    snr=None, hops=None, rssi=None):
         """Build the inbox / conversation wire string with an embedded send
         time so the dashboard can show the real time a message was sent (not
         the time Domoticz happened to log it — which for messages drained on
         reconnect is the catch-up time, not the original time).
 
         Format:
-          [chan|sender|<epoch>]     <epoch> = trusted send time
-          [chan|sender|<epoch>|x]   <epoch> = OUR receive time, substituted
-                                    because the node's reported time was
-                                    missing/implausible (bad RTC).
+          [chan|sender|<epoch>]              <epoch> = trusted send time
+          [chan|sender|<epoch>|x]            <epoch> = OUR receive time,
+                                             substituted because the node's
+                                             reported time was missing /
+                                             implausible (bad RTC).
+          [chan|sender|<epoch>{|x}{|~h<hops>}{|~s<snr>}{|~r<rssi>}] body
+                                             optional per-message signal,
+                                             appended AFTER the epoch/x so the
+                                             existing epoch parsing is
+                                             unaffected and older lines (no
+                                             tokens) still parse unchanged.
         """
-        return f"[{chan_tag}|{sender}|{int(ts)}{'|x' if bad else ''}] {body}"
+        meta = f"{chan_tag}|{sender}|{int(ts)}"
+        if bad:
+            meta += "|x"
+        if isinstance(hops, int) and hops >= 0:
+            meta += f"|~h{hops}"
+        if snr is not None:
+            try:
+                meta += f"|~s{round(float(snr), 2)}"
+            except (TypeError, ValueError):
+                pass
+        if rssi is not None:
+            try:
+                meta += f"|~r{int(rssi)}"
+            except (TypeError, ValueError):
+                pass
+        return f"[{meta}] {body}"
 
     def _log_contact_dm(self, node_name: str, line: str):
         """Append a DM line to a favourite contact's persistent Messages text
@@ -3175,15 +3198,25 @@ class BasePlugin:
                              _hops if isinstance(_hops, int) else -1,
                              chan_tag)
 
-        # Update global inbox — [chan|sender|<epoch>[|x]] text
+        # Per-message signal, embedded in the wire line so the dashboard can
+        # show the exact signal for THIS message (channel msgs have no pubkey
+        # and no RX_LOG text match, so this is the only reliable source).
+        _msg_snr = msg.get("SNR") if msg.get("SNR") is not None else msg.get("snr")
+        _msg_rssi = msg.get("rssi")
+
+        # Update global inbox — [chan|sender|<epoch>[|x][|~h..|~s..|~r..]] text
         self._set(MESH_DID, UNIT_INBOX, 0,
-                  self._inbox_line(chan_tag, display_name, text_body, msg_ts, ts_bad))
+                  self._inbox_line(chan_tag, display_name, text_body, msg_ts,
+                                   ts_bad, snr=_msg_snr, hops=_hops,
+                                   rssi=_msg_rssi))
 
         # Persist private (DM) messages to the sender's per-contact Messages
         # device so a favourite's conversation history is never lost.
         if chan_tag == "P" and node_name:
             self._log_contact_dm(node_name,
-                self._inbox_line("P", display_name, text_body, msg_ts, ts_bad))
+                self._inbox_line("P", display_name, text_body, msg_ts,
+                                 ts_bad, snr=_msg_snr, hops=_hops,
+                                 rssi=_msg_rssi))
 
         # Update per-node devices for any known contact
         if node_name:
