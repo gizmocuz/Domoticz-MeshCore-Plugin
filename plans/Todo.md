@@ -46,3 +46,44 @@ attempts it took (like the phone companion app).
   `suggested_timeout * 1.2` per attempt). It already runs on the asyncio worker
   thread, so this is fine, but message-drain cadence may need a re-check so a
   slow retry doesn't starve the poll loop.
+
+## Repeater directory for path-hop resolution (community map)
+
+A static snapshot `meshcore_repeaters.json` is already bundled (NL repeaters,
+keyed by full public key, with name/lat/lon/last_advert/freq/sf/bw/cr). It lets
+the dashboard resolve `P(n):a>b>c` path hashes to repeater names even for
+repeaters we've never heard advertise — but only reliably at **2-byte+** hashes
+(1-byte is hopelessly ambiguous; see analysis below).
+
+### Snapshot facts (as downloaded 2026-05-16)
+
+- Source: `https://map.meshcore.io/api/v1/nodes` (global; `map.meshcore.dev`
+  307-redirects here). ~44.5k nodes, ~34 MB.
+- Filtered to **type=Repeater** within an **NL bbox** (lat 50.6–53.7,
+  lon 3.2–7.4): **3,744 repeaters**, ~767 KB JSON.
+- 2-byte prefix uniqueness: NL repeaters → only 113 colliding prefixes
+  (233 nodes), ~94% unique. **Global 2-byte is ~39% colliding — do not use
+  globally; keep it region-scoped.** 3-byte is ~unique even globally.
+- Per-repeater fields kept: `name`, `lat`, `lon`, `last_advert`, `freq`,
+  `sf`, `bw`, `cr`. Also available but dropped: `link` (a `meshcore://…`
+  contact-import URI — could power one-click "add repeater as contact"),
+  `source`/`inserted_by`/`updated_by` (provenance, not useful).
+
+### Periodic poll (future — opt-in)
+
+- [ ] Add an opt-in hardware param (default OFF) + a configurable region
+      bbox (default NL) to periodically (e.g. once/day) fetch the map API,
+      filter to repeaters in-bbox, and rewrite `meshcore_repeaters.json`.
+      Keep it server-side on a slow timer so we never ship/poll the 34 MB
+      blob from the browser.
+- [ ] Wire `_resolvePathHop` to use this file as a **final fallback** after
+      contacts + heard, **2-byte+ only**, and **drop ambiguous prefixes**
+      (better blank than mis-attributed — it's an unauthenticated community
+      directory, not identity).
+- [ ] Optionally surface GPS from this file on the node map for repeaters
+      that appear in a path but we've never heard (so a route can be drawn
+      even for unheard hops).
+- [ ] Consider a "add this repeater as a contact" action using the
+      `meshcore://` import link from the same API entry.
+- [ ] Staleness: stamp `generated` (already in the file) and show its age
+      in the UI; never treat as authoritative.
