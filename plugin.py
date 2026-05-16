@@ -1,5 +1,5 @@
 """
-<plugin key="MeshCore" name="MeshCore" author="galadril" version="0.0.1" wikilink="" externallink="https://github.com/galadril/Domoticz-MeshCore-Plugin">
+<plugin key="MeshCore" name="MeshCore" author="galadril, GizMoCuz" version="1.0.3" wikilink="" externallink="https://github.com/galadril/Domoticz-MeshCore-Plugin">
     <description>
         MeshCore LoRa mesh integration for Domoticz.
         Requires: pip install -r requirements.txt
