@@ -288,7 +288,7 @@ class BasePlugin:
             "server_total":   0,
             "msg_by_sender":  {},   # sender name -> message count
             "adv_by_sender":  {},   # advert name -> advert count
-            "hops_record":    {"hops": -1, "name": "", "date": "", "channel": ""},
+            "hops_records":   [],   # top-5 [{hops,name,date,channel}], best per name
             "today":          {"date": "", "messages": 0,
                                "client": 0, "repeater": 0, "server": 0},
         }
@@ -303,6 +303,14 @@ class BasePlugin:
         self._heard_nodes: dict = {}
         self._heard_dirty = False
         self._known_pubkeys: set = set()
+        # Latest received signal for nodes that ARE contacts, keyed by the
+        # 12-hex pubkey prefix → {snr, rssi, path_len, t, source}.
+        # Last-writer-wins across ADVERT (worker, _on_rx_log) and incoming
+        # messages with a known pubkey (main, _handle_message). Lets contact
+        # cards show hops/SNR/RSSI even without a Domoticz device, a recent
+        # message, or a direct path. RSSI is only set when the frame actually
+        # carried one (adverts do; message events usually don't).
+        self._contact_sig: dict = {}
 
     def _force_close_serial(self, mc):
         """Synchronously close the underlying pyserial port.
@@ -909,6 +917,25 @@ class BasePlugin:
                 "query":         self._contact_query_results.get(node_name, {}),
             }
 
+            # Fall back to the latest received signal (advert OR message) for
+            # contacts that have no Domoticz device (non-favourites) or no
+            # message/direct-path data, so their cards aren't bare. Device
+            # slots (favourites with live data) win over this fallback.
+            adv = self._contact_sig.get((pk_full or "")[:12]) if pk_full else None
+            # Ignore stale fallback signal (older than the node-online window)
+            # so cards don't show indefinitely-old SNR/RSSI for gone nodes.
+            if adv and (time.time() - adv.get("t", 0)) > 28800:
+                adv = None
+            if adv and did != SELF_DID:
+                e = nodes[node_name]
+                if e["snr"] is None and adv.get("snr") is not None:
+                    e["snr"] = {"value": f"{adv['snr']} dB"}
+                if e["rssi"] is None and adv.get("rssi") is not None:
+                    e["rssi"] = {"value": f"{adv['rssi']} dBm"}
+                _pl = adv.get("path_len", -1)
+                if e["hops"] is None and isinstance(_pl, int) and _pl >= 0:
+                    e["hops"] = {"value": str(_pl)}
+
         inbox_dev = self._dev(MESH_DID, UNIT_INBOX)
         send_dev  = self._dev(MESH_DID, UNIT_SEND)
         payload = {
@@ -1082,12 +1109,24 @@ class BasePlugin:
                 if isinstance(data.get(k), dict):
                     s[k] = {str(n): int(c) for n, c in data[k].items()
                             if isinstance(c, (int, float))}
-            hr = data.get("hops_record")
-            if isinstance(hr, dict) and isinstance(hr.get("hops"), int):
-                s["hops_record"] = {
-                    "hops": hr.get("hops", -1), "name": hr.get("name", ""),
-                    "date": hr.get("date", ""), "channel": hr.get("channel", ""),
-                }
+            recs = data.get("hops_records")
+            if isinstance(recs, list):
+                clean = [
+                    {"hops": int(r.get("hops", -1)), "name": str(r.get("name", "")),
+                     "date": str(r.get("date", "")), "channel": str(r.get("channel", ""))}
+                    for r in recs
+                    if isinstance(r, dict) and isinstance(r.get("hops"), int)
+                ]
+                clean.sort(key=lambda r: r["hops"], reverse=True)
+                s["hops_records"] = clean[:5]
+            else:
+                # Migrate the old single hops_record dict → list.
+                hr = data.get("hops_record")
+                if isinstance(hr, dict) and isinstance(hr.get("hops"), int) and hr.get("name"):
+                    s["hops_records"] = [{
+                        "hops": hr.get("hops", -1), "name": hr.get("name", ""),
+                        "date": hr.get("date", ""), "channel": hr.get("channel", ""),
+                    }]
             today = time.strftime("%Y-%m-%d")
             td = data.get("today")
             if isinstance(td, dict) and td.get("date") == today:
@@ -1112,7 +1151,7 @@ class BasePlugin:
             payload = dict(self._stats)
             payload["msg_by_sender"] = dict(self._stats["msg_by_sender"])
             payload["adv_by_sender"] = dict(self._stats["adv_by_sender"])
-            payload["hops_record"]   = dict(self._stats["hops_record"])
+            payload["hops_records"]  = [dict(r) for r in self._stats["hops_records"]]
             payload["today"]         = dict(self._stats["today"])
             payload["written_at"]    = int(time.time())
         try:
@@ -1133,9 +1172,23 @@ class BasePlugin:
             return "server"
         return "client"
 
+    def _pretty_chan(self, tag: str) -> str:
+        """Friendly channel label for the hops record. 'P' → Direct (DM);
+        'C<idx>' → the channel's name if known (e.g. C0 → Public), else
+        '#<idx>'; anything else (already a name like '#test') as-is."""
+        if not tag:
+            return "?"
+        if tag == "P":
+            return "Direct (DM)"
+        if len(tag) > 1 and tag[0] == "C" and tag[1:].isdigit():
+            idx = int(tag[1:])
+            return self._channel_names.get(idx) or f"#{idx}"
+        return tag
+
     def _bump_msg_stats(self, sender: str, hops, channel: str):
         cls = self._classify_sender(sender)
         today = time.strftime("%Y-%m-%d")
+        when  = time.strftime("%Y-%m-%d %H:%M:%S")
         with self._rx_log_lock:
             s = self._stats
             if s["today"].get("date") != today:
@@ -1147,9 +1200,17 @@ class BasePlugin:
             s["today"][cls] += 1
             if sender:
                 s["msg_by_sender"][sender] = s["msg_by_sender"].get(sender, 0) + 1
-            if isinstance(hops, int) and hops >= 0 and hops > s["hops_record"]["hops"]:
-                s["hops_record"] = {"hops": hops, "name": sender or "?",
-                                    "date": today, "channel": channel or ""}
+            if isinstance(hops, int) and hops >= 0 and sender:
+                chan = self._pretty_chan(channel)
+                recs = s["hops_records"]
+                ex = next((r for r in recs if r["name"] == sender), None)
+                if ex is None:
+                    recs.append({"hops": hops, "name": sender,
+                                 "date": when, "channel": chan})
+                elif hops > ex["hops"]:
+                    ex.update(hops=hops, date=when, channel=chan)
+                recs.sort(key=lambda r: r["hops"], reverse=True)
+                del recs[5:]
             self._stats_dirty = True
 
     def _bump_adv_stats(self, name: str):
@@ -1602,6 +1663,15 @@ class BasePlugin:
                 hist.append({"t": t, "snr": snr, "rssi": rssi, "path_len": p.get("path_len", -1), "kind": "ADVERT"})
                 if len(hist) > 60:
                     del hist[: len(hist) - 60]
+                # If this advert is from a node that IS a contact, remember
+                # its latest signal so the contact card can show hops/SNR/
+                # RSSI even without a device, a message, or a direct path.
+                if adv_key in self._known_pubkeys:
+                    self._contact_sig[adv_key[:12]] = {
+                        "snr": snr, "rssi": rssi,
+                        "path_len": p.get("path_len", -1),
+                        "t": t, "source": "advert",
+                    }
             # Persistent heard-nodes store: ADVERTs from nodes that are NOT
             # already contacts. If it's a contact, the contacts poll tracks
             # it — skip. If already heard, just refresh last_heard + signal.
@@ -1619,6 +1689,24 @@ class BasePlugin:
                 h["snr"]       = snr
                 h["rssi"]      = rssi
                 h["path_len"]  = p.get("path_len", -1)
+                # Feed advert hops into the lifetime hops records too — a
+                # far node is usually learned via its advert, not a chat
+                # message. Inline (we already hold _rx_log_lock; calling
+                # _bump_msg_stats would re-enter the non-reentrant lock).
+                _pl = p.get("path_len", -1)
+                if isinstance(_pl, int) and _pl >= 0:
+                    _nm = h.get("name") or adv_key[:12]
+                    _recs = self._stats["hops_records"]
+                    _ex = next((r for r in _recs if r["name"] == _nm), None)
+                    _when = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(t))
+                    if _ex is None:
+                        _recs.append({"hops": _pl, "name": _nm,
+                                      "date": _when, "channel": "Advert"})
+                    elif _pl > _ex["hops"]:
+                        _ex.update(hops=_pl, date=_when, channel="Advert")
+                    _recs.sort(key=lambda r: r["hops"], reverse=True)
+                    del _recs[5:]
+                    self._stats_dirty = True
                 h["last_heard"] = t          # OUR local receive time
                 # The node's own advertised clock — used by the dashboard to
                 # flag a wrong RTC (compared against last_heard).
@@ -2622,6 +2710,25 @@ class BasePlugin:
                 "result": "deleted" if existed else "not in heard list"}))
             return
 
+        # ── Special: wipe all lifetime statistics ──────────────────────────
+        if text.strip() == "!reset_stats":
+            with self._rx_log_lock:
+                self._stats = {
+                    "adverts_total":  0, "messages_total": 0,
+                    "client_total":   0, "repeater_total": 0, "server_total": 0,
+                    "msg_by_sender":  {}, "adv_by_sender":  {},
+                    "hops_records":   [],
+                    "today": {"date": "", "messages": 0,
+                              "client": 0, "repeater": 0, "server": 0},
+                }
+                self._stats_dirty = False
+            self._write_stats()
+            Domoticz.Log("Lifetime statistics reset by dashboard.")
+            self._queue.put(("send_result", {
+                "ok": True, "target": "!reset_stats", "body": "",
+                "result": "statistics cleared"}))
+            return
+
         target = None
         body   = text
 
@@ -3086,6 +3193,23 @@ class BasePlugin:
             pk_prefix = msg.get("pubkey_prefix", "")
             if pk_prefix and node_name not in self._node_did:
                 self._node_did[node_name] = pk_prefix[:12]
+
+            # Latest received signal from this message — only when we have a
+            # reliable identity (a pubkey prefix; channel msgs without one are
+            # skipped to avoid mis-attribution). Covers non-favourite contacts
+            # too (this is outside the device-only block below). RSSI is left
+            # to adverts unless the message event actually carried one.
+            if pk_prefix:
+                _msnr = msg.get("SNR")
+                if _msnr is None:
+                    _msnr = msg.get("snr")
+                with self._rx_log_lock:
+                    self._contact_sig[pk_prefix[:12]] = {
+                        "snr": float(_msnr) if _msnr is not None else None,
+                        "rssi": msg.get("rssi"),
+                        "path_len": msg.get("path_len", -1),
+                        "t": time.time(), "source": "msg",
+                    }
 
             self._ensure_node_devices(node_name)
             did = self._device_id_for(node_name)

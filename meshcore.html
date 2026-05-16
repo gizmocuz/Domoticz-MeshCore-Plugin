@@ -127,13 +127,26 @@
         .stats-tot b { color: var(--text); }
         .stats-tot .st-adv { color: var(--yellow); }
         .stats-tot .st-msg { color: var(--accent); }
-        .lb-row { margin: 7px 0; }
+        .stats-head {
+            display: flex; align-items: center; justify-content: space-between;
+            gap: 8px;
+        }
+        #stats-reset {
+            font-size: 0.76rem; color: var(--red);
+            background: var(--surface); border: 1px solid var(--border);
+            border-radius: 6px; padding: 3px 9px; cursor: pointer;
+        }
+        #stats-reset:hover { background: rgba(224,85,85,0.15); border-color: var(--red); }
+        #stats-reset:disabled { opacity: 0.5; cursor: default; }
+        .lb-list { display: flex; flex-direction: column; gap: 6px; }
+        .lb-row { margin: 0; }
         .lb-top {
             display: flex; justify-content: space-between;
-            font-size: 0.82rem; color: var(--text); margin-bottom: 3px;
+            font-size: 0.8rem; color: var(--text); margin-bottom: 2px;
+            line-height: 1.3;
         }
         .lb-top .lb-count { color: var(--accent); font-weight: 600; }
-        .lb-bar { height: 7px; border-radius: 4px; background: var(--bg); overflow: hidden; }
+        .lb-bar { height: 5px; border-radius: 3px; background: var(--bg); overflow: hidden; }
         .lb-fill { height: 100%; border-radius: 4px; background: var(--green); }
         .lb-fill.adv { background: var(--yellow); }
         .hops-rec {
@@ -422,6 +435,9 @@
         /* visibility:hidden (not display:none) so non-favorite rows keep
            the same name-column starting position as favorite rows */
         .row-fav.empty { visibility: hidden; }
+        .row-fav.row-fav-toggle { cursor: pointer; visibility: visible; color: var(--muted); }
+        .row-fav.row-fav-toggle.active { color: var(--yellow); }
+        .row-fav.row-fav-toggle:hover { color: var(--yellow); }
 
         .badge {
             font-size: 0.85rem;
@@ -915,7 +931,7 @@
         }
         .inbox-msg {
             display: flex;
-            align-items: baseline;
+            align-items: center;
             gap: 10px;
             padding: 4px 16px;
             border-bottom: 1px solid var(--border);
@@ -924,11 +940,15 @@
         }
         .inbox-msg:last-child { border-bottom: none; }
         .inbox-msg .msg-time {
-            color: var(--muted);
+            color: #a6a9bd;
             font-size: 0.75rem;
             white-space: nowrap;
             flex-shrink: 0;
-            min-width: 130px;
+            /* Fixed width + tabular digits so the timestamp column is
+               identical on every row — otherwise the info icon / channel
+               chip drift horizontally (flex keys off content width). */
+            width: 116px;
+            font-variant-numeric: tabular-nums;
         }
         .inbox-msg .msg-sender {
             color: var(--accent);
@@ -967,10 +987,18 @@
             white-space: nowrap;
             flex-shrink: 0;
             background: var(--border);
-            color: var(--muted);
+            color: var(--text);
+            /* Outline so the pill stays defined on tinted (sent-message)
+               rows where the chip bg blends into the row bg. */
+            border: 1px solid rgba(255,255,255,0.10);
+            /* Fixed column so the sender lines up across rows regardless
+               of channel-name length (#amersfoort vs Public vs #test). */
+            min-width: 84px;
+            box-sizing: border-box;
+            text-align: center;
         }
         .msg-chan.private { background: #2a3a4a; color: #7ab; }
-        .inbox-msg.sent { background: rgba(78,154,241,0.06); border-left: 3px solid var(--accent); }
+        .inbox-msg.sent { background: rgba(78,154,241,0.13); border-left: 3px solid var(--accent); }
         .inbox-msg.sent .msg-sender { color: var(--muted); font-weight: 500; }
         /* Optimistic placeholder until the plugin confirms the send (~30s) */
         .inbox-msg.pending { opacity: 0.6; font-style: italic; }
@@ -1044,21 +1072,25 @@
             opacity: 0;
             transition: opacity 0.15s, color 0.15s;
         }
-        .inbox-msg:hover .msg-reply-btn,
-        .inbox-msg:hover .msg-info-btn { opacity: 1; }
+        .inbox-msg:hover .msg-reply-btn { color: var(--muted); }
         .msg-reply-btn:hover { color: var(--accent); border-color: var(--accent); }
         .msg-info-btn {
             flex-shrink: 0;
+            display: inline-flex;
+            align-items: center;
+            align-self: center;
             background: none;
             border: none;
             color: var(--muted);
             cursor: pointer;
-            opacity: 0;
-            padding: 1px 4px;
-            font-size: 0.85rem;
+            opacity: 0.5;
+            padding: 0;
+            margin: 0 -4px;
+            line-height: 1;
+            font-size: 0.8rem;
             transition: opacity 0.15s, color 0.15s;
         }
-        .msg-info-btn:hover { color: var(--accent); }
+        .msg-info-btn:hover { color: var(--accent); opacity: 1; }
 
         /* Message details panel — shares side-panel skin with the map panel */
         #msg-details-list {
@@ -1199,7 +1231,7 @@
             margin-top: 6px;
         }
         .heatmap-grid > div {
-            aspect-ratio: 1 / 1;
+            min-height: 26px;
             border-radius: 2px;
             background: rgba(255,255,255,0.04);
             border: 1px solid var(--border);
@@ -1673,7 +1705,6 @@
                 <button class="rx-tool-btn" onclick="_openSidePanel('stats')" title="Statistics — lifetime totals & leaderboards"><i class="fa-solid fa-ranking-star"></i></button>
                 <button class="rx-tool-btn" onclick="_openSidePanel('firehose')" title="Live RF firehose (RX_LOG_DATA)"><i class="fa-solid fa-tower-broadcast"></i></button>
                 <button class="rx-tool-btn" onclick="_openSidePanel('traffic')" title="Traffic stats by payload type"><i class="fa-solid fa-chart-column"></i></button>
-                <button class="rx-tool-btn" onclick="_openSidePanel('heatmap')" title="24h packet rate heatmap"><i class="fa-solid fa-grip"></i></button>
                 <button class="rx-tool-btn" onclick="_openSidePanel('channels')" title="Channel auto-discovery"><i class="fa-solid fa-hashtag"></i></button>
                 <button class="rx-tool-btn" onclick="_openSidePanel('topology')" title="Mesh topology: all contacts + paths"><i class="fa-solid fa-sitemap"></i></button>
                 <button class="rx-tool-btn" onclick="_openSidePanel('heard')" title="Heard nodes — adverts from nodes not in your contacts"><i class="fa-solid fa-satellite-dish"></i></button>
@@ -1899,11 +1930,11 @@
                 .slice(0, limit);
             if (!rows.length) return `<div class="dd-chart-unconfigured">No data yet.</div>`;
             const max = rows[0][1] || 1;
-            return rows.map(([name, n]) => `
+            return `<div class="lb-list">` + rows.map(([name, n]) => `
                 <div class="lb-row">
                     <div class="lb-top"><span>${escHtml(name)}</span><span class="lb-count">${n}</span></div>
                     <div class="lb-bar"><div class="lb-fill ${cls}" style="width:${Math.max(2, Math.round(n / max * 100))}%"></div></div>
-                </div>`).join("");
+                </div>`).join("") + `</div>`;
         }
 
         function _renderStatsPanel() {
@@ -1914,18 +1945,24 @@
                 return;
             }
             const s = _stats;
-            const hr = s.hops_record || {};
-            const hopsHtml = (hr.hops != null && hr.hops >= 0) ? `
+            const recs = Array.isArray(s.hops_records) ? s.hops_records
+                       : (s.hops_record ? [s.hops_record] : []);   // back-compat
+            const hopsHtml = recs.length ? `
                 <div class="hops-rec">
-                    <div class="hr-title">🏆 Hops record</div>
+                    <div class="hr-title">🏆 Hops records (top 5)</div>
+                    ${recs.slice(0, 5).map((r, i) => `
                     <div class="hr-line">
-                        All-time max: <b>${hr.hops}</b> hops<br>
-                        Name: <b>${escHtml(hr.name || "?")}</b><br>
-                        Date: <b>${escHtml(hr.date || "?")}</b><br>
-                        Channel: <b>${escHtml(hr.channel || "?")}</b>
-                    </div>
+                        <b>#${i + 1}</b> &nbsp;<b>${r.hops}</b> hops &nbsp;·&nbsp;
+                        ${escHtml(r.name || "?")}
+                        <span style="color:var(--muted)">&nbsp;(${escHtml(r.channel || "?")}, ${escHtml(r.date || "?")})</span>
+                    </div>`).join("")}
                 </div>` : "";
             view.innerHTML = `
+                <div class="stats-head">
+                    <span class="self-section" style="margin:0">Statistics</span>
+                    <button id="stats-reset" title="Reset all lifetime statistics">↺ Reset</button>
+                </div>
+                ${_heatmapHtml()}
                 <div class="self-section">Totals</div>
                 <div class="stats-tot">
                     Adverts: <b class="st-adv">${s.adverts_total || 0}</b>
@@ -1942,13 +1979,22 @@
                 </div>
 
                 <div class="self-section">Top message senders</div>
-                ${_statsLeaderboard(s.msg_by_sender, 30, "")}
+                ${_statsLeaderboard(s.msg_by_sender, 20, "")}
 
                 ${hopsHtml}
 
                 <div class="self-section">Top advert senders</div>
-                ${_statsLeaderboard(s.adv_by_sender, 15, "adv")}
+                ${_statsLeaderboard(s.adv_by_sender, 10, "adv")}
             `;
+            const rb = document.getElementById("stats-reset");
+            if (rb) rb.onclick = async () => {
+                if (!confirm("Reset ALL lifetime statistics?\n\n"
+                    + "This clears totals, leaderboards and hop records on the "
+                    + "plugin and cannot be undone.")) return;
+                rb.disabled = true;
+                try { await _sendDeviceCmd("!reset_stats"); } catch (_) {}
+                setTimeout(() => _loadStats().then(_renderStatsPanel), 800);
+            };
         }
 
         // Heuristic: match an inbox message to an RX log entry.
@@ -2759,10 +2805,10 @@
                     </button>`;
                 return `<div class="inbox-msg${isSent ? " sent" : ""}${isPending ? " pending" : ""}">
           <span class="${timeCls}"${timeAttr}>${timeLabel}${tsWrongIcon}</span>
+          ${infoBtn}
           ${chanHtml}
           ${sender ? `<span class="msg-sender">${escHtml(sender)}</span>` : ""}
           <span class="msg-text">${_renderMentions(text)}</span>
-          ${infoBtn}
           ${replyBtn}
         </div>`;
             }).join("");
@@ -2959,9 +3005,7 @@
             // Heard nodes: the star is a clickable "add to contacts" action.
             const favHtml = _hpk
                 ? `<span class="row-fav heard-add-star" title="Add to contacts"><i class="fa-regular fa-star"></i></span>`
-                : (fav
-                    ? `<span class="row-fav" title="Favorite"><i class="fa-solid fa-star"></i></span>`
-                    : `<span class="row-fav empty"></span>`);
+                : `<span class="row-fav row-fav-toggle${fav ? " active" : ""}" data-node="${escHtml(name)}" title="${fav ? "Remove from favorite" : "Mark as favorite"}"><i class="fa-${fav ? "solid" : "regular"} fa-star"></i></span>`;
             const hasLoc = slots.lat != null && slots.lon != null && (slots.lat || slots.lon);
             const mapInline = hasLoc
                 ? `<span class="row-map" data-node="${escHtml(name)}" data-lat="${slots.lat}" data-lon="${slots.lon}" title="Show on map"><i class="fa-solid fa-location-dot"></i></span>`
@@ -3286,7 +3330,7 @@
                 }
                 // Favorite toggle (card overlay) / heard-add star (list).
                 // For heard nodes the star ADDS them to contacts instead.
-                const favBtn = ev.target.closest(".fav-toggle, .row-fav.heard-add-star");
+                const favBtn = ev.target.closest(".fav-toggle, .row-fav.heard-add-star, .row-fav.row-fav-toggle");
                 if (favBtn) {
                     ev.stopPropagation();
                     ev.preventDefault();
@@ -3563,16 +3607,25 @@
             ext.style.display = "none";   // no external view for messages
             // ext is restored when the map panel re-opens; toggle is fine.
 
-            const bytes = _byteLen(msgObj.text);
             const chars = (msgObj.text || "").length;
+            // Path hash size = how many bytes of each hop's pubkey hash the
+            // packet carries (our node config, 1/2/3 byte — same setting as
+            // the self panel). It is NOT the message text length.
+            const phm = (_deviceMap && _deviceMap.device_info && _deviceMap.device_info.path_hash_mode) || null;
+            // Latest known signal for the sender's contact (advert/message
+            // derived, surfaced by the plugin in the device map). Used when
+            // there is no exact RX_LOG_DATA match for this specific message.
+            const senderSlots = (_deviceMap && _deviceMap.nodes && _deviceMap.nodes[msgObj.sender]) || {};
+            const slotVal = k => (senderSlots[k] && senderSlots[k].value != null && senderSlots[k].value !== "")
+                ? String(senderSlots[k].value) : null;
             const rows = [
                 ["Direction", msgObj.isSent ? "Outgoing (sent by us)" : "Incoming", "text"],
                 ["Time",      msgObj.time || "—", ""],
                 ["Channel",   msgObj.channel || "—", "text"],
                 ["Sender",    msgObj.sender || "—", "text"],
                 ["Text",      msgObj.text || "", "text"],
-                ["Byte size", `${bytes} bytes`, ""],
                 ["Char count",`${chars} characters`, ""],
+                ["Path hash size", phm ? `${phm}-byte (node config)` : "—", ""],
                 ["Hex",       msgObj.text ? Array.from(_byteEncoder.encode(msgObj.text)).map(b => b.toString(16).padStart(2, "0")).join(" ") : "—", ""],
             ];
 
@@ -3583,22 +3636,50 @@
             // window so the user can see whether the message was acknowledged.
             const rxEntry = msgObj.isSent ? null : _findRxEntryForMsg(msgObj);
             const analyzerRows = rxEntry ? _buildAnalyzerRows(rxEntry) : [];
+            // When there's no exact on-air match for this message, fall back to
+            // the sender contact's latest known signal so the card still shows
+            // hops/SNR/RSSI instead of nothing.
+            const sigRows = [];
+            if (!rxEntry && !msgObj.isSent) {
+                const _h = slotVal("hops"), _s = slotVal("snr"), _r = slotVal("rssi");
+                if (_h != null) sigRows.push(["Hops", _h]);
+                if (_s != null) sigRows.push(["SNR",  _s.includes("dB") ? _s : `${_s} dB`]);
+                if (_r != null) sigRows.push(["RSSI", _r.includes("dBm") ? _r : `${_r} dBm`]);
+            }
             const dupRows      = rxEntry ? _buildDupRows(rxEntry) : [];
             const ackRows      = msgObj.isSent ? _buildAckRows(msgObj) : [];
 
+            // Icon prefix for known metric rows — same icons as the contact
+            // info panel / cards so the look is consistent. Keyed by a
+            // normalized label; the icon class is from this fixed map (safe
+            // to emit as raw HTML, the label itself is still escaped).
+            const _rowIcon = (lbl) => {
+                const k = String(lbl).trim().toLowerCase();
+                const m = k === "hops" || k === "path length" ? "fa-tower-broadcast"
+                        : k === "snr"  ? "fa-signal"
+                        : k === "rssi" ? "fa-wifi"
+                        : null;
+                return m ? `<i class="fa-solid ${m}" style="width:1em;text-align:center;opacity:0.7"></i> ` : "";
+            };
+
             const html = `<div id="msg-details-list">` + rows.map(([lbl, val, cls]) =>
                 `<div class="msg-detail-row">
-                    <span class="lbl">${escHtml(lbl)}</span>
+                    <span class="lbl">${_rowIcon(lbl)}${escHtml(lbl)}</span>
                     <span class="val ${cls}">${escHtml(val)}</span>
                 </div>`
             ).join("") +
             (analyzerRows.length ? `<div class="msg-detail-section">RX log (on-air)</div>` +
                 analyzerRows.map(([lbl, val, cls]) =>
                     `<div class="msg-detail-row">
-                        <span class="lbl">${escHtml(lbl)}</span>
+                        <span class="lbl">${_rowIcon(lbl)}${escHtml(lbl)}</span>
                         <span class="val ${cls || ""}">${escHtml(val)}</span>
                     </div>`
                 ).join("") : "") +
+            (sigRows.length ? `<div class="msg-detail-section">Sender signal (latest known)</div>` +
+                `<div class="msg-detail-row"><span class="val" style="display:flex;flex-wrap:wrap;gap:6px 18px">` +
+                sigRows.map(([lbl, val]) =>
+                    `<span>${_rowIcon(lbl)}${escHtml(lbl)} <b>${escHtml(val)}</b></span>`
+                ).join("") + `</span></div>` : "") +
             (dupRows.length ? `<div class="msg-detail-section">Duplicate paths heard</div>` +
                 dupRows.map(([lbl, val]) =>
                     `<div class="msg-detail-row">
@@ -3615,9 +3696,10 @@
                 ).join("") : "") +
             (rxEntry ? "" : `
                 <div style="font-size:0.72rem;color:var(--muted);font-style:italic;padding-top:4px">
-                    No matching RX_LOG_DATA entry found for this message. (Outgoing
-                    messages, very old messages, or text that doesn't match any
-                    recent on-air frame won't be enriched.)
+                    No matching RX_LOG_DATA entry found for this message, so the
+                    on-air header/path can't be decoded. ${sigRows.length
+                        ? "Signal values above are the sender contact's latest known reading, not this exact message."
+                        : "(Outgoing messages, very old messages, or text that doesn't match any recent on-air frame won't be enriched.)"}
                 </div>`) + `</div>`;
             // Replace the map canvas with our content; we'll restore it on map-open.
             body.dataset.previousContent = body.dataset.previousContent || "1";
@@ -3632,7 +3714,7 @@
         // The map panel side-drawer is reused for all of these: firehose,
         // traffic, channels, heatmap. We track which view is open so the
         // 3s _loadRxLog interval can re-render only the active one.
-        let _sidePanelView = null;  // null | 'firehose' | 'traffic' | 'channels' | 'heatmap' | 'msg'
+        let _sidePanelView = null;  // null | 'firehose' | 'traffic' | 'channels' | 'stats' | 'msg'
 
         function _openSidePanel(view) {
             const panel    = document.getElementById("map-panel");
@@ -3656,7 +3738,7 @@
                 if (view === "firehose") _renderFirehoseIfOpen();
                 if (view === "traffic")  _renderTrafficIfOpen();
                 if (view === "channels") _renderChannelsIfOpen();
-                if (view === "heatmap")  _renderHeatmapIfOpen();
+                if (view === "stats")    _renderStatsPanel();
             });
             if (view === "heard") _loadHeard().then(_renderHeardIfOpen);
             if (view === "firehose") {
@@ -3698,11 +3780,6 @@
                 coords.textContent = "Known + unknown chan_hashes heard";
                 body.innerHTML = `<div class="panel-view" id="channels-view"></div>`;
                 _renderChannelsIfOpen();
-            } else if (view === "heatmap") {
-                title.textContent  = "Packet rate (24h)";
-                coords.textContent = "Hour-of-day bucket counts";
-                body.innerHTML = `<div class="panel-view" id="heatmap-view"></div>`;
-                _renderHeatmapIfOpen();
             } else if (view === "topology") {
                 title.textContent  = "Mesh topology";
                 coords.textContent = "All contacts with a known location";
@@ -4204,14 +4281,12 @@
             init();
         }
 
-        function _renderHeatmapIfOpen() {
-            if (!_isOpen("heatmap")) return;
-            const view = document.getElementById("heatmap-view");
-            if (!view) return;
+        // Heatmap markup (no DOM write) — embedded at the top of the
+        // Statistics panel rather than a stand-alone side-panel.
+        function _heatmapHtml() {
             const hm = (_rxLog.stats && _rxLog.stats.heatmap_24h) || new Array(24).fill(0);
-            const max = Math.max(...hm);
+            const max = Math.max(...hm, 1);   // avoid n/0 → Infinity when idle
             const now = new Date().getHours();
-            // Two rows of 12 hours, 0..11 and 12..23
             const cell = (h) => {
                 const v = hm[h] || 0;
                 let cls = "";
@@ -4226,9 +4301,10 @@
                 return `<div class="${cls}" title="${h}:00–${h}:59  ${v} pkt">${v || ""}</div>`;
             };
             const labels = Array.from({length: 24}, (_, h) => `<div>${h}</div>`).join("");
-            view.innerHTML = `
-                <div style="font-size:0.82rem;color:var(--text)">
-                    Packets received per hour-of-day, last 24h. Outlined cell = current hour.
+            return `
+                <div class="self-section">Packets / hour (24h)</div>
+                <div style="font-size:0.78rem;color:var(--muted);margin-bottom:2px">
+                    Per hour-of-day, last 24h. Outlined cell = current hour.
                 </div>
                 <div class="heatmap-grid" style="grid-template-columns:repeat(24,1fr)">
                     ${Array.from({length: 24}, (_, h) => cell(h)).join("")}
@@ -4869,9 +4945,9 @@ Larger = more reliable routing but smaller mesh diameter.">Path hash size</label
                 <div class="self-section">Contact info</div>
                 <div class="self-row"><label>Name</label><span class="self-value">${escHtml(name)}</span></div>
                 <div class="self-row"><label>Type</label><span class="self-value">${escHtml(({1:"Contact",2:"Repeater",3:"Room Server",4:"Sensor"})[node.type] || node.type || "?")}</span></div>
-                <div class="self-row"><label>Hops</label><span class="self-value">${escHtml(hops)}</span></div>
-                <div class="self-row"><label>SNR</label><span class="self-value">${escHtml(snr)} dB</span></div>
-                ${rssiV ? `<div class="self-row"><label>RSSI</label><span class="self-value">${escHtml(rssiV)} dBm</span></div>` : ""}
+                <div class="self-row"><label><i class="fa-solid fa-tower-broadcast"></i> Hops</label><span class="self-value">${escHtml(hops)}</span></div>
+                <div class="self-row"><label><i class="fa-solid fa-signal"></i> SNR</label><span class="self-value">${escHtml(snr)} dB</span></div>
+                ${rssiV ? `<div class="self-row"><label><i class="fa-solid fa-wifi"></i> RSSI</label><span class="self-value">${escHtml(rssiV)} dBm</span></div>` : ""}
                 <div class="self-row"><label>Public key</label>
                     <div class="self-input-wrap">
                         <input type="text" readonly value="${escHtml(node.pubkey || "")}">
@@ -5261,7 +5337,6 @@ Larger = more reliable routing but smaller mesh diameter.">Path hash size</label
                     if (!_rxLogFirehosePaused) _renderFirehoseIfOpen();
                     _renderTrafficIfOpen();
                     _renderChannelsIfOpen();
-                    _renderHeatmapIfOpen();
                     _refreshCardSparklines();
                 });
                 if (_isOpen("heard")) _loadHeard().then(_renderHeardIfOpen);
