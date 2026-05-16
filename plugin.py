@@ -243,6 +243,7 @@ class BasePlugin:
         self._mc = None                       # live MeshCore instance (worker-owned)
         self._stop_event = threading.Event()  # set on shutdown (cross-thread)
         self._stop_async: asyncio.Event | None = None  # created inside worker loop
+        self._main_task: asyncio.Task | None = None     # _run() task, for hard cancel on stop
         # Serialise concurrent `!verb` sends and remote queries. The meshcore
         # library subscribes to EventType.OK/ERROR globally per send() call,
         # so two commands in flight at the same time can have their responses
@@ -462,6 +463,19 @@ class BasePlugin:
                 loop.call_soon_threadsafe(stop_async.set)
             except Exception as exc:
                 Domoticz.Debug(f"onStop: stop dispatch failed: {exc}")
+            # Hard-cancel the _run() task too. Setting the event only breaks
+            # the serve loop at its next _wait_or_stop; if we're blocked
+            # inside an in-flight mc.* await (slow/hung network read, message
+            # drain, periodic refresh) the loop never gets there and the
+            # thread join below times out ("threads still running"). A
+            # threadsafe Task.cancel() raises CancelledError straight into
+            # that await so the worker unwinds well within the join window.
+            mt = self._main_task
+            if mt is not None:
+                try:
+                    loop.call_soon_threadsafe(mt.cancel)
+                except Exception as exc:
+                    Domoticz.Debug(f"onStop: task cancel dispatch failed: {exc}")
 
         # Wait for the worker thread to exit
         t = self._worker_thread
@@ -477,6 +491,7 @@ class BasePlugin:
         self._mc = None
         self._worker_thread = None
         self._stop_async = None
+        self._main_task = None
         # Drop references that could keep an IOCP / proactor pinned alive and
         # force a collection so the Windows COM port handle is released by
         # the asyncio internals.
@@ -1291,7 +1306,8 @@ class BasePlugin:
         self._cmd_lock   = asyncio.Lock()
         self._remote_query_tasks: set = set()
         try:
-            loop.run_until_complete(self._run())
+            self._main_task = loop.create_task(self._run())
+            loop.run_until_complete(self._main_task)
         except asyncio.CancelledError:
             Domoticz.Debug("Worker: cancelled (shutdown).")
         except Exception as exc:
