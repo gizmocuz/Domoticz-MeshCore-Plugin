@@ -1228,14 +1228,6 @@ class BasePlugin:
                 del recs[5:]
             self._stats_dirty = True
 
-    def _bump_adv_stats(self, name: str):
-        with self._rx_log_lock:
-            s = self._stats
-            s["adverts_total"] += 1
-            if name:
-                s["adv_by_sender"][name] = s["adv_by_sender"].get(name, 0) + 1
-            self._stats_dirty = True
-
     def _heard_path(self) -> str:
         plugin_dir    = os.path.dirname(os.path.abspath(__file__))
         domoticz_root = os.path.abspath(os.path.join(plugin_dir, "..", ".."))
@@ -1673,6 +1665,19 @@ class BasePlugin:
             rssi = p.get("rssi")
             pp   = p.get("path") or ""
             adv_key = p.get("adv_key")
+            if p.get("payload_typename") == "ADVERT":
+                # Tally every advert we hear here — this RX_LOG frame is the
+                # canonical source (the heard-nodes store is built from it
+                # too). The higher-level ADVERTISEMENT push is a decoded
+                # duplicate of the same on-air frame and some firmware never
+                # emits it, so counting it there missed everything. We hold
+                # _rx_log_lock already, so increment inline.
+                self._stats["adverts_total"] += 1
+                _an = (p.get("adv_name") or "").strip()
+                if _an:
+                    self._stats["adv_by_sender"][_an] = \
+                        self._stats["adv_by_sender"].get(_an, 0) + 1
+                self._stats_dirty = True
             if p.get("payload_typename") == "ADVERT" and adv_key and (snr is not None or rssi is not None):
                 prefix = adv_key[:12]
                 hist = self._signal_history.setdefault(prefix, [])
@@ -2837,11 +2842,12 @@ class BasePlugin:
             Domoticz.Debug(f"Message: {item[1]}")
             self._handle_message(item[1])
         elif kind == "advert":
-            # Ambient advertisement — used by handlers that want a hint that
-            # a node is alive even before its first message. We don't update
-            # any Domoticz device from this directly; the next contacts refresh
-            # handles status/last_advert. We do tally it for lifetime stats.
-            self._bump_adv_stats((item[1].get("adv_name") or "").strip())
+            # Ambient advertisement — a hint that a node is alive even before
+            # its first message. No Domoticz device is updated here; the next
+            # contacts refresh handles status/last_advert. Advert lifetime
+            # stats are tallied from the RX_LOG ADVERT frame (the canonical,
+            # always-emitted source) — counting here too would double-count.
+            pass
         elif kind == "contacts":
             self._handle_contacts(item[1])
             # First contacts batch processed — bump heartbeat back to a

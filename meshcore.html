@@ -970,6 +970,11 @@
             -webkit-user-select: text;
             cursor: text;
         }
+        .inbox-msg .msg-text .path-annot {
+            color: var(--muted);
+            font-style: italic;
+            font-size: 0.92em;
+        }
         /* Allow selecting time + sender too (e.g. copy a timestamp) */
         .inbox-msg .msg-time,
         .inbox-msg .msg-sender { user-select: text; -webkit-user-select: text; }
@@ -1084,6 +1089,11 @@
             color: #fff;
             background: var(--accent);
             border-color: var(--accent);
+        }
+        .msg-dm-btn { border-color: var(--heard); }
+        .msg-dm-btn:hover {
+            background: var(--heard);
+            border-color: var(--heard);
         }
         .msg-info-btn {
             flex-shrink: 0;
@@ -2797,12 +2807,14 @@
             }
 
             const chips = _allChannelChips();
-            // If a previously-saved channel filter no longer corresponds to any
-            // existing channel/private chip, fall back to "All" so the user
-            // doesn't see a misleading "No messages match" forever.
+            // Keep the active filter selectable even if, on this particular
+            // refresh, no message for it is in history yet and the channel
+            // list hasn't loaded — otherwise a new message arriving would
+            // momentarily drop the chip and snap the view back to "All".
+            // We deliberately do NOT auto-reset to "All" here.
             if (_inboxChanFilter && !chips.includes(_inboxChanFilter)) {
-                _setChanFilter(null);
-                return;
+                chips.push(_inboxChanFilter);
+                chips.sort();
             }
             _renderChannelChips(chips);
 
@@ -2838,6 +2850,15 @@
                 const replyBtn = replyTarget
                     ? `<button class="msg-reply-btn" onclick="_replyTo(event,'${replyTarget}','${replyChannel}')" title="Reply to ${replyTarget}">↩ Reply</button>`
                     : "";
+                // "Reply private": only on incoming CHANNEL messages whose
+                // sender we can resolve to a known full pubkey (already a
+                // contact, or a single heard node). Heard senders are added
+                // as a real contact first (persistent — no add/remove churn).
+                const dmT = (replyTarget && channel && channel !== "Private")
+                    ? _resolveDmTarget(sender) : null;
+                const dmBtn = dmT
+                    ? `<button class="msg-reply-btn msg-dm-btn" onclick="_replyPrivate(event,'${replyTarget}')" title="${dmT.kind === "heard" ? "Add " + replyTarget + " to contacts and reply privately" : "Reply privately to " + replyTarget}"><i class="fa-solid fa-lock"></i> DM</button>`
+                    : "";
                 const timeLabel = isPending ? "sending…" : escHtml(time);
                 // The sender's RTC was wrong, so this is the time WE received
                 // the message, not when it was actually sent.
@@ -2871,7 +2892,8 @@
           ${infoBtn}
           ${chanHtml}
           ${sender ? `<span class="msg-sender">${escHtml(sender)}</span>` : ""}
-          <span class="msg-text">${_renderMentions(text)}</span>
+          <span class="msg-text">${_renderMsgText(text)}</span>
+          ${dmBtn}
           ${replyBtn}
         </div>`;
             }).join("");
@@ -2947,12 +2969,16 @@
         function _syncComposeTarget() {
             const sel = document.getElementById("compose-target");
             if (!sel) return;
-            if (_inboxChanFilter && _inboxChanFilter !== "Private") {
-                const chanIdx = Object.entries(_channelNames).find(([, n]) => n === _inboxChanFilter);
-                if (chanIdx) {
-                    const val = `#${chanIdx[0]}`;
-                    if ([...sel.options].some(o => o.value === val)) sel.value = val;
-                }
+            if (!_inboxChanFilter || _inboxChanFilter === "Private") return;
+            // Compose option values are the channel NAME ("#test"), not the
+            // channel index. Match the active filter (with or without the
+            // leading "#") so picking a channel also re-points the To: box —
+            // prevents accidentally sending into the wrong channel.
+            const want = _inboxChanFilter.startsWith("#") ? _inboxChanFilter : `#${_inboxChanFilter}`;
+            const opt = [...sel.options].find(o => o.value === want || o.value === _inboxChanFilter);
+            if (opt) {
+                sel.value = opt.value;
+                _persistComposeTarget(opt.value);
             }
         }
 
@@ -2971,6 +2997,61 @@
             return escHtml(text).replace(/@\[([^\]]+)\]|@(\S+)/g, (m, bracketed, plain) =>
                 bracketed ? `<span class="mention">@[${bracketed}]</span>`
                           : `<span class="mention">@${plain}</span>`);
+        }
+
+        // Resolve one path-hash hex token to a known node name (the routing
+        // hash is the start of the node's public key). null = unknown.
+        function _resolvePathHop(hex) {
+            const h = String(hex).toLowerCase();
+            if (/^(ff)+$/.test(h) || /^(cc)+$/.test(h)) return null;   // flood/wildcard
+            const nodes = (_deviceMap && _deviceMap.nodes) || {};
+            for (const nm in nodes) {
+                const pk = nodes[nm] && nodes[nm].pubkey;
+                if (pk && String(pk).toLowerCase().startsWith(h)) return nm;
+            }
+            const si = _deviceMap && _deviceMap.self_info;
+            if (si && si.public_key && _deviceMap.self
+                && String(si.public_key).toLowerCase().startsWith(h)) return _deviceMap.self;
+            return null;
+        }
+
+        // A bot/echo reply often prints the route as "P(5):22a8>4e17>cccc".
+        // Append the resolved meaning in parentheses after it. Operates on
+        // already-escaped HTML, so ">" is "&gt;".
+        function _annotatePath(html) {
+            return html.replace(
+                /P\((\d+)\):([0-9a-fA-F]{2,8}(?:&gt;[0-9a-fA-F]{2,8})+)/g,
+                (full, n, body) => {
+                    const named = body.split("&gt;").map(t => {
+                        const nm = _resolvePathHop(t);
+                        if (nm) return nm;
+                        if (/^(ff)+$/i.test(t) || /^(cc)+$/i.test(t)) return "flood";
+                        return "?";
+                    });
+                    return `${full} <span class="path-annot">(${escHtml(named.join(" → "))})</span>`;
+                });
+        }
+
+        function _renderMsgText(text) {
+            return _annotatePath(_renderMentions(text));
+        }
+
+        // Can we DM this channel sender? Returns null when we have no full
+        // pubkey for them (so we'd be guessing — never offered). "contact" =
+        // already DM-able; "heard" = known via advert, add as a real contact
+        // first. Ambiguous names (>1 heard node) are treated as unknown so a
+        // private reply can't silently go to the wrong person.
+        function _resolveDmTarget(sender) {
+            if (!sender) return null;
+            const selfName = _deviceMap && _deviceMap.self;
+            const nodes = (_deviceMap && _deviceMap.nodes) || {};
+            if (sender !== selfName && nodes[sender] && nodes[sender].pubkey)
+                return { kind: "contact", name: sender };
+            const hn = (_heard && _heard.nodes) || {};
+            const matches = Object.values(hn).filter(h => h && h.name === sender && h.pubkey);
+            if (matches.length === 1)
+                return { kind: "heard", name: sender, pubkey: matches[0].pubkey };
+            return null;   // unknown or ambiguous
         }
 
         // ── Contacts filter / sort / view state ──────────────────────────────────────
@@ -4203,9 +4284,34 @@
         // Heard-nodes panel. Backed by the plugin's persistent
         // meshcore_heard.json (survives restarts), not the rolling RX log.
         const _HEARD_ADV_TYPE = { 1: "Contact", 2: "Repeater", 3: "Room Server", 4: "Sensor" };
+        // Per-type visibility for the heard side-panel (default: all on),
+        // persisted like the dashboard's contact-type toggles.
+        const LS_HEARD_TYPE = { 1: "meshcore.heardType1", 2: "meshcore.heardType2",
+                                3: "meshcore.heardType3", 4: "meshcore.heardType4" };
+        const _heardShowType = (() => {
+            const g = k => { try { return localStorage.getItem(k) !== "0"; } catch (_) { return true; } };
+            return { 1: g(LS_HEARD_TYPE[1]), 2: g(LS_HEARD_TYPE[2]),
+                     3: g(LS_HEARD_TYPE[3]), 4: g(LS_HEARD_TYPE[4]) };
+        })();
+        const _HEARD_TYPE_ICON = { 1: "fa-user", 2: "fa-tower-broadcast",
+                                   3: "fa-house-signal", 4: "fa-microchip" };
         let _heardMap = null;          // Leaflet instance for the bottom map
         let _heardMapPk = null;        // pubkey currently shown on the map
         let _contactMap = null;        // Leaflet instance for the contact panel
+
+        // Per-type counts of heard (non-contact) nodes, ignoring the active
+        // type filter — so the toggle badges show how many exist of each.
+        function _heardTypeCounts() {
+            const knownPks = new Set();
+            for (const n of Object.values((_deviceMap && _deviceMap.nodes) || {}))
+                if (n.pubkey) knownPks.add(n.pubkey);
+            const c = { 1: 0, 2: 0, 3: 0, 4: 0 };
+            for (const h of Object.values((_heard && _heard.nodes) || {})) {
+                if (!h.pubkey || knownPks.has(h.pubkey)) continue;
+                if (h.type in c) c[h.type]++;
+            }
+            return c;
+        }
 
         function _heardList() {
             // Defensive: hide anything that's already a contact.
@@ -4215,6 +4321,7 @@
             }
             return Object.values((_heard && _heard.nodes) || {})
                 .filter(h => h.pubkey && !knownPks.has(h.pubkey))
+                .filter(h => !(h.type in _heardShowType) || _heardShowType[h.type])
                 .sort((a, b) => (b.last_heard || 0) - (a.last_heard || 0));
         }
 
@@ -4241,10 +4348,32 @@
                         <i class="fa-solid fa-location-dot"></i> to show its
                         position on the map below.
                     </div>
+                    <div id="heard-type-filter" style="display:flex;align-items:center;gap:4px;margin:8px 0 2px">
+                        <span style="font-size:0.72rem;color:var(--muted);margin-right:4px">Show:</span>
+                        ${[1,2,3,4].map(t =>
+                            `<button class="view-btn heard-type-btn${_heardShowType[t] ? " active" : ""}" data-htype="${t}" title="Show/hide ${_HEARD_ADV_TYPE[t]}s"><i class="fa-solid ${_HEARD_TYPE_ICON[t]}"></i> <span class="htc">0</span></button>`
+                        ).join("")}
+                    </div>
                     <div id="heard-list-wrap"></div>
                     <div id="heard-map" style="display:none"></div>`;
                 listWrap = document.getElementById("heard-list-wrap");
+                view.querySelectorAll(".heard-type-btn").forEach(b => {
+                    b.onclick = () => {
+                        const t = b.dataset.htype;
+                        _heardShowType[t] = !_heardShowType[t];
+                        try { localStorage.setItem(LS_HEARD_TYPE[t], _heardShowType[t] ? "1" : "0"); } catch (_) {}
+                        b.classList.toggle("active", _heardShowType[t]);
+                        _renderHeardIfOpen();
+                    };
+                });
             }
+
+            // Refresh the per-type count badges every render.
+            const _htc = _heardTypeCounts();
+            view.querySelectorAll(".heard-type-btn").forEach(b => {
+                const span = b.querySelector(".htc");
+                if (span) span.textContent = _htc[b.dataset.htype] || 0;
+            });
 
             const list = _heardList();
             if (!list.length) {
@@ -5867,8 +5996,51 @@ Larger = more reliable routing but smaller mesh diameter.">Path hash size</label
             document.getElementById("compose-bar").scrollIntoView({ behavior: "smooth", block: "nearest" });
         }
 
+        // Reply privately to a channel sender. Safe variant: only ever
+        // called when _resolveDmTarget() succeeded. Heard senders are added
+        // as a persistent contact (the plugin's !heard_add also refreshes
+        // contacts, so the name resolves for the send) — no add/remove churn.
+        async function _replyPrivate(evt, sender) {
+            evt.stopPropagation();
+            const t = _resolveDmTarget(sender);
+            if (!t) { alert("No public key known for this sender — can't send a private message."); return; }
+            const sel = document.getElementById("compose-target");
+            const input = document.getElementById("compose-input");
+            if (!sel || !input) return;
+
+            if (t.kind === "heard") {
+                const btn = evt.currentTarget;
+                const orig = btn ? btn.innerHTML : "";
+                if (btn) { btn.disabled = true; btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i>'; }
+                try {
+                    await _sendDeviceCmd(`!heard_add ${t.pubkey}`);
+                    await _loadDeviceMap();
+                } catch (_) {
+                    if (btn) { btn.disabled = false; btn.innerHTML = orig; }
+                    alert("Could not add " + sender + " to contacts — try again.");
+                    return;
+                }
+                if (btn) { btn.disabled = false; btn.innerHTML = orig; }
+            }
+
+            // Point the composer at the contact (DM, not the channel).
+            let opt = [...sel.options].find(o => o.value === t.name);
+            if (!opt) {
+                let tmp = sel.querySelector('option[data-reply="1"]');
+                if (!tmp) { tmp = document.createElement("option"); tmp.dataset.reply = "1"; sel.appendChild(tmp); }
+                tmp.value = t.name;
+                tmp.textContent = `➤ ${t.name} (DM)`;
+            }
+            sel.value = t.name;
+            _persistComposeTarget(t.name);
+            input.focus();
+            input.setSelectionRange(input.value.length, input.value.length);
+            document.getElementById("compose-bar").scrollIntoView({ behavior: "smooth", block: "nearest" });
+        }
+
         // Expose functions referenced by inline HTML event handlers to global scope
         window.loadData            = loadData;
+        window._replyPrivate       = _replyPrivate;
         window._onInboxSearch      = _onInboxSearch;
         window._sendMessage        = _sendMessage;
         window._toggleEmojiPicker  = _toggleEmojiPicker;
