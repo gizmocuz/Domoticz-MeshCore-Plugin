@@ -23,8 +23,8 @@ Domoticz calls module-level functions (`onStart`, `onStop`, `onHeartbeat`). Thes
 `onStop` fires on every disable AND on Domoticz shutdown — there is no separate "uninstall" hook. Cleanup logic must be idempotent and **must not delete user-visible state** that we want to survive a restart. In particular:
 
 - `meshcore.html` and `leaflet/` are re-installed on every `onStart`, so removing them in `onStop` is fine (and we do).
-- `meshcore_devices.json`, `meshcore_rx_log.json`, `meshcore_channels.json` accumulate runtime state (24 h heatmap, signal history, last-known device map). They are **deliberately not removed** on `onStop` so a restart preserves history; they're overwritten on the first heartbeat after restart anyway.
-- `meshcore_locations.json` is user-owned (manual location overrides). Treat it as read-only state that the plugin copies from `plugin_dir/` into `www/templates/`; never delete it from either location.
+- `meshcore_devices.json`, `meshcore_rx_log.json`, `meshcore_channels.json`, `meshcore_stats.json`, `meshcore_heard.json` accumulate runtime state (24 h heatmap, signal history, last-known device map, lifetime stats, heard-over-air nodes). They all live in the **plugin directory** (not `www/templates/`). They are **deliberately not removed** on `onStop` so a restart preserves history. On `onStart` they are **loaded back into memory** (`_load_rx_log`/`_load_stats`/`_load_heard`/`_load_channels`) so the very first WebSocket snapshot reflects last-known state immediately (parity with the old file-polling behaviour). `_migrate_state_files()` performs a one-time move of any legacy copies from `www/templates/` into the plugin dir.
+- `meshcore_locations.json` is user-owned (manual location overrides), read from the plugin directory; never delete it.
 
 ### Implementation (meshcore Python package over TCP)
 
@@ -139,13 +139,21 @@ Dashboard features:
 - The map only appears when at least one node has coordinates (from `adv_lat`/`adv_lon` or manual overrides)
 - The map is collapsed by default to keep the chat visible; click the header to expand
 
-The page derives all node names dynamically from the Domoticz JSON API (`/json.htm?type=command&param=getdevices&order=Name`) — no template injection needed:
-- **Self node**: identified by a device whose name ends in `" Uptime"` (unique to the connected node)
-- **Remote nodes**: identified by devices whose name ends in `" Hops"` (unique to tracked nodes)
+**Transport: native Domoticz plugin↔frontend WebSocket channel** (not JSON-file polling). The dashboard no longer fetches `/templates/*.json` or the Domoticz JSON API for its state. This requires **Domoticz build ≥ 17956 (`2025.2.17956`)**, which added `Domoticz.WebSocketSend` / `onWebSocketMessage`. The page opens a raw WebSocket and speaks the same wire protocol as the AngularJS `livesocket` service (subscribe topic `plugin:MeshCore`, `plugin_command`, `plugin`).
 
-The page fetches live device data and auto-refreshes every 10 seconds. Each metric links to `/index.html#/Devices/{idx}/Log`.
+Frames are serialized by the plugin with `json.dumps` and sent as a string (Domoticz's built-in dict→JSON is lossy: it emits non-string keys unquoted and `None` as `"None"`); the frontend `JSON.parse`s `data`. Each frame is `{ "t": <type>, ... }`:
 
-The self node card shows: Battery, Voltage, RSSI, SNR, Noise Floor, Uptime, TX Air, Pkts Sent, Pkts Recv, Last Seen.
-Remote node cards show: Battery, Voltage, RSSI, SNR, Hops, Last Seen.
+- `cmd_result` — ack/result for a `hello` or `cmd` (carries the correlation `id`).
+- `snapshot` — **lean** first-paint state: `deviceMap` (self + contacts + inbox), `stats`, `channels`, plus `deviceSeq` (the deviceMap-delta baseline marker). `heard` is **deliberately excluded** (it can be hundreds of KB) and sent as a deferred `heard` follow-up frame immediately after the snapshot.
+- `devices` (full) / `devices_delta` (changed/added nodes, removed names, changed scalars + `seq`) — incremental device map; gap → frontend sends `{t:'resync',feed:'devices'}` → plugin forces a full `devices`.
+- `stats` / `heard` / `channels` — pushed when their per-feed dirty flag is set, coalesced to ≤1/s.
+- `rxlog` / `rxlog_delta` — on-demand: subscribed (`{t:'sub',feed:'rxlog'}`) only while a heavy panel (firehose/traffic/channels/stats) is open, with seq + gap recovery.
 
-Send functionality has been intentionally removed.
+Inbound from the dashboard: `hello`, `sub {feed}`, `cmd {cmd,id}`, `resync {feed}`. The plugin still distinguishes self vs remote nodes by Domoticz device name suffix (`" Uptime"` = self, `" Hops"` = remote). Each metric links to `/index.html#/Devices/{idx}/Log`.
+
+Connection state: the connected node's online/offline badge is driven by the Domoticz `self` STATUS device — the plugin sets it Off on node (USB/TCP) disconnect and back On on reconnect (propagated via `devices_delta`). The self-card settings (gear) button is disabled while the node is offline.
+
+The self node card shows: Battery, Voltage, RSSI, SNR, Noise Floor, Uptime, TX Air, Pkts Sent, Pkts Recv, Last Heard.
+Remote node cards show: Battery, Voltage, RSSI, SNR, Hops, Last Heard. (The "Last Heard" label is a UI rename; the underlying device/key is still `last_seen`.)
+
+The legacy Domoticz "Mesh Send" text device (`UNIT_SEND`) has been removed; sending is still available **from the dashboard** (compose bar / inbox replies) and is dispatched as a `cmd` frame over the WebSocket channel, executed by the worker via `_send_message_for_text`. A one-time `onStart` cleanup deletes the stale `UNIT_SEND` device from older installs.

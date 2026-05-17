@@ -46,6 +46,7 @@ This plugin connects your **[MeshCore LoRa mesh nodes](https://meshcore.co.uk/)*
 ### Prerequisites
 
 - Domoticz installed and running
+  - **Minimum version: build `17956` (`2025.2.17956`, 2026-05-16) or newer.** The custom dashboard uses the plugin↔frontend WebSocket channel (`Domoticz.WebSocketSend` / `onWebSocketMessage`), which was added in that build. Older Domoticz versions can run the plugin's devices but not the real-time dashboard.
 - A [MeshCore](https://meshcore.co.uk/) node reachable over TCP (companion app or radio bridge)
   - Alternative firmware: [MeshcoMod](https://www.meshcomod.com) — a MeshCore-compatible fork for Heltec v3 / v4 boards that adds native WiFi, so the node can expose its TCP companion port directly without a USB bridge.
 

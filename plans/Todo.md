@@ -47,6 +47,15 @@ attempts it took (like the phone companion app).
   thread, so this is fine, but message-drain cadence may need a re-check so a
   slow retry doesn't starve the poll loop.
 
+## WebSocket transport migration
+
+Replace the `www/templates` JSON-file + poll architecture with Domoticz's
+native plugin↔frontend WebSocket channel (build **17956+**,
+`2025.2.17956`, 2026-05-16). Decisions: WebSocket-only (no fallback, README
+states min build), in-memory state pushed (no HTTP-served JSON), big
+rx-log on-demand + deltas. Full feature-split plan with dependency graph:
+see [`plans/websocket-migration/`](websocket-migration/README.md).
+
 ## Repeater directory for path-hop resolution (community map)
 
 A static snapshot `meshcore_repeaters.json` is already bundled (NL repeaters,

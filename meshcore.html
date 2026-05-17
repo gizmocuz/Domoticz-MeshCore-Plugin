@@ -26,11 +26,7 @@
 
         * { box-sizing: border-box; margin: 0; padding: 0; }
 
-        .clock-wrong,
-        .clock-wrong .metric-value,
-        .clock-wrong .row-meta,
-        .row-meta.clock-wrong,
-        .heard-extra.clock-wrong span { color: var(--red) !important; cursor: help; }
+        .clock-warn { color: var(--yellow); cursor: help; margin-left: 4px; font-size: 0.8em; }
 
         body {
             font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
@@ -286,6 +282,7 @@
             transition: color 0.12s, background 0.12s, opacity 0.12s;
         }
         .card-action-btn:hover { color: var(--accent); opacity: 1; background: var(--bg); }
+        .card-action-btn:disabled { opacity: 0.3; cursor: not-allowed; pointer-events: none; }
         /* List-view map indicator before the favorite slot */
         .row-map {
             display: inline-flex;
@@ -314,6 +311,11 @@
             transform: translateX(100%);
             transition: transform 0.25s ease-out;
             box-shadow: -4px 0 16px rgba(0, 0, 0, 0.4);
+            /* Side-bar content (hashes, node names, stats) must be
+               selectable/copyable. The .resizing rule below still
+               suppresses selection while dragging the resize handle. */
+            user-select: text;
+            -webkit-user-select: text;
         }
         #map-panel.open { transform: translateX(0); }
         #map-panel.resizing { transition: none; user-select: none; }
@@ -459,7 +461,7 @@
 
         .node-metrics {
             /* extra bottom padding reserves room for the floating fav-star and
-               map-pin overlays so they don't sit on top of the Last Seen row */
+               map-pin overlays so they don't sit on top of the Last Heard row */
             padding: 8px 12px 28px;
             display: grid;
             grid-template-columns: 1fr 1fr;
@@ -480,7 +482,7 @@
         /* Hide metric rows that have no data (instead of showing a "—" placeholder). */
         .metric.empty { display: none; }
 
-        /* Last Seen spans the full row at the bottom of the metric grid. */
+        /* Last Heard spans the full row at the bottom of the metric grid. */
         .metric[data-key="last_seen"] {
             grid-column: 1 / -1;
             margin-top: 2px;
@@ -1851,7 +1853,7 @@
             { key: "airtime", label: "TX Air", unit: "s" },
             { key: "pkts_sent", label: "Pkts Sent", unit: "" },
             { key: "pkts_recv", label: "Pkts Recv", unit: "" },
-            { key: "last_seen", label: "Last Seen", unit: "" },
+            { key: "last_seen", label: "Last Heard", unit: "" },
         ];
 
         // Metrics shown for remote contacts — only data available from contacts list / messages.
@@ -1861,15 +1863,13 @@
             // RSSI is hidden (empty) for normal contacts — no reliable value —
             // but heard nodes carry a real advert RSSI, so the row appears.
             { key: "rssi",      label: "RSSI",      unit: "dBm" },
-            { key: "last_seen", label: "Last Seen", unit: ""   },
+            { key: "last_seen", label: "Last Heard", unit: ""   },
         ];
 
         // Tunable delays / timeouts referenced in multiple places.
         // PRESET_STEP_MS: gap between back-to-back !-commands when applying a
-        //   preset. Each command is delivered via the Mesh Send device's
-        //   sValue; the plugin reads sValue inside onDeviceModified, and if
-        //   four writes land before any callback runs, only the last sValue
-        //   is seen. The gap gives onDeviceModified time to consume each one.
+        //   preset. Each command is sent via the WebSocket channel; the gap
+        //   ensures commands are not issued faster than the plugin can process.
         // PRESET_REFRESH_MS: how long to wait after the last command before
         //   re-fetching the device map so the self panel reflects the new
         //   radio state.
@@ -1880,55 +1880,398 @@
         const LEAFLET_POLL_MS    = 100;
         const LEAFLET_MAX_TRIES  = 50;
 
-        // ── Device map (loaded from meshcore_devices.json) ───────────────────────────
+        // ── Plugin WebSocket channel ──────────────────────────────────────────────────
+        // Thin shim providing the same interface as the AngularJS livesocket service
+        // for plugin message delivery and command dispatch. Since meshcore.html is a
+        // standalone full-page app (not a Domoticz template partial), it cannot inject
+        // the AngularJS livesocket service and instead talks the same wire protocol
+        // directly via a native WebSocket.
+        const _pluginWS = (() => {
+            const PLUGIN = 'MeshCore';
+
+            let _sock = null;
+            const _msgListeners = [];
+            // Pending promises keyed by correlation id.
+            // Each entry: { resolve, reject, timer }
+            const _pending = {};   // id → {resolve, reject, timer}
+            let _nextId = 1;       // monotonic request id generator
+
+            /** Reject and clear all pending promises (used on socket close/error). */
+            function _rejectAll(reason) {
+                const entries = Object.values(_pending);
+                for (const key of Object.keys(_pending)) delete _pending[key];
+                for (const p of entries) {
+                    clearTimeout(p.timer);
+                    try { p.reject(new Error(reason)); } catch (_) {}
+                }
+            }
+
+            function _open() {
+                const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+                const base = location.pathname.endsWith('/')
+                    ? location.pathname
+                    : location.pathname.replace(/\/[^/]*$/, '/');
+                const uri = proto + '//' + location.host + base + 'json';
+                try {
+                    _sock = new WebSocket(uri, ['domoticz']);
+                } catch (_) { return; }
+
+                _sock.addEventListener('open', () => {
+                    _sock.send(JSON.stringify({ event: 'subscribe', requestid: 1, topic: 'plugin:' + PLUGIN }));
+                    sendPluginCommand({ t: 'hello' });
+                });
+
+                _sock.addEventListener('message', (ev) => {
+                    let msg;
+                    try { msg = JSON.parse(ev.data); } catch (_) { return; }
+                    if (msg.event !== 'plugin' || msg.plugin !== PLUGIN) return;
+                    // The plugin sends each frame as a JSON string (it serializes
+                    // with json.dumps to avoid Domoticz's lossy dict->JSON path).
+                    // Accept a pre-parsed object too for forward/backward compat.
+                    let data = msg.data;
+                    if (typeof data === 'string') {
+                        try { data = JSON.parse(data); } catch (_) { return; }
+                    }
+                    if (!data || typeof data !== 'object') return;
+
+                    // Resolve/reject the pending promise for this cmd_result by id.
+                    if (data.t === 'cmd_result') {
+                        // Validate shape: ok must be a boolean.
+                        if (typeof data.ok !== 'boolean') {
+                            console.warn('_pluginWS: malformed cmd_result (ok not boolean):', data);
+                            const mp = _pending[data.id];
+                            if (mp) {
+                                delete _pending[data.id];
+                                clearTimeout(mp.timer);
+                                try { mp.reject(new Error('malformed cmd_result: ok is not boolean')); } catch (_) {}
+                            }
+                            return;
+                        }
+                        const p = _pending[data.id];
+                        if (p) {
+                            delete _pending[data.id];
+                            clearTimeout(p.timer);
+                            if (data.ok) { p.resolve(data); }
+                            else { p.reject(new Error(data.result || 'cmd failed')); }
+                        }
+                    }
+
+                    _msgListeners.forEach(cb => { try { cb(data); } catch (_) {} });
+                });
+
+                _sock.addEventListener('close', () => {
+                    _rejectAll('socket closed');
+                    setTimeout(_open, 3000);
+                });
+                _sock.addEventListener('error', () => {
+                    _rejectAll('socket error');
+                    _sock.close();
+                });
+            }
+
+            function sendPluginCommand(data) {
+                if (_sock && _sock.readyState === WebSocket.OPEN) {
+                    _sock.send(JSON.stringify({ event: 'plugin_command', plugin: PLUGIN, data }));
+                }
+            }
+
+            function sendCmdAndWait(cmd, timeoutMs) {
+                // Reject immediately if the socket is not open.
+                if (!_sock || _sock.readyState !== WebSocket.OPEN) {
+                    return Promise.reject(new Error('socket not open'));
+                }
+                const id = _nextId++;
+                return new Promise((resolve, reject) => {
+                    const timer = setTimeout(() => {
+                        delete _pending[id];
+                        reject(new Error('cmd timeout'));
+                    }, timeoutMs || 15000);
+                    _pending[id] = { resolve, reject, timer };
+                    sendPluginCommand({ t: 'cmd', cmd, id });
+                });
+            }
+
+            function onPluginMessage(cb) {
+                _msgListeners.push(cb);
+                return () => { const i = _msgListeners.indexOf(cb); if (i >= 0) _msgListeners.splice(i, 1); };
+            }
+
+            _open();
+            return { sendPluginCommand, sendCmdAndWait, onPluginMessage };
+        })();
+
+        // ── State-push reducer ────────────────────────────────────────────────────────
+        // Handles snapshot / devices / stats / heard / channels messages pushed by the
+        // plugin via the WebSocket channel.  No data is rendered until the first
+        // snapshot has been applied.
+        let _snapshotReceived = false;
+
+        _pluginWS.onPluginMessage(msg => {
+            const t = msg && msg.t;
+            if (t === 'snapshot') {
+                // Guard each field: only overwrite an existing global with a
+                // present, non-null object so a partial/malformed snapshot
+                // cannot null out good state (mirrors the individual-push
+                // guards below).
+                if (msg.deviceMap && typeof msg.deviceMap === 'object') _deviceMap    = msg.deviceMap;
+                if (msg.stats     && typeof msg.stats     === 'object') _stats        = msg.stats;
+                if (msg.heard     && typeof msg.heard     === 'object') _heard        = msg.heard;
+                if (msg.channels  && typeof msg.channels  === 'object') _channelNames = msg.channels;
+                // F7: record the device-map delta baseline seq so the first
+                // devices_delta can validate its gap-free continuity.
+                _deviceSeq = (typeof msg.deviceSeq === 'number') ? msg.deviceSeq : -1;
+                _snapshotReceived = true;
+                _onSnapshotReady();
+            } else if (!_snapshotReceived) {
+                // Ignore partial updates until we have a full baseline.
+                return;
+            } else if (t === 'devices') {
+                // Full device-map push: replace local copy and update seq.
+                if (msg.deviceMap && typeof msg.deviceMap === 'object') {
+                    _deviceMap = msg.deviceMap;
+                    _deviceSeq = (typeof msg.seq === 'number') ? msg.seq : _deviceSeq;
+                    _onDeviceMapUpdated();
+                }
+            } else if (t === 'devices_delta') {
+                // F7 incremental update: merge only the diff into _deviceMap.
+                if (_deviceSeq === -1) return;  // no baseline yet, ignore
+                const incoming = (typeof msg.seq === 'number') ? msg.seq : -1;
+                if (incoming !== _deviceSeq + 1) {
+                    // Gap detected — request a full resync, guarded by a 1-second
+                    // backoff to prevent a tight re-request loop (mirrors rxlog_delta
+                    // gap handling with _rxLogResubAt).
+                    const now = Date.now();
+                    if (now - _deviceMapResubAt > 1000) {
+                        _deviceMapResubAt = now;
+                        if (_pluginWS) _pluginWS.sendPluginCommand({ t: 'resync', feed: 'devices' });
+                    }
+                    return;
+                }
+                _deviceSeq = incoming;
+                if (!_deviceMap) return;
+                // Merge changed/added nodes.
+                const changed = (msg.changed && typeof msg.changed === 'object') ? msg.changed : {};
+                const removed = Array.isArray(msg.removed) ? msg.removed : [];
+                const scalars = (msg.scalars && typeof msg.scalars === 'object') ? msg.scalars : {};
+                if (!_deviceMap.nodes) _deviceMap.nodes = {};
+                for (const [name, node] of Object.entries(changed)) {
+                    if (!node || typeof node !== 'object') continue;
+                    _deviceMap.nodes[name] = node;
+                }
+                for (const name of removed) {
+                    delete _deviceMap.nodes[name];
+                }
+                // Apply changed scalar fields onto _deviceMap.
+                for (const [key, val] of Object.entries(scalars)) {
+                    if (val === null) {
+                        delete _deviceMap[key];
+                    } else {
+                        _deviceMap[key] = val;
+                    }
+                }
+                _onDeviceMapUpdated();
+            } else if (t === 'stats') {
+                if (msg.stats && typeof msg.stats === 'object') {
+                    _stats = msg.stats;
+                    _renderHeaderStats();
+                    if (_isOpen('stats')) _renderStatsPanel();
+                }
+            } else if (t === 'heard') {
+                if (msg.heard && typeof msg.heard === 'object') {
+                    _heard = msg.heard;
+                    _renderHeardIfOpen();
+                    if (_includeHeard) _rerenderContacts();
+                }
+            } else if (t === 'channels') {
+                if (msg.channels && typeof msg.channels === 'object') {
+                    _channelNames = msg.channels;
+                    _populateComposeTargets();
+                    try { _renderChannelChips(_allChannelChips()); } catch (_) {}
+                    _renderChannelsIfOpen();
+                }
+            } else if (t === 'rxlog') {
+                // Full window: replace local buffer and record the baseline seq.
+                if (Array.isArray(msg.entries) && msg.stats && typeof msg.stats === 'object') {
+                    _rxLog = { entries: msg.entries, stats: msg.stats };
+                    if (msg.known_channels && typeof msg.known_channels === 'object') {
+                        _rxLog.known_channels = msg.known_channels;
+                    }
+                    _rxLogSeq = (typeof msg.seq === 'number') ? msg.seq : _rxLogSeq;
+                    if (!_rxLogFirehosePaused) _renderFirehoseIfOpen();
+                    _renderTrafficIfOpen();
+                    _renderChannelsIfOpen();
+                    _refreshCardSparklines();
+                }
+            } else if (t === 'rxlog_delta') {
+                // Incremental update: append new entries and merge stats.
+                if (_rxLogSeq === -1) return;  // no baseline yet, ignore
+                const incoming = (typeof msg.seq === 'number') ? msg.seq : -1;
+                if (incoming !== _rxLogSeq + 1) {
+                    // Gap detected — request a fresh window, but only if still
+                    // subscribed and not within the 1-second backoff window
+                    // (prevents a tight re-sub loop on sustained seq mismatches).
+                    const now = Date.now();
+                    if (_rxLogOpenPanels.size > 0 && now - _rxLogResubAt > 1000) {
+                        _rxLogResubAt = now;
+                        _rxLogSubscribe();
+                    }
+                    return;
+                }
+                _rxLogSeq = incoming;
+                if (Array.isArray(msg.entries) && msg.entries.length > 0) {
+                    _rxLog.entries = _rxLog.entries.concat(msg.entries);
+                    // Trim to RXLOG_BUFFER_MAX — must match the plugin's RX_LOG_BUFFER.
+                    if (_rxLog.entries.length > RXLOG_BUFFER_MAX) _rxLog.entries = _rxLog.entries.slice(-RXLOG_BUFFER_MAX);
+                }
+                if (msg.stats && typeof msg.stats === 'object') {
+                    _rxLog.stats = msg.stats;
+                }
+                if (!_rxLogFirehosePaused) _renderFirehoseIfOpen();
+                _renderTrafficIfOpen();
+                _renderChannelsIfOpen();
+                _refreshCardSparklines();
+            }
+        });
+
+        // Called once on the first snapshot and after each `devices` push.
+        // Drives the same render path that loadData() formerly triggered after
+        // reloading meshcore_devices.json.
+        function _onDeviceMapUpdated() {
+            // Skip if the snapshot's initialRender() hasn't completed yet.
+            // The data is already merged into _deviceMap; initialRender() (called
+            // by _onSnapshotReady immediately after the snapshot) will render the
+            // fresh state.  In steady state _initialRenderDone is true so live
+            // device updates continue to flow through within ~1 s.
+            if (!_initialRenderDone) return;
+            // Re-use the existing live-data render path if it has already run.
+            // _lastLiveSlotsOf is set after the first fetchDevices() completes;
+            // skip _renderContacts until that resolver is available so a
+            // devices_delta arriving before loadData() finishes cannot render
+            // stale live-slot values.
+            if (_lastLiveSlotsOf) {
+                const { selfName, remoteNodes } = _nodeList([]);
+                if (selfName || remoteNodes.length) {
+                    _lastRemoteNodes = remoteNodes;
+                    _renderContacts(remoteNodes, _lastLiveSlotsOf);
+                }
+            }
+            _populateComposeTargets();
+            _refreshNodeSettingsActive();
+            // If the self panel is currently open, refresh it so any device-map
+            // change (preset apply, settings write, etc.) is reflected within
+            // ~1-2 s when the plugin pushes the next `devices` message.
+            if (_isOpen('self')) _renderSelfPanel();
+            // Deliver new inbox messages immediately from the devices push
+            // without waiting for the next manual refresh or loadData() call.
+            // Only when the history is already loaded (so we don't duplicate
+            // entries that loadInboxHistory() will fetch from the API log).
+            if (_inboxLoaded && !_convNode && _deviceMap && _deviceMap.inbox_value) {
+                const val = _deviceMap.inbox_value;
+                if (val !== _inboxLastWsValue) {
+                    _inboxLastWsValue = val;
+                    const p = _parseInboxData(val);
+                    const container = document.getElementById("inbox-history");
+                    if (container && p.text) {
+                        // Drop any pending placeholder for this message
+                        if (p.sender && (p.sender.startsWith("> ") || p.sender.startsWith("▶"))) {
+                            const pIdx = _inboxHistory.findIndex(m =>
+                                (m._pending || m._settled) && m.channel === p.channel && m.text === p.text);
+                            if (pIdx >= 0) _inboxHistory.splice(pIdx, 1);
+                        }
+                        // Avoid adding the same entry twice (duplicate from API load)
+                        const alreadyPresent = _inboxHistory.length > 0
+                            && _inboxHistory[0].text === p.text
+                            && _inboxHistory[0].sender === p.sender
+                            && _inboxHistory[0].channel === p.channel;
+                        if (!alreadyPresent) {
+                            _inboxHistory.unshift({
+                                time: p.ts ? _fmtEpoch(p.ts) : "",
+                                channel: p.channel, sender: p.sender, text: p.text,
+                                tsWrong: p.tsWrong, snr: p.snr, hops: p.hops,
+                                rssi: p.rssi, path: p.path,
+                            });
+                            if (_inboxHistory.length > 200) _inboxHistory.pop();
+                            _renderInbox(container);
+                        }
+                    }
+                }
+            }
+        }
+
+        // ── Device map ────────────────────────────────────────────────────────────────
         // {
         //   inbox, inbox_value, self, written_at,
         //   nodes: { nodeName: { status: {idx, value, online}, rssi: {idx, value}, ... } }
         // }
         let _deviceMap = null;
-
-        async function _loadDeviceMap() {
-            try {
-                const r = await fetch("/templates/meshcore_devices.json?_=" + Date.now());
-                if (r.ok) _deviceMap = await r.json();
-            } catch (_) { }
-        }
+        // F7: device-map delta sequence tracking (mirrors _rxLogSeq).
+        // -1 = no baseline yet (ignore devices_delta until first snapshot/devices arrives).
+        let _deviceSeq = -1;
+        let _deviceMapResubAt = 0;  // epoch-ms: suppress gap resync within ~1 s
 
         // ── RX_LOG_DATA buffer (analyzer-style packet detail) ────────────────
-        // Written by the plugin from EventType.RX_LOG_DATA push events.
+        // Fed by WebSocket push: rxlog (full window) and rxlog_delta (incremental).
         // Shape: { entries: [...], stats: {payload_type_counts, chan_hash_counts,
         //   signal_history, dup_floods, heatmap_24h}, known_channels: {...} }
+
+        // Must stay in sync with RX_LOG_BUFFER in plugin.py (server-side ring size).
+        const RXLOG_BUFFER_MAX = 250;
+
         let _rxLog = { entries: [], stats: {} };
         let _rxLogLastSeen = 0;        // last entry _t seen by the firehose
         let _rxLogFirehosePaused = false;
+        // F3: sequence tracking for gap detection.
+        // -1 = no window received yet (ignore rxlog_delta until first rxlog arrives).
+        let _rxLogSeq = -1;
 
-        async function _loadRxLog() {
-            try {
-                const r = await fetch("/templates/meshcore_rx_log.json?_=" + Date.now());
-                if (r.ok) _rxLog = await r.json();
-            } catch (_) { }
+        // ── F3 on-demand subscription ref-count ──────────────────────────────
+        // Heavy panels that live-render from rxlog push: firehose, traffic,
+        // channels, stats (which embeds the 24-h heatmap).  We subscribe when
+        // the first heavy panel opens and unsubscribe when the last one closes.
+        // Since only one panel can be open at a time the set size is always 0
+        // or 1; the Set abstraction makes the intent explicit and is trivially
+        // correct if future work opens multiple panels simultaneously.
+        //
+        // Sparkline tradeoff: sparklines on contact cards update opportunistically
+        // whenever an rxlog subscription is already active for a heavy panel.
+        // When no heavy panel is open there is no subscription and sparklines
+        // simply retain their last-known values — they do not subscribe on their
+        // own and do not error when the data is stale.
+        const RXLOG_HEAVY_PANELS = new Set(['firehose', 'traffic', 'channels', 'stats']);
+        const _rxLogOpenPanels   = new Set();  // subset of RXLOG_HEAVY_PANELS currently open
+        let _rxLogResubAt = 0;                 // epoch-ms: suppress gap re-sub within ~1 s
+
+        function _rxLogSubscribe() {
+            if (_pluginWS) _pluginWS.sendPluginCommand({ t: 'sub', feed: 'rxlog' });
+        }
+        function _rxLogUnsubscribe() {
+            if (_pluginWS) _pluginWS.sendPluginCommand({ t: 'sub', feed: 'none' });
+        }
+
+        // Call when opening a panel that needs rxlog.
+        function _rxLogPanelOpen(view) {
+            if (!RXLOG_HEAVY_PANELS.has(view)) return;
+            const wasZero = _rxLogOpenPanels.size === 0;
+            _rxLogOpenPanels.add(view);
+            if (wasZero) _rxLogSubscribe();
+        }
+
+        // Call when closing a panel that may have needed rxlog.
+        // Safe to call for non-heavy panels — the has() check is a no-op.
+        function _rxLogPanelClose(view) {
+            if (!view || !RXLOG_HEAVY_PANELS.has(view)) return;
+            _rxLogOpenPanels.delete(view);
+            if (_rxLogOpenPanels.size === 0) _rxLogUnsubscribe();
         }
 
         // ── Persistent heard-nodes store ─────────────────────────────────────
-        // Written by the plugin from RX_LOG ADVERT frames for nodes that are
-        // NOT in our contacts. Shape: { nodes: { <pubkey>: {pubkey, name,
+        // Shape: { nodes: { <pubkey>: {pubkey, name,
         // type, lat, lon, snr, rssi, path_len, first_heard, last_heard} } }
+        // Populated exclusively by the WS reducer (t:'snapshot' / t:'heard').
         let _heard = { nodes: {} };
-        async function _loadHeard() {
-            try {
-                const r = await fetch("/templates/meshcore_heard.json?_=" + Date.now());
-                if (r.ok) _heard = await r.json();
-            } catch (_) { }
-        }
 
+        // Lifetime statistics — populated exclusively by the WS reducer.
         let _stats = null;
-        async function _loadStats() {
-            try {
-                const r = await fetch("/templates/meshcore_stats.json?_=" + Date.now());
-                if (r.ok) _stats = await r.json();
-            } catch (_) { }
-            _renderHeaderStats();
-        }
 
         function _renderHeaderStats() {
             const el = document.getElementById("header-stats");
@@ -2015,7 +2358,7 @@
                     + "plugin and cannot be undone.")) return;
                 rb.disabled = true;
                 try { await _sendDeviceCmd("!reset_stats"); } catch (_) {}
-                setTimeout(() => _loadStats().then(_renderStatsPanel), 800);
+                setTimeout(_renderStatsPanel, 800);
             };
         }
 
@@ -2137,7 +2480,7 @@
         }
 
         // A node's advert carries a timestamp set by the advertising node's
-        // own RTC. We display OUR local receive time as "Last Seen" (slots
+        // own RTC. We display OUR local receive time as "Last Heard" (slots
         // .last_seen), but if the node-reported advert time (slots.last_advert)
         // drifts from our receive time by more than this, the node's clock is
         // wrong — flag it red with a tooltip showing both times.
@@ -2160,9 +2503,9 @@
             const fmt = s => s ? new Date(s * 1000).toLocaleString() : "?";
             return {
                 wrong: true,
-                tip: `Node clock looks wrong (off by >1h).  `
-                   + `Node-reported advert time: ${fmt(nodeAdv)}  |  `
-                   + `We last heard it: ${fmt(oursSec)}`,
+                tip: `Node clock looks wrong (off by >1h).\n`
+                   + `Received: ${fmt(oursSec)}\n`
+                   + `Node reported: ${fmt(nodeAdv)}`,
             };
         }
 
@@ -2207,7 +2550,10 @@
 
             let badgeHtml;
             if (isSelf) {
-                badgeHtml = `<span class="badge self" title="Connected"><i class="fa-solid fa-plug-circle-check"></i></span>`;
+                const selfIsOnline = statusSlot ? _slotOnline(statusSlot) : true;
+                badgeHtml = selfIsOnline
+                    ? `<span class="badge self" title="Connected"><i class="fa-solid fa-plug-circle-check"></i></span>`
+                    : `<span class="badge offline" title="Offline"><i class="fa-solid fa-circle-xmark"></i></span>`;
             } else if (statusSlot) {
                 const online = _slotOnline(statusSlot);
                 badgeHtml = online
@@ -2254,25 +2600,25 @@
                 // their connected node is reporting all stats.
                 const hideEmpty = !isSelf && (!slot || numVal === "");
                 const _ckw = (key === "last_seen" && _skew.wrong);
-                const cls = (hideEmpty ? "metric empty" : "metric") + (_ckw ? " clock-wrong" : "");
-                const titleAttr = _ckw ? ` title="${escHtml(_skew.tip)}"` : "";
-                const div = `<div class="${cls}" data-node="${escHtml(nodeName)}" data-key="${key}"${titleAttr}>`;
+                const cls = hideEmpty ? "metric empty" : "metric";
+                const div = `<div class="${cls}" data-node="${escHtml(nodeName)}" data-key="${key}">`;
                 const end = `</div>`;
+                const warnIcon = _ckw ? ` <i class="fa-solid fa-triangle-exclamation clock-warn" title="${escHtml(_skew.tip).replace(/\n/g, "&#10;")}"></i>` : "";
                 if (!slot) {
                     metricsHtml += `${div}${renderMetricHtml(label, null, unit, null)}${end}`;
                     continue;
                 }
                 if (special === "battery") {
                     const pct = parseInt(numVal, 10);
-                    metricsHtml += `${div}${isNaN(pct) ? renderMetricHtml(label, null, unit, devIdx) : renderBatteryHtml(pct, devIdx)}${end}`;
+                    metricsHtml += `${div}${isNaN(pct) ? renderMetricHtml(label, null, unit, devIdx) : renderBatteryHtml(pct, devIdx)}${warnIcon}${end}`;
                 } else if (special === "snr") {
                     const snr = parseFloat(numVal);
-                    metricsHtml += `${div}${isNaN(snr) ? renderMetricHtml(label, null, unit, devIdx) : renderSnrHtml(snr, devIdx)}${end}`;
+                    metricsHtml += `${div}${isNaN(snr) ? renderMetricHtml(label, null, unit, devIdx) : renderSnrHtml(snr, devIdx)}${warnIcon}${end}`;
                 } else if (special === "uptime") {
                     const formatted = _formatUptime(numVal);
-                    metricsHtml += `${div}${renderMetricHtml(label, formatted, "", devIdx)}${end}`;
+                    metricsHtml += `${div}${renderMetricHtml(label, formatted, "", devIdx)}${warnIcon}${end}`;
                 } else {
-                    metricsHtml += `${div}${renderMetricHtml(label, numVal, unit, devIdx)}${end}`;
+                    metricsHtml += `${div}${renderMetricHtml(label, numVal, unit, devIdx)}${warnIcon}${end}`;
                 }
             }
 
@@ -2298,8 +2644,11 @@
             // panel (radio params, identity, send-advert, reboot, telemetry).
             // Remote cards get an "info" button that opens the contact side
             // panel (reset path, status / telemetry / neighbours queries).
+            // The gear is disabled (greyed, non-interactive) when the self node
+            // is offline so the user can't open settings on a disconnected node.
+            const selfOnline = !isSelf || (statusSlot ? _slotOnline(statusSlot) : true);
             const cardActionBtn = isSelf
-                ? `<button class="card-action-btn" data-action="open-self" title="Self-node info & radio settings"><i class="fa-solid fa-sliders"></i></button>`
+                ? `<button class="card-action-btn" data-action="open-self" title="${selfOnline ? "Self-node info & radio settings" : "Node offline — settings unavailable"}"${selfOnline ? "" : " disabled"}><i class="fa-solid fa-sliders"></i></button>`
                 : `<button class="card-action-btn" data-action="open-contact" data-node="${escHtml(nodeName)}" title="Contact info & remote queries"><i class="fa-solid fa-circle-info"></i></button>`;
 
             const _hpk = slots && slots._heardPk;
@@ -2374,8 +2723,6 @@
         }
 
         async function _applyNodeSetting(key, val) {
-            const sendIdx = _deviceMap && _deviceMap.send_idx;
-            if (!sendIdx) { alert("Cannot save: Mesh Send device not found."); return; }
             // Map dashboard key → plugin command syntax
             let cmd;
             if (key === "manual_add") {
@@ -2384,9 +2731,7 @@
                 cmd = `!set ${key} ${val}`;
             }
             try {
-                const url = `/json.htm?type=command&param=udevice&idx=${sendIdx}&nvalue=0&svalue=${encodeURIComponent(cmd)}`;
-                const r = await fetch(url, { method: "GET" });
-                if (!r.ok) throw new Error(`HTTP ${r.status}`);
+                await _pluginWS.sendCmdAndWait(cmd);
                 // Optimistic update so the active highlight moves immediately
                 if (_deviceMap) {
                     if (key === "manual_add")          _deviceMap.manual_add_contacts = !!val;
@@ -2433,14 +2778,10 @@
         async function _saveFloodScope() {
             const input = document.getElementById("settings-flood-scope");
             if (!input) return;
-            const sendIdx = _deviceMap && _deviceMap.send_idx;
-            if (!sendIdx) { alert("Cannot save: Mesh Send device not found."); return; }
             const val = input.value.trim();
             const cmd = `!flood_scope ${val}`;
             try {
-                const url = `/json.htm?type=command&param=udevice&idx=${sendIdx}&nvalue=0&svalue=${encodeURIComponent(cmd)}`;
-                const r = await fetch(url, { method: "GET" });
-                if (!r.ok) throw new Error(`HTTP ${r.status}`);
+                await _pluginWS.sendCmdAndWait(cmd);
                 // Optimistic: the plugin normalizes ("#nl" prefix) on apply.
                 if (_deviceMap) {
                     _deviceMap.default_flood_scope = val
@@ -2463,7 +2804,24 @@
 
             // Patch badge
             const badgeEl = document.querySelector(`.node-badge[data-node="${CSS.escape(nodeName)}"]`);
-            if (badgeEl && !isSelf) {
+            if (badgeEl && isSelf) {
+                const statusSlot = mapSlots.status;
+                const statusIdx = statusSlot ? statusSlot.idx : null;
+                const liveDev = statusIdx ? byIdx[statusIdx] : null;
+                if (liveDev) {
+                    const online = liveDev.Status === "On" || liveDev.Data === "On";
+                    badgeEl.innerHTML = online
+                        ? `<span class="badge self" title="Connected"><i class="fa-solid fa-plug-circle-check"></i></span>`
+                        : `<span class="badge offline" title="Offline"><i class="fa-solid fa-circle-xmark"></i></span>`;
+                    // Sync the gear button disabled state with online state
+                    const gearBtn = badgeEl.closest(".node-card")
+                        && badgeEl.closest(".node-card").querySelector(".card-action-btn[data-action='open-self']");
+                    if (gearBtn) {
+                        gearBtn.disabled = !online;
+                        gearBtn.title = online ? "Self-node info & radio settings" : "Node offline — settings unavailable";
+                    }
+                }
+            } else if (badgeEl && !isSelf) {
                 const statusSlot = mapSlots.status;
                 const statusIdx = statusSlot ? statusSlot.idx : null;
                 const liveDev = statusIdx ? byIdx[statusIdx] : null;
@@ -2501,6 +2859,7 @@
 
         const _inboxHistory = [];    // [{time, channel, sender, text}, ...] newest first
         let _inboxLastUpdate = null;  // LastUpdate of the last recorded entry
+        let _inboxLastWsValue = ""; // inbox_value seen in the last devices push ("" = none seen)
         let _inboxDevIdx2 = null;
         let _inboxLoaded = false; // true once initial history has been fetched
         // When set, the inbox shows a single favourite contact's stored DM
@@ -2527,14 +2886,9 @@
         })();
         let _inboxSearch = "";           // text search on sender + text (case-insensitive)
 
-        let _channelNames = {};  // idx string → name, loaded from meshcore_channels.json
-
-        async function _loadChannelNames() {
-            try {
-                const r = await fetch("/templates/meshcore_channels.json");
-                if (r.ok) _channelNames = await r.json();
-            } catch (_) { }
-        }
+        // idx string → name, populated exclusively by the WS reducer
+        // (t:'snapshot' channels field / t:'channels').
+        let _channelNames = {};
 
         function _chanLabel(idxStr) {
             if (_channelNames[idxStr]) return _channelNames[idxStr];
@@ -2845,10 +3199,10 @@
                 const chanHtml = channel
                     ? `<span class="msg-chan${channel === "Private" ? " private" : ""}">${escHtml(channel)}</span>`
                     : "";
-                const replyTarget = sender && sender !== "?" && !isSent ? escHtml(sender) : "";
-                const replyChannel = channel && channel !== "Private" ? escHtml(channel) : "";
+                const replyTarget = sender && sender !== "?" && !isSent ? sender : "";
+                const replyChannel = channel && channel !== "Private" ? channel : "";
                 const replyBtn = replyTarget
-                    ? `<button class="msg-reply-btn" onclick="_replyTo(event,'${replyTarget}','${replyChannel}')" title="Reply to ${replyTarget}">↩ Reply</button>`
+                    ? `<button class="msg-reply-btn" data-reply-target="${escHtml(replyTarget)}" data-reply-channel="${escHtml(replyChannel)}" title="Reply to ${escHtml(replyTarget)}">↩ Reply</button>`
                     : "";
                 // "Reply private": only on incoming CHANNEL messages whose
                 // sender we can resolve to a known full pubkey (already a
@@ -2857,13 +3211,13 @@
                 const dmT = (replyTarget && channel && channel !== "Private")
                     ? _resolveDmTarget(sender) : null;
                 const dmBtn = dmT
-                    ? `<button class="msg-reply-btn msg-dm-btn" onclick="_replyPrivate(event,'${replyTarget}')" title="${dmT.kind === "heard" ? "Add " + replyTarget + " to contacts and reply privately" : "Reply privately to " + replyTarget}"><i class="fa-solid fa-lock"></i> DM</button>`
+                    ? `<button class="msg-reply-btn msg-dm-btn" data-reply-target="${escHtml(replyTarget)}" title="${dmT.kind === "heard" ? "Add " + escHtml(replyTarget) + " to contacts and reply privately" : "Reply privately to " + escHtml(replyTarget)}"><i class="fa-solid fa-lock"></i> DM</button>`
                     : "";
                 const timeLabel = isPending ? "sending…" : escHtml(time);
                 // The sender's RTC was wrong, so this is the time WE received
                 // the message, not when it was actually sent.
                 const tsWrongTip = "Sender's clock was wrong — showing the time we received this message, not the sender's reported time.";
-                const timeCls = (!isPending && tsWrong) ? "msg-time clock-wrong" : "msg-time";
+                const timeCls = "msg-time";
                 const timeAttr = (!isPending && tsWrong) ? ` title="${escHtml(tsWrongTip)}"` : "";
                 const tsWrongIcon = (!isPending && tsWrong)
                     ? ` <i class="fa-solid fa-triangle-exclamation" title="${escHtml(tsWrongTip)}"></i>`
@@ -3175,7 +3529,7 @@
           <span class="row-status ${online ? "online" : "offline"}" title="${online ? "Online" : "Offline"}"></span>
           <div class="${nameCls}">${favHtml}${mapInline}${escHtml(name)}${directHtml}</div>
           <div class="row-type">${escHtml(typeLabel)}</div>
-          <div class="row-meta${_skew.wrong ? " clock-wrong" : ""}"${_skew.wrong ? ` title="${escHtml(_skew.tip)}"` : ""}>${escHtml(lastSeen || "—")}</div>
+          <div class="row-meta">${escHtml(lastSeen || "—")}${_skew.wrong ? `<i class="fa-solid fa-triangle-exclamation clock-warn" title="${escHtml(_skew.tip).replace(/\n/g, "&#10;")}"></i>` : ""}</div>
           <div class="row-snr">${snr ? escHtml(snr) + " dB" : "—"}</div>
           <div class="row-hops">${hops !== "" ? hops + " hops" : "—"}</div>
           <button class="row-remove" title="${_hpk ? "Delete from heard list" : "Remove contact"}" data-node="${escHtml(name)}"><i class="fa-solid fa-trash"></i></button>
@@ -3320,7 +3674,6 @@
         // Phase 2 (live):    fetch the Domoticz API and patch values in-place.
 
         let _initialRenderDone = false;
-        let _deviceMapFreshFromInit = false;
 
         async function initialRender() {
             if (!_deviceMap) return;   // nothing to show yet
@@ -3369,15 +3722,8 @@
             if (!_initialRenderDone)
                 document.getElementById("status-msg").textContent = "Refreshing…";
             try {
-                // Reload the device map so new nodes / renamed slots are picked up.
-                // Skip on the very first call — it was already loaded fresh during init.
-                if (_deviceMapFreshFromInit) {
-                    _deviceMapFreshFromInit = false;
-                } else {
-                    await _loadDeviceMap();
-                }
-
-                // Phase 1: if we haven't shown anything yet, render from snapshot immediately
+                // Phase 1: if we haven't shown anything yet, render from snapshot immediately.
+                // (Device map is populated by the WS reducer, not fetched here.)
                 if (!_initialRenderDone) await initialRender();
 
                 // Phase 2: fetch live data and patch
@@ -3515,7 +3861,8 @@
                     }
                     return;
                 }
-                // Don't hijack clicks on metric links
+                // Don't hijack clicks on card action buttons or metric links
+                if (ev.target.closest(".card-action-btn")) return;
                 if (ev.target.closest("a")) return;
                 const el = ev.target.closest(".node-card, .contact-row");
                 if (!el) return;
@@ -3597,8 +3944,7 @@
                     _includeHeard = !_includeHeard;
                     try { localStorage.setItem(LS_INCLUDE_HEARD, _includeHeard ? "1" : "0"); } catch (_) {}
                     btnHeard.classList.toggle("active", _includeHeard);
-                    if (_includeHeard) _loadHeard().then(_rerenderContacts);
-                    else _rerenderContacts();
+                    _rerenderContacts();
                 });
             }
         }
@@ -3650,19 +3996,12 @@
             const names = [..._selectedContacts];
             if (!names.length) return;
             if (!confirm(`Remove ${names.length} contact${names.length === 1 ? "" : "s"} from the device?\n\n${names.join(", ")}\n\nThis cannot be undone.`)) return;
-            const sendIdx = _deviceMap && _deviceMap.send_idx;
-            if (!sendIdx) { alert("Cannot remove: Mesh Send device not found."); return; }
-            // Sequential, with a brief delay so the plugin can finish each !remove
-            // cycle before the next overwrites the Mesh Send device value.
             let failures = [];
             for (const name of names) {
                 try {
-                    const url = `/json.htm?type=command&param=udevice&idx=${sendIdx}&nvalue=0&svalue=${encodeURIComponent("!remove " + name)}`;
-                    const r = await fetch(url, { method: "GET" });
-                    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+                    await _pluginWS.sendCmdAndWait(`!remove ${name}`);
                     if (_deviceMap && _deviceMap.nodes) delete _deviceMap.nodes[name];
                     _selectedContacts.delete(name);
-                    await new Promise(res => setTimeout(res, 250));
                 } catch (err) {
                     failures.push(`${name}: ${err.message}`);
                 }
@@ -3893,7 +4232,7 @@
         // ── Generic RX-log side-panel views ─────────────────────────────────
         // The map panel side-drawer is reused for all of these: firehose,
         // traffic, channels, heatmap. We track which view is open so the
-        // 3s _loadRxLog interval can re-render only the active one.
+        // rxlog push reducer can re-render only the active one.
         let _sidePanelView = null;  // null | 'firehose' | 'traffic' | 'channels' | 'stats' | 'msg'
 
         function _openSidePanel(view) {
@@ -3911,16 +4250,32 @@
             if (footer) footer.style.display = (view === "map" || view === "topology") ? "" : "none";
             // Mark toolbar button active
             document.querySelectorAll(".rx-tool-btn").forEach(b => b.classList.remove("active"));
+            // Manage rxlog subscription ref-count: unregister the panel being
+            // replaced, then register the new one.  Each helper manages the
+            // _rxLogOpenPanels set and only sends a wire command at the 0↔1
+            // boundary, so non-heavy panels (map, topology, heard, self, contact)
+            // are no-ops.  Switching between two heavy panels sends sub-none then
+            // sub-rxlog, which also requests a fresh full window — acceptable cost.
+            const _prevView = _sidePanelView;
+            _rxLogPanelClose(_prevView);
             _sidePanelView = view;
-            // Kick a fresh fetch so the panel shows live data immediately instead
-            // of waiting for the next 3 s interval tick.
-            _loadRxLog().then(() => {
-                if (view === "firehose") _renderFirehoseIfOpen();
-                if (view === "traffic")  _renderTrafficIfOpen();
-                if (view === "channels") _renderChannelsIfOpen();
-                if (view === "stats")    _renderStatsPanel();
-            });
-            if (view === "heard") _loadHeard().then(_renderHeardIfOpen);
+            _rxLogPanelOpen(view);
+            // Mark the panel open BEFORE dispatching the per-view render.
+            // The render helpers gate on _isOpen(view), which requires the
+            // "open" class; with the migration the renders are synchronous
+            // (no async fetch to defer them), so the class must be set first
+            // or the first render is skipped and the panel shows empty.
+            panel.classList.add("open");
+            backdrop.classList.add("open");
+            panel.setAttribute("aria-hidden", "false");
+            // Render from the in-memory _rxLog buffer (fed by WebSocket push).
+            // No fetch needed — the plugin pushes the latest window on subscribe
+            // and sends deltas on the write cadence.
+            if (view === "firehose") _renderFirehoseIfOpen();
+            if (view === "traffic")  _renderTrafficIfOpen();
+            if (view === "channels") _renderChannelsIfOpen();
+            if (view === "stats")    _renderStatsPanel();
+            if (view === "heard") _renderHeardIfOpen();
             if (view === "firehose") {
                 title.textContent  = "RF firehose";
                 coords.textContent = "Every RX_LOG_DATA frame, live";
@@ -3976,7 +4331,7 @@
                 title.textContent  = "Statistics";
                 coords.textContent = "Lifetime totals & leaderboards";
                 body.innerHTML = `<div class="panel-view" id="stats-view"></div>`;
-                _loadStats().then(_renderStatsPanel);
+                _renderStatsPanel();
             } else if (view === "self") {
                 title.textContent  = "Connected node";
                 coords.textContent = "Identity, radio, advert, telemetry";
@@ -3989,9 +4344,6 @@
                 body.innerHTML = `<div class="panel-view" id="contact-view" data-node="${escHtml(name)}"></div>`;
                 _renderContactPanel(name);
             }
-            panel.classList.add("open");
-            backdrop.classList.add("open");
-            panel.setAttribute("aria-hidden", "false");
         }
 
         // Track which view is currently in the panel so renderers can no-op
@@ -4223,8 +4575,6 @@
         }
 
         async function _addChannelSlot(slot) {
-            const sendIdx = _deviceMap && _deviceMap.send_idx;
-            if (!sendIdx) { alert("Cannot add: Mesh Send device not found."); return; }
             const name = prompt(
                 `Add channel to slot ${slot}.\n\n` +
                 `Enter the channel name (e.g. "#mc-radar" or "#nl").\n\n` +
@@ -4235,11 +4585,8 @@
                 `  MyPrivateRoom 0123456789abcdef0123456789abcdef`, ""
             );
             if (!name) return;
-            const cmd = `!set_channel ${slot} ${name}`;
             try {
-                const url = `/json.htm?type=command&param=udevice&idx=${sendIdx}&nvalue=0&svalue=${encodeURIComponent(cmd)}`;
-                const r = await fetch(url, { method: "GET" });
-                if (!r.ok) throw new Error(`HTTP ${r.status}`);
+                await _pluginWS.sendCmdAndWait(`!set_channel ${slot} ${name}`);
                 await _refreshChannelsAndCompose();
                 _renderChannelsIfOpen();
             } catch (err) {
@@ -4249,12 +4596,8 @@
 
         async function _clearChannelSlot(slot, btn) {
             if (!confirm(`Wipe channel slot ${slot}?\n\nYou can re-add the channel later by name.`)) return;
-            const sendIdx = _deviceMap && _deviceMap.send_idx;
-            if (!sendIdx) { alert("Cannot clear: Mesh Send device not found."); return; }
             try {
-                const url = `/json.htm?type=command&param=udevice&idx=${sendIdx}&nvalue=0&svalue=${encodeURIComponent("!clear_channel " + slot)}`;
-                const r = await fetch(url, { method: "GET" });
-                if (!r.ok) throw new Error(`HTTP ${r.status}`);
+                await _pluginWS.sendCmdAndWait(`!clear_channel ${slot}`);
                 await _refreshChannelsAndCompose();
                 _renderChannelsIfOpen();
             } catch (err) {
@@ -4262,15 +4605,15 @@
             }
         }
 
-        // After a channel slot is added/removed, reload everything that
-        // depends on the channel name table: the device map (which holds the
-        // slot list), meshcore_channels.json (which feeds the compose-bar
-        // channel dropdown) AND the inbox channel-filter chip row above the
-        // inbox (so a freshly-added channel appears as a filter immediately).
-        async function _refreshChannelsAndCompose() {
-            await Promise.all([_loadDeviceMap(), _loadChannelNames()]);
+        // After a channel slot is added/removed, the plugin will push a fresh
+        // t:'channels' and t:'devices' message; the reducer re-populates compose
+        // targets and channel chips automatically.  This helper does the immediate
+        // UI refresh from in-memory state so the panel reacts without waiting for
+        // the next push cycle.
+        function _refreshChannelsAndCompose() {
             _populateComposeTargets();
             try { _renderChannelChips(_allChannelChips()); } catch (_) { /* before inbox render */ }
+            return Promise.resolve();
         }
 
         // Heard-nodes panel. Backed by the plugin's persistent
@@ -4382,9 +4725,9 @@
                     if (h.node_ts && h.last_heard
                         && Math.abs(h.node_ts - h.last_heard) > CLOCK_WRONG_TOLERANCE_S) {
                         skewWrong = true;
-                        skewTip = `Node clock looks wrong (off by >1h).  `
-                                + `Node-reported advert time: ${new Date(h.node_ts * 1000).toLocaleString()}  |  `
-                                + `We last heard it: ${new Date(h.last_heard * 1000).toLocaleString()}`;
+                        skewTip = `Node clock looks wrong (off by >1h).\n`
+                                + `Received: ${new Date(h.last_heard * 1000).toLocaleString()}\n`
+                                + `Node reported: ${new Date(h.node_ts * 1000).toLocaleString()}`;
                     }
                     const hasLoc = !!(h.lat || h.lon);
                     const gpsBtn = hasLoc
@@ -4405,7 +4748,7 @@
                             <span class="heard-chip">${escHtml(sig)} dB/dBm</span>
                         </div>
                         <div class="heard-pk" title="${escHtml(pk)}">${escHtml(pk)}</div>
-                        <div class="heard-extra${skewWrong ? " clock-wrong" : ""}"><span title="${skewWrong ? escHtml(skewTip) : "Last heard at"}">${escHtml(t)}</span></div>
+                        <div class="heard-extra"><span title="Last heard at">${escHtml(t)}</span>${skewWrong ? `<i class="fa-solid fa-triangle-exclamation clock-warn" title="${escHtml(skewTip).replace(/\n/g, "&#10;")}"></i>` : ""}</div>
                     </div>`;
                 }).join("") + `</div>`;
 
@@ -4436,11 +4779,8 @@
             _renderHeardIfOpen();
             if (_includeHeard) _rerenderContacts();
             await _sendDeviceCmd(`!heard_add ${pk}`);
-            // Refresh contacts/map shortly so the new contact card shows up.
-            setTimeout(() => {
-                _loadDeviceMap();
-                _loadHeard().then(() => { _renderHeardIfOpen(); _rerenderContacts(); });
-            }, 2500);
+            // The plugin will push t:'devices' and t:'heard' shortly; the reducer
+            // will re-render automatically.  No explicit fetch needed.
         }
 
         async function _heardDelete(pk) {
@@ -4680,12 +5020,9 @@
         }
 
         async function _sendDeviceCmd(cmd) {
-            const sendIdx = _deviceMap && _deviceMap.send_idx;
-            if (!sendIdx) { alert("Mesh Send device not found."); return false; }
-            const url = `/json.htm?type=command&param=udevice&idx=${sendIdx}&nvalue=0&svalue=${encodeURIComponent(cmd)}`;
             try {
-                const r = await fetch(url, { method: "GET" });
-                return r.ok;
+                await _pluginWS.sendCmdAndWait(cmd);
+                return true;
             } catch (_) { return false; }
         }
 
@@ -4925,13 +5262,11 @@ Larger = more reliable routing but smaller mesh diameter.">Path hash size</label
             const orig = btn ? btn.innerHTML : null;
             if (btn) { btn.disabled = true; btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i>'; }
             await _sendDeviceCmd(cmd);
-            // The plugin updates the device map after a successful set; give
-            // it a moment, then reload + re-render so the user sees the new
-            // values (and a repeat click won't double-fire).
-            setTimeout(async () => {
-                await _loadDeviceMap();
-                _renderSelfPanel();
-            }, 800);
+            // Re-render the panel after a short delay so the spinner button
+            // is replaced and a repeat click won't double-fire.  The panel
+            // reflects the plugin's updated device map when the next `devices`
+            // push arrives (~1-2 s).
+            setTimeout(_renderSelfPanel, 800);
             // The re-render replaces the button DOM, but if it failed early
             // (no device map yet) we still restore the original state.
             if (btn) {
@@ -5046,20 +5381,28 @@ Larger = more reliable routing but smaller mesh diameter.">Path hash size</label
                 // transceiver and can briefly drop the local link. Doing TX
                 // power / path hash / flood scope ahead means we're not
                 // racing against a re-tune. Radio goes last.
-                // Space the writes apart: each !-command is delivered via the
-                // Mesh Send device's sValue. Domoticz only stores the latest
-                // sValue, and the plugin's onDeviceModified reads it at
-                // callback time. If we write four values back-to-back, all
-                // callbacks see the *last* value and the dedup drops the
-                // earlier commands. A short delay between writes ensures each
-                // sValue is observed before the next overwrites it.
-                const _step = (cmd) => new Promise(r =>
-                    setTimeout(async () => { await _sendDeviceCmd(cmd); r(); }, PRESET_STEP_MS));
-                if (p.flood_scope !== undefined) await _step(`!flood_scope ${p.flood_scope}`);
-                if (p.path_hash_mode)            await _step(`!set_path_hash_mode ${p.path_hash_mode}`);
-                if (p.tx_power)                  await _step(`!set_tx_power ${p.tx_power}`);
-                await _step(`!set_radio ${p.freq} ${p.bw} ${p.sf} ${p.cr}`);
-                setTimeout(async () => { await _loadDeviceMap(); _renderSelfPanel(); }, PRESET_REFRESH_MS);
+                // Space the writes apart so the plugin can process each
+                // command before the next one arrives. The WebSocket channel
+                // delivers each command individually, but a short gap between
+                // commands avoids overwhelming the plugin's command lock.
+                // Each _step rejects on failure so the sequence aborts immediately.
+                const _step = (cmd) => new Promise((resolve, reject) =>
+                    setTimeout(async () => {
+                        const ok = await _sendDeviceCmd(cmd);
+                        if (ok) { resolve(); }
+                        else { reject(new Error(cmd)); }
+                    }, PRESET_STEP_MS));
+                try {
+                    if (p.flood_scope !== undefined) await _step(`!flood_scope ${p.flood_scope}`);
+                    if (p.path_hash_mode)            await _step(`!set_path_hash_mode ${p.path_hash_mode}`);
+                    if (p.tx_power)                  await _step(`!set_tx_power ${p.tx_power}`);
+                    await _step(`!set_radio ${p.freq} ${p.bw} ${p.sf} ${p.cr}`);
+                } catch (err) {
+                    alert(`Preset aborted: ${err.message} failed — radio may be partially configured`);
+                    return;
+                }
+                // Self panel refreshes automatically when the plugin pushes
+                // the next `devices` message (handled by _onDeviceMapUpdated).
                 return;
             }
             if (action === "delete-preset") {
@@ -5169,10 +5512,22 @@ Larger = more reliable routing but smaller mesh diameter.">Path hash size</label
                 <pre style="font-size:0.72rem;white-space:pre-wrap;word-break:break-all;color:var(--text);background:var(--bg);padding:6px;border-radius:4px">${escHtml(JSON.stringify(query.neighbours.data, null, 2))}</pre>
             ` : "";
 
+            // Last-heard: prefer heard-nodes entry (unix seconds), fall back to last_seen slot.
+            const _nodePk = node.pubkey || "";
+            const _heardEntry = _nodePk && (_heard && _heard.nodes) && (_heard.nodes[_nodePk] || null);
+            let _lastHeardStr = "—";
+            if (_heardEntry && _heardEntry.last_heard) {
+                _lastHeardStr = new Date(_heardEntry.last_heard * 1000).toLocaleString();
+            } else {
+                const _lsRaw = node.last_seen ? _slotValue(node.last_seen) : "";
+                if (_lsRaw) _lastHeardStr = _lsRaw;
+            }
+
             view.innerHTML = `
                 <div class="self-section">Contact info</div>
                 <div class="self-row"><label>Name</label><span class="self-value">${escHtml(name)}</span></div>
                 <div class="self-row"><label>Type</label><span class="self-value">${escHtml(({1:"Contact",2:"Repeater",3:"Room Server",4:"Sensor"})[node.type] || node.type || "?")}</span></div>
+                <div class="self-row"><label><i class="fa-regular fa-clock"></i> Last heard</label><span class="self-value">${escHtml(_lastHeardStr)}</span></div>
                 <div class="self-row"><label><i class="fa-solid fa-tower-broadcast"></i> Hops</label><span class="self-value">${escHtml(hops)}</span></div>
                 <div class="self-row"><label><i class="fa-solid fa-signal"></i> SNR</label><span class="self-value">${escHtml(snr)} dB</span></div>
                 ${rssiV ? `<div class="self-row"><label><i class="fa-solid fa-wifi"></i> RSSI</label><span class="self-value">${escHtml(rssiV)} dBm</span></div>` : ""}
@@ -5280,12 +5635,9 @@ Larger = more reliable routing but smaller mesh diameter.">Path hash size</label
                         else if (action === "req-status") await _sendDeviceCmd(`!req_status ${name}`);
                         else if (action === "req-telemetry") await _sendDeviceCmd(`!req_telemetry ${name}`);
                         else if (action === "req-neighbours") await _sendDeviceCmd(`!req_neighbours ${name}`);
-                        // Reload device map so query result appears in the panel
-                        // (plugin writes it on receipt)
-                        setTimeout(async () => {
-                            await _loadDeviceMap();
-                            _renderContactPanel(name);
-                        }, 1500);
+                        // Re-render the panel once the plugin has processed the
+                        // command and pushed an updated device map (~1-2 s).
+                        setTimeout(() => _renderContactPanel(name), 1500);
                     } finally {
                         btn.disabled = false;
                         btn.innerHTML = orig;
@@ -5362,7 +5714,7 @@ Larger = more reliable routing but smaller mesh diameter.">Path hash size</label
         // Card action buttons (self gear, contact info)
         document.addEventListener("click", (ev) => {
             const btn = ev.target.closest(".card-action-btn");
-            if (!btn) return;
+            if (!btn || btn.disabled) return;
             ev.preventDefault();
             ev.stopPropagation();
             const action = btn.dataset.action;
@@ -5449,6 +5801,8 @@ Larger = more reliable routing but smaller mesh diameter.">Path hash size</label
             panel.classList.remove("open");
             backdrop.classList.remove("open");
             panel.setAttribute("aria-hidden", "true");
+            // Release rxlog subscription if a heavy panel was open.
+            _rxLogPanelClose(_sidePanelView);
             _sidePanelView = null;
         }
 
@@ -5507,15 +5861,11 @@ Larger = more reliable routing but smaller mesh diameter.">Path hash size</label
 
         async function _toggleFavorite(name) {
             if (!name) return;
-            const sendIdx = _deviceMap && _deviceMap.send_idx;
-            if (!sendIdx) { alert("Cannot toggle favorite: Mesh Send device not found."); return; }
             const wasFav = _isFavorite(name);
             const action = wasFav ? "remove" : "add";
             const cmd = `!favorite ${action} ${name}`;
             try {
-                const url = `/json.htm?type=command&param=udevice&idx=${sendIdx}&nvalue=0&svalue=${encodeURIComponent(cmd)}`;
-                const r = await fetch(url, { method: "GET" });
-                if (!r.ok) throw new Error(`HTTP ${r.status}`);
+                await _pluginWS.sendCmdAndWait(cmd);
                 // Optimistic update of local cache so the UI reflects it immediately
                 if (_deviceMap) {
                     const arr = Array.isArray(_deviceMap.favorites) ? _deviceMap.favorites.slice() : [];
@@ -5530,16 +5880,12 @@ Larger = more reliable routing but smaller mesh diameter.">Path hash size</label
             }
         }
 
-        // Remove a contact: send "!remove <name>" via the Mesh Send device.
+        // Remove a contact: send "!remove <name>" via the WebSocket channel.
         async function _removeContact(name) {
             if (!name) return;
             if (!confirm(`Remove contact "${name}" from the device?\n\nThis cannot be undone.`)) return;
-            const sendIdx = _deviceMap && _deviceMap.send_idx;
-            if (!sendIdx) { alert("Cannot remove: Mesh Send device not found."); return; }
             try {
-                const url = `/json.htm?type=command&param=udevice&idx=${sendIdx}&nvalue=0&svalue=${encodeURIComponent("!remove " + name)}`;
-                const r = await fetch(url, { method: "GET" });
-                if (!r.ok) throw new Error(`HTTP ${r.status}`);
+                await _pluginWS.sendCmdAndWait(`!remove ${name}`);
                 // Optimistic: drop from local map so it disappears immediately
                 if (_deviceMap && _deviceMap.nodes) delete _deviceMap.nodes[name];
                 _rerenderContacts();
@@ -5548,46 +5894,94 @@ Larger = more reliable routing but smaller mesh diameter.">Path hash size</label
             }
         }
 
-        // Init: load JSON files, render snapshot instantly, then start live refresh loop.
-        Promise.all([_loadChannelNames(), _loadDeviceMap(), _loadRxLog(), _loadHeard(), _loadStats()]).then(async () => {
-            _deviceMapFreshFromInit = true;
-            _populateComposeTargets();
-            await initialRender();   // instant — no API call
-            _initContactClickToCompose();
-            const _ce = document.getElementById("conv-banner-exit");
-            if (_ce) _ce.onclick = _exitConversation;
-            const _cc = document.getElementById("conv-banner-chan");
-            if (_cc) {
-                _cc.classList.toggle("active", _convInclChan);
-                _cc.onclick = () => {
-                    _convInclChan = !_convInclChan;
-                    localStorage.setItem("meshcore.convInclChan", _convInclChan ? "1" : "0");
+        // ── Init ─────────────────────────────────────────────────────────────────────
+        // State is delivered by the plugin via WebSocket push (snapshot message).
+        // _onSnapshotReady() is called by the reducer on the first snapshot AND on
+        // every reconnect snapshot.  The full state reset below is intentional on
+        // reconnect: the plugin re-sends a fresh snapshot so any stale UI is replaced.
+        let _initDone = false;
+
+        async function _onSnapshotReady() {
+            if (!_initDone) {
+                // One-time setup: wire up UI callbacks and start the RX log interval.
+                // _initDone is intentionally never reset on reconnect so this block
+                // runs exactly once — prevents duplicate/leaked rx-log intervals.
+                _initDone = true;
+
+                _initContactClickToCompose();
+                const _ce = document.getElementById("conv-banner-exit");
+                if (_ce) _ce.onclick = _exitConversation;
+                const _cc = document.getElementById("conv-banner-chan");
+                if (_cc) {
                     _cc.classList.toggle("active", _convInclChan);
-                    if (_convNode) {
-                        _convLastUpdate = null;          // force a re-fetch
-                        _lastRenderedInboxHtml = "";
-                        loadConversation(_convNode);
-                    }
-                };
+                    _cc.onclick = () => {
+                        _convInclChan = !_convInclChan;
+                        localStorage.setItem("meshcore.convInclChan", _convInclChan ? "1" : "0");
+                        _cc.classList.toggle("active", _convInclChan);
+                        if (_convNode) {
+                            _convLastUpdate = null;
+                            _lastRenderedInboxHtml = "";
+                            loadConversation(_convNode);
+                        }
+                    };
+                }
+
+                // F3: no unconditional subscription here — rxlog is subscribed
+                // on demand when a heavy panel opens (firehose/traffic/channels/stats).
+            } else {
+                // Reconnect path: show a lightweight placeholder in the inbox/
+                // conversation area so the user sees "Reconnecting…" rather than
+                // stale messages during the brief window before initialRender()
+                // replaces the content with fresh snapshot data.
+                const _inboxContainer = document.getElementById("inbox-history");
+                if (_inboxContainer) {
+                    _inboxHistory.length = 0;
+                    _lastRenderedInboxHtml = "";
+                    _inboxLastWsValue = "";
+                    _inboxContainer.innerHTML = `<div id="inbox-empty">Reconnecting…</div>`;
+                }
+                // If a conversation was open, exit it cleanly so the banner
+                // doesn't reference a node whose data may have changed.
+                if (_convNode) {
+                    _convNode = null;
+                    const banner = document.getElementById("conv-banner");
+                    if (banner) banner.style.display = "none";
+                }
+                // F3 reconnect: reset seq and clear the entry buffer so a stale
+                // delta cannot corrupt the new window.  Then re-subscribe only if
+                // a heavy panel is currently open — otherwise leave unsubscribed.
+                _rxLogSeq = -1;
+                _rxLog.entries = [];
+                if (_rxLogOpenPanels.size > 0) _rxLogSubscribe();
+                // F7 reconnect: reset device-map delta seq so a stale
+                // devices_delta cannot corrupt the new snapshot baseline.
+                _deviceSeq = -1;
             }
-            loadData();              // kick off first live refresh immediately
-            setInterval(loadData, 10000);
-            // Faster cadence for the RX log: drives the firehose / sparklines /
-            // packet stats. 3s feels live without thrashing the disk.
-            setInterval(() => {
-                _loadRxLog().then(() => {
-                    if (!_rxLogFirehosePaused) _renderFirehoseIfOpen();
-                    _renderTrafficIfOpen();
-                    _renderChannelsIfOpen();
-                    _refreshCardSparklines();
-                });
-                if (_isOpen("heard")) _loadHeard().then(_renderHeardIfOpen);
-            }, 3000);
-            // Stats: refresh the header strip + (if open) the stats panel.
-            setInterval(() => {
-                _loadStats().then(() => { if (_isOpen("stats")) _renderStatsPanel(); });
-            }, 15000);
-        });
+
+            // Render from the newly-arrived snapshot (runs on every reconnect too,
+            // clearing any stale UI from the previous session).
+            _initialRenderDone = false;   // force re-render from fresh snapshot
+            _lastLiveSlotsOf   = null;    // discard stale live-slot resolver
+            _lastRemoteNodes   = [];
+            _populateComposeTargets();
+            try { _renderChannelChips(_allChannelChips()); } catch (_) {}
+            await initialRender();        // instant — no API call
+            // Seed _inboxLastWsValue from the snapshot so a reconnect where the
+            // last message hasn't changed does not re-prepend it as a delta.
+            // The snapshot/initialRender path already rendered that entry via
+            // _inboxHistory; seeding here only suppresses a redundant delta
+            // prepend — a genuinely new message will have a different value.
+            if (_deviceMap && _deviceMap.inbox_value) {
+                _inboxLastWsValue = _deviceMap.inbox_value;
+            }
+            _renderHeaderStats();
+            try { if (_isOpen('stats')) _renderStatsPanel(); } catch (_) {}
+            try { _renderHeardIfOpen(); } catch (_) {}
+            try { if (_includeHeard) _rerenderContacts(); } catch (_) {}
+            try { _renderChannelsIfOpen(); } catch (_) {}
+            // Kick fetchDevices() so live Domoticz device values are patched in.
+            loadData();
+        }
 
         // ── Compose bar ───────────────────────────────────────────────────────────
 
@@ -5674,32 +6068,18 @@ Larger = more reliable routing but smaller mesh diameter.">Path hash size</label
             // Build the value string the plugin expects: "target: body", "#name: body", or "#idx: body"
             const sendValue = `${target}: ${body}`;
 
-            // Look up the Mesh Send device idx from the device map
-            const sendIdx = _deviceMap && _deviceMap.send_idx;
-            if (!sendIdx) {
-                _setComposeStatus(status, "err", "Send device not found");
-                return;
-            }
-
             btn.disabled = true;
             _setComposeStatus(status, "", "⏳");
 
             try {
-                const resp = await fetch(
-                    `/json.htm?type=command&param=udevice&idx=${sendIdx}&nvalue=0&svalue=${encodeURIComponent(sendValue)}`
-                );
-                const data = await resp.json();
-                if (data.status === "OK") {
-                    input.value = "";
-                    _updateCharCounter(0);
-                    _clearReply();
-                    _setComposeStatus(status, "ok", "✓ Sent");
-                    // Optimistic inbox echo so the user doesn't wait for the next
-                    // plugin heartbeat (~30s) to see their own message appear.
-                    _addPendingInboxEcho(target, body);
-                } else {
-                    _setComposeStatus(status, "err", data.message || "Error");
-                }
+                await _pluginWS.sendCmdAndWait(sendValue);
+                input.value = "";
+                _updateCharCounter(0);
+                _clearReply();
+                _setComposeStatus(status, "ok", "✓ Sent");
+                // Optimistic inbox echo so the user doesn't wait for the next
+                // plugin heartbeat (~30s) to see their own message appear.
+                _addPendingInboxEcho(target, body);
             } catch (e) {
                 _setComposeStatus(status, "err", e.message);
             } finally {
@@ -5926,6 +6306,24 @@ Larger = more reliable routing but smaller mesh diameter.">Path hash size</label
         });
         }
 
+        // Delegated listener for reply/DM buttons (data-* approach — no untrusted JS interpolation)
+        if (!window._mcReplyListenerAdded) {
+            window._mcReplyListenerAdded = true;
+            document.addEventListener("click", (ev) => {
+                const btn = ev.target.closest(".msg-reply-btn");
+                if (!btn) return;
+                ev.stopPropagation();
+                const target = btn.dataset.replyTarget || "";
+                const synth = { stopPropagation() {}, currentTarget: btn };
+                if (btn.classList.contains("msg-dm-btn")) {
+                    _replyPrivate(synth, target);
+                } else {
+                    const ch = btn.dataset.replyChannel || "";
+                    _replyTo(synth, target, ch);
+                }
+            });
+        }
+
         function _clearReply() {
             // Remove any @[Username] prefix from the input
             const input = document.getElementById("compose-input");
@@ -6006,7 +6404,6 @@ Larger = more reliable routing but smaller mesh diameter.">Path hash size</label
                 if (btn) { btn.disabled = true; btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i>'; }
                 try {
                     await _sendDeviceCmd(`!heard_add ${t.pubkey}`);
-                    await _loadDeviceMap();
                 } catch (_) {
                     if (btn) { btn.disabled = false; btn.innerHTML = orig; }
                     alert("Could not add " + sender + " to contacts — try again.");
