@@ -2165,10 +2165,20 @@
             // without waiting for the next manual refresh or loadData() call.
             // Only when the history is already loaded (so we don't duplicate
             // entries that loadInboxHistory() will fetch from the API log).
-            if (_inboxLoaded && !_convNode && _deviceMap && _deviceMap.inbox_value) {
+            if (_inboxLoaded && _deviceMap && _deviceMap.inbox_value) {
                 const val = _deviceMap.inbox_value;
                 if (val !== _inboxLastWsValue) {
                     _inboxLastWsValue = val;
+                    if (_convNode) {
+                        // A conversation is pinned to a contact's stored DM
+                        // log. There is no polling loop anymore, so refresh it
+                        // here from the per-contact Messages device when a new
+                        // message arrives — otherwise an incoming private
+                        // reply (or channel post) would not appear until a
+                        // manual refresh. No byIdx → always re-fetches.
+                        loadConversation(_convNode);
+                        return;
+                    }
                     const p = _parseInboxData(val);
                     const container = document.getElementById("inbox-history");
                     if (container && p.text) {
