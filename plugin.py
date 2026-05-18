@@ -1,12 +1,28 @@
 """
-<plugin key="MeshCore" name="MeshCore" author="galadril" version="0.0.1" wikilink="" externallink="https://github.com/galadril/Domoticz-MeshCore-Plugin">
+<plugin key="MeshCore" name="MeshCore" author="galadril, GizMoCuz" version="1.0.3" wikilink="" externallink="https://github.com/galadril/Domoticz-MeshCore-Plugin">
     <description>
         MeshCore LoRa mesh integration for Domoticz.
         Requires: pip install -r requirements.txt
     </description>
     <params>
-        <param field="Address"  label="MeshCore Host"               width="200px" required="true" default="192.168.1.50"/>
-        <param field="Port"     label="MeshCore Port"               width="80px"  required="true" default="5000"/>
+        <param field="Mode1" label="Transport" width="120px">
+            <options>
+                <option label="TCP"    value="TCP" default="true"/>
+                <option label="Serial" value="Serial"/>
+            </options>
+        </param>
+        <param field="Address"    label="MeshCore Host" width="200px" default="192.168.1.50" visible_when="Mode1=TCP"/>
+        <param field="Port"       label="MeshCore Port" width="80px"  default="5000"         visible_when="Mode1=TCP"/>
+        <param field="SerialPort" label="Serial Port"   width="200px"                        visible_when="Mode1=Serial"/>
+        <param field="Mode2"      label="Baud Rate"     width="100px"                        visible_when="Mode1=Serial">
+            <options>
+                <option label="115200" value="115200" default="true"/>
+                <option label="57600"  value="57600"/>
+                <option label="38400"  value="38400"/>
+                <option label="19200"  value="19200"/>
+                <option label="9600"   value="9600"/>
+            </options>
+        </param>
         <param field="Mode4"    label="Install Custom Dashboard" width="150px">
             <options>
                 <option label="Yes" value="true" default="true"/>
@@ -24,11 +40,17 @@
 </plugin>
 """
 
-import Domoticz
+import DomoticzEx as Domoticz
 import asyncio
+import collections
+import copy
+import gc
 import json
 import os
 import queue
+import re
+import shutil
+import sqlite3
 import threading
 import time
 import traceback
@@ -40,32 +62,57 @@ try:
 except ImportError:
     MESHCORE_AVAILABLE = False
 
-# ── Device unit scheme ────────────────────────────────────────────────────────
-# Units 1-9: global devices
-# Units 10+: NODE_SLOTS slots per node (index 0 = self node, 1..N = tracked nodes)
+# ── Device scheme (DomoticzEx) ────────────────────────────────────────────────
+# DomoticzEx keys devices by a string DeviceID; each DeviceID carries a Units
+# dict. There is no 255-unit-per-plugin cap, so the old slot-block math is gone.
+#
+#   DeviceID = MESH_DID ("mesh")  → global devices, Unit = UNIT_* below
+#   DeviceID = "self"             → the connected node, Unit = OFF_* below
+#   DeviceID = <pubkey[:12]>      → a remote contact,  Unit = OFF_* below
+#
+# Units must be >= 1 in DomoticzEx, so OFF_* are 1-based.
+MESH_DID = "mesh"
+SELF_DID = "self"
+
 UNIT_INBOX      = 1
-UNIT_SEND       = 2   # Text device: write "[node: ]message" here to send
+UNIT_SEND       = 2   # Deprecated send device (superseded by WebSocket channel); kept for stale-cleanup only
 UNIT_MSGS_RECV  = 3   # Custom counter: messages received today
 UNIT_MSGS_SENT_ = 4   # Custom counter: messages sent today
 
-NODE_BASE  = 10
-NODE_SLOTS = 20   # device slots reserved per node (max 11 nodes → unit 219)
+# MeshCore firmware exposes up to 40 channel slots. Domoticz devices are NOT
+# created per slot — they live entirely in the dashboard JSON map.
+MAX_CHANNEL_SLOTS = 40
 
-# Offsets within each node's slot block
-OFF_STATUS    = 0   # Switch:      online / offline
-OFF_BATT_PCT  = 1   # Percentage:  battery %
-OFF_BATT_V    = 2   # Custom (V):  battery voltage
-OFF_RSSI      = 3   # Custom (dBm): last RSSI
-OFF_SNR       = 4   # Custom (dB):  last SNR
-OFF_NOISE     = 5   # Custom (dBm): noise floor
-OFF_LASTSEEN  = 6   # Text:        timestamp of last received message/advert
-OFF_TEMP      = 7   # Temperature: °C
-OFF_HUMID     = 8   # Humidity:    %
-OFF_HOPS      = 9   # Custom:      path length (hops)
-OFF_UPTIME    = 10  # Custom (min): node uptime
-OFF_AIRTIME   = 11  # Custom (%):  TX airtime utilization
-OFF_MSGS_SENT = 12  # Custom:      total messages sent
-OFF_MSGS_RECV = 13  # Custom:      total messages received
+# Radio-tuning bounds (used by !set_radio / !set_tx_power validation).
+# ISM bands cover 100-2500 MHz; MeshCore typically runs 433/868/915 MHz.
+# Wide bandwidth range allows narrow-band experimentation.
+RADIO_FREQ_MIN_MHZ = 100.0
+RADIO_FREQ_MAX_MHZ = 2500.0
+RADIO_BW_MIN_KHZ   = 5.0
+RADIO_BW_MAX_KHZ   = 500.0
+RADIO_SF_MIN       = 7
+RADIO_SF_MAX       = 12
+RADIO_CR_MIN       = 5   # firmware encoding: 5..8 = 4/5..4/8
+RADIO_CR_MAX       = 8
+# Default upper bound on TX power if the device hasn't reported max_tx_power.
+RADIO_TX_POWER_DEFAULT_MAX_DBM = 22
+
+# Per-node metric units (1-based — DomoticzEx requires Unit >= 1)
+OFF_STATUS    = 1   # Switch:      online / offline
+OFF_BATT_PCT  = 2   # Percentage:  battery %
+OFF_BATT_V    = 3   # Custom (V):  battery voltage
+OFF_RSSI      = 4   # Custom (dBm): last RSSI
+OFF_SNR       = 5   # Custom (dB):  last SNR
+OFF_NOISE     = 6   # Custom (dBm): noise floor
+OFF_LASTSEEN  = 7   # Text:        timestamp of last received message/advert
+OFF_TEMP      = 8   # Temperature: °C
+OFF_HUMID     = 9   # Humidity:    %
+OFF_HOPS      = 10  # Custom:      path length (hops)
+OFF_UPTIME    = 11  # Custom (min): node uptime
+OFF_AIRTIME   = 12  # Custom (%):  TX airtime utilization
+OFF_MSGS_SENT = 13  # Custom:      total messages sent
+OFF_MSGS_RECV = 14  # Custom:      total messages received
+OFF_MSGS      = 15  # Text:        per-contact DM conversation history
 
 # Cayenne LPP sensor type codes (used in self_telemetry LPP list entries)
 LPP_TEMPERATURE = 103
@@ -79,20 +126,43 @@ BAT_VMAX_MV = 4200
 # Node is considered online if last_advert is newer than this (8 h)
 ONLINE_THRESHOLD_S = 28800
 
-# How many heartbeats between self-node stats polls (heartbeat=30s, so 10 = ~5 min)
-SELF_STATS_HEARTBEATS = 10
-
-# Connection timeout for each short-lived TCP session (seconds)
+# Connection timeout for the initial connect (seconds)
 CONNECT_TIMEOUT    = 12
 COMMAND_TIMEOUT    = 10
-WORKER_TIMEOUT     = 60    # max seconds a worker thread may run before being abandoned
-POST_DISCONNECT_S  = 3     # minimum seconds to wait after disconnect before reconnecting
 
-# Backoff on consecutive connection failures
-BACKOFF_BASE_S     = 60     # first extra delay on failure (added on top of the heartbeat interval)
-BACKOFF_MAX_S      = 600    # 10 min max extra delay
-BACKOFF_FACTOR     = 2.0
-BACKOFF_LOG_THRESH = 3      # after this many consecutive failures, downgrade Error→Debug
+# Reconnect delay after a connection failure / drop (seconds)
+RECONNECT_DELAY_S  = 30
+
+# Periodic refresh intervals on the persistent connection
+STATS_REFRESH_S    = 300   # self-node stats (battery, radio, packets)
+CONTACTS_REFRESH_S = 60    # contact list refresh (catches new contacts + path changes)
+MSG_DRAIN_S        = 10    # periodic get_msg() drain — safety net for firmware
+                           # that doesn't emit MESSAGES_WAITING / unsolicited
+                           # push, so the node's message queue never piles up
+
+# Rolling RX log buffer size (per-event detail kept in memory for the dashboard)
+RX_LOG_BUFFER      = 250
+# How often we re-write meshcore_rx_log.json at most (seconds)
+RX_LOG_WRITE_S     = 2.0
+
+# Seconds after a DM send_msg before we give up waiting for an ACK and
+# annotate the sent line with "(no ack)".  The firmware's suggested_timeout
+# is typically 20–60 s; 90 s gives slow multi-hop paths a generous margin.
+DM_ACK_TIMEOUT_S   = 90
+
+# After the user changes a setting, ignore device-side self_info echoes of
+# manual_add_contacts/telemetry/adv_loc_policy for this many seconds. Some
+# firmware briefly returns the prior value while flushing to flash, which
+# would otherwise undo the user's change on the very next poll.
+# Note: this only guards self_info-sourced settings. The default flood scope
+# comes from a separate get_default_flood_scope() round-trip and the device
+# returns the just-written value reliably there, so no grace needed for it.
+SETTINGS_GRACE_S = 45
+
+# MeshCore firmware encodes "no path / direct or unknown" as path_len=255 (0xFF).
+# This is a sentinel value, NOT a real hop count.  Exclude it everywhere we
+# record or display hop counts so it never appears in hops_records or UI.
+HOPS_SENTINEL = 255
 
 
 def _bat_pct(mv: int) -> int:
@@ -103,8 +173,13 @@ class BasePlugin:
 
     def __init__(self):
         self._queue          = queue.Queue()  # worker → main thread
+        self.transport       = "TCP"          # "TCP" or "Serial"
         self.host            = ""
         self.port            = 5000
+        self.serial_port     = ""
+        self.baud_rate       = 115200
+        # Tracks last successful-connection state to emit transition log lines
+        self._was_connected  = False
         self._contact_names  = []   # contact names discovered from mc.contacts (non-self)
         self.initialized     = False
         self._self_name      = ""   # name of the connected node
@@ -114,73 +189,564 @@ class BasePlugin:
         self._node_last_activity: dict = {}
         # node_name → {"lat": float, "lon": float} from contact adv_lat/adv_lon
         self._node_locations: dict = {}
-        # Last sValue we already dispatched — prevents re-sending on every heartbeat
-        self._last_sent_text = ""
+        # node_name → contact type int (1=Client/Contact, 2=Repeater, 3=Room Server, 4=Sensor)
+        self._node_types: dict = {}
+        # node_name → last_advert unix timestamp (for client-side sorting)
+        self._node_last_advert: dict = {}
+        # node_name → contact public_key hex (needed for remove_contact)
+        self._node_pubkey: dict = {}
+        # node_name → DomoticzEx DeviceID (12-hex pubkey prefix). Populated
+        # from contact pubkeys and from incoming message pubkey prefixes so a
+        # device can be created/updated before the contacts poll runs.
+        self._node_did: dict = {}
+        # Current value of the connected node's manual_add_contacts setting
+        # (True = node ignores adverts from unknown contacts; False = auto-add)
+        self._manual_add_contacts: bool = False
+        # Other device settings mirrored from self_info — used by the dashboard
+        self._telemetry_mode_base: int = 0
+        self._telemetry_mode_loc:  int = 0
+        self._telemetry_mode_env:  int = 0
+        self._advert_loc_policy:   int = 0
+        # Monotonic time (seconds) of the last user-driven setting change.
+        # Within SETTINGS_GRACE_S after a change we trust the just-set value
+        # over what self_info reports — some firmware returns the previous
+        # value briefly while flushing to flash.
+        self._settings_set_at: float = 0.0
+        # Default flood scope tag (e.g. "#nl"); empty string = global flood.
+        # Read via mc.commands.get_default_flood_scope() once per poll cycle.
+        self._default_flood_scope: str = ""
+        # Favorite contact names — persisted to <plugin_dir>/meshcore_favorites.json.
+        # Toggled from the dashboard; favorites sort first within online/offline groups.
+        self._favorites: set = set()
+        # Device info (firmware version, build, model) from send_device_query().
+        # Fetched on connect and refreshed periodically.
+        self._device_info: dict = {}
+        # Full SELF_INFO snapshot — radio params (freq, bw, sf, cr, tx_power,
+        # max_tx_power, multi_acks), our pubkey + advertised lat/lon. Exposed
+        # via the device map so the dashboard's self-node side panel can show
+        # and edit them.
+        self._self_info_full: dict = {}
+        # Latest result of get_self_telemetry (board-level sensors if any).
+        self._self_telemetry: dict = {}
+        # Per-contact query results from remote sync calls (status, telemetry,
+        # neighbours). Keyed by contact adv_name. Exposed via device map so
+        # the dashboard's contact info panel can read them.
+        self._contact_query_results: dict = {}
+        # Bumped from fast (2s) to steady (10s) once the first contacts batch
+        # has been dispatched, so we keep onHeartbeat responsive without
+        # firing every 2 seconds forever.
+        self._heartbeat_restored: bool = False
         # Message counters (reset when Domoticz restarts the plugin)
         self._recv_count = 0
         self._sent_count = 0
-        # Heartbeat counter for periodic self-stats poll
-        self._hb_count = 0
-        # Backoff state for consecutive connection failures
-        self._consec_failures = 0
-        self._skip_until = 0.0  # monotonic time: skip heartbeats until this
         # Channel names already fetched flag (only need once)
         self._channels_fetched = False
         # Channel index→name map (populated from device), e.g. {0: "General", 1: "MyRoom"}
+        # Non-empty entries only — used for message routing.
         self._channel_names: dict = {}
-        # Lock to serialise all TCP connections (ESP32 accepts only one at a time)
-        self._conn_lock = threading.Lock()
-        # Current mc instance (set by worker thread for cleanup on error)
-        self._current_mc = None
-        # Active worker thread reference (for onStop cleanup)
+        # Full 8-slot table, including empty slots (idx → name). Exposed via
+        # the device map so the dashboard can render every slot with controls.
+        self._channel_slots: dict = {}
+        # chan_hash (2-hex string, e.g. "a3") → channel_name for every configured
+        # channel whose CHANNEL_INFO has been fetched.  Lets the dashboard resolve
+        # "Hashes heard on air" rows to a readable name even when the raw RX_LOG
+        # frames never carried chan_name (which only happens when the library can
+        # HMAC-verify the ciphertext, which requires the channel secret).
+        self._chan_hash_to_name: dict = {}
+        # Persistent-connection worker state
         self._worker_thread: threading.Thread | None = None
-        self._worker_started: float = 0.0
+        self._worker_loop: asyncio.AbstractEventLoop | None = None
+        self._mc = None                       # live MeshCore instance (worker-owned)
+        self._stop_event = threading.Event()  # set on shutdown (cross-thread)
+        self._stop_async: asyncio.Event | None = None  # created inside worker loop
+        self._main_task: asyncio.Task | None = None     # _run() task, for hard cancel on stop
+        # Serialise concurrent `!verb` sends and remote queries. The meshcore
+        # library subscribes to EventType.OK/ERROR globally per send() call,
+        # so two commands in flight at the same time can have their responses
+        # cross-attributed (the second waiter gets the first reply). One lock
+        # → one in-flight command keeps the dispatcher unambiguous.
+        self._cmd_lock: asyncio.Lock | None = None
         # Flag to prevent new connections during shutdown
         self._stopping = False
-        # Monotonic timestamp of last successful disconnect (for cooldown)
-        self._last_disconnect: float = 0.0
+        # WebSocket channel state (F1+).
+        # _ws_ok: None=unknown (first push will detect), True=available, False=absent.
+        # _sub_feeds: last requested feed from {t:'sub'}; guarded by _rx_log_lock
+        # (written on the main thread, will be read from the worker thread).
+        self._ws_ok: bool | None = None
+        # All fields below are touched from BOTH the worker thread (push
+        # event callbacks) AND the main thread (_handle_message via
+        # _dispatch, plus _write_rx_log). Always take self._rx_log_lock
+        # before reading or mutating any of them.
+        # Rolling RX_LOG_DATA buffer.
+        self._rx_log = collections.deque(maxlen=RX_LOG_BUFFER)
+        self._rx_log_lock = threading.Lock()
+        # _sub_feeds is initialised here (after the lock) and is always
+        # accessed under self._rx_log_lock to keep the main/worker access safe.
+        self._sub_feeds: str = "none"
+        self._rx_log_dirty = False
+        self._rx_log_last_write = 0.0
+        # F3 — rx-log on-demand + deltas.
+        # _rx_log_seq: monotonic counter incremented on every rxlog/rxlog_delta push.
+        # _rx_log_total_appended: absolute count of every entry ever appended to
+        #   _rx_log (never decremented, even when the deque evicts old entries).
+        # _rx_log_pushed_total: value of _rx_log_total_appended at the time of
+        #   the last window/delta push.  The entries still in the buffer that
+        #   the client has not yet seen are:
+        #     start = _rx_log_total_appended - len(_rx_log)   (oldest still buffered)
+        #     new   = list(_rx_log)[_rx_log_pushed_total - start:]
+        #   If _rx_log_pushed_total < start the client missed evicted entries →
+        #   fall back to a full window push.
+        # All three are guarded by _rx_log_lock.
+        self._rx_log_seq: int = 0
+        self._rx_log_total_appended: int = 0
+        self._rx_log_pushed_total: int = 0
+        # F7 — device-map delta.
+        # _device_seq: monotonic counter incremented on every devices/devices_delta push.
+        # _last_pushed_device_map: snapshot of the deviceMap sent in the last full or
+        #   delta push (None = no baseline; next push will be a full 'devices' message).
+        # Both are guarded by _rx_log_lock (same lock reused — no new lock needed).
+        self._device_seq: int = 0
+        self._last_pushed_device_map: dict | None = None
+        # Per-feed WebSocket push dirty flags (separate from the file-write
+        # dirty flags so the two throttling paths don't interfere).
+        # Set wherever the respective data changes; cleared by _push_dirty_feeds.
+        self._ws_devices_dirty  = False
+        self._ws_stats_dirty    = False
+        self._ws_heard_dirty    = False
+        self._ws_channels_dirty = False
+        # Per-feed wall-clock timestamp of the last WebSocket push (monotonic).
+        self._devices_last_push  = 0.0
+        self._stats_last_push    = 0.0
+        self._heard_last_push    = 0.0
+        self._channels_last_push = 0.0
+        # Aggregated stats over the rx-log window:
+        self._payload_type_counts: dict = collections.defaultdict(int)
+        self._chan_hash_counts:    dict = collections.defaultdict(int)
+        # pubkey_prefix → list of {t, snr, rssi, path_len, kind}
+        self._signal_history:      dict = collections.defaultdict(list)
+        # raw_hex → list of {t, path, snr} (duplicate flood detection)
+        self._dup_floods:          dict = collections.defaultdict(list)
+        # 24h × 1h heatmap: hour-of-day → count for past 24h (timestamps trimmed on read)
+        self._packet_times = collections.deque(maxlen=2000)  # raw ts list, trimmed to last 24h
+        # Recent incoming-message signatures for de-duplication. The same
+        # message can arrive twice: as an unsolicited push AND via the
+        # get_msg() drain that start_auto_message_fetching() performs (and
+        # duplicate-flood copies repeat with the same sender_timestamp/text
+        # on a different path). 300 entries ≈ plenty at mesh message rates.
+        self._recent_msg_sigs = collections.deque(maxlen=300)
+        # Lifetime statistics (persisted to meshcore_stats.json, flushed on
+        # the rx-log cadence + on stop, reloaded on start). Sender class is
+        # derived from the contact type: Repeater(2) / Room Server(3) /
+        # everything else (incl. unknown) = client. Mutations are guarded by
+        # self._rx_log_lock (same lock as the heard/rx-log writers).
+        self._stats = {
+            "adverts_total":  0,
+            "messages_total": 0,
+            "client_total":   0,
+            "repeater_total": 0,
+            "server_total":   0,
+            "msg_by_sender":  {},   # sender name -> message count
+            "adv_by_sender":  {},   # advert name -> advert count
+            "msg_by_channel": {},   # resolved channel name -> message count (known channels only)
+            "hops_records":   [],   # top-5 [{hops,name,date,channel}], best per name
+            "today":          {"date": "", "messages": 0,
+                               "client": 0, "repeater": 0, "server": 0},
+        }
+        self._stats_dirty = False
+        # Persistent "heard nodes" — adverts from nodes NOT in our contacts.
+        # full pubkey hex → {pubkey, name, type, lat, lon, snr, rssi,
+        #   path_len, first_heard, last_heard}. Survives restarts via
+        # meshcore_heard.json (flushed on the rx-log cadence + on stop).
+        # Updated from RX_LOG ADVERT frames on the worker thread under
+        # _rx_log_lock; _known_pubkeys is swapped wholesale by _handle_contacts
+        # so the worker can cheaply skip nodes that are already contacts.
+        self._heard_nodes: dict = {}
+        self._heard_dirty = False
+        self._known_pubkeys: set = set()
+        # Latest received signal for nodes that ARE contacts, keyed by the
+        # 12-hex pubkey prefix → {snr, rssi, path_len, t, source}.
+        # Last-writer-wins across ADVERT (worker, _on_rx_log) and incoming
+        # messages with a known pubkey (main, _handle_message). Lets contact
+        # cards show hops/SNR/RSSI even without a Domoticz device, a recent
+        # message, or a direct path. RSSI is only set when the frame actually
+        # carried one (adverts do; message events usually don't).
+        self._contact_sig: dict = {}
+        # Pending DM delivery-ACK records.
+        # Keyed by expected_ack hex code (8 hex chars from MSG_SENT payload).
+        # Value: {"target": str, "body": str, "out_ts": float,
+        #         "inbox_line": str, "dm_name": str|None}
+        # Written by the worker thread (_send_message), read and cleared by
+        # _on_ack (worker) and by onHeartbeat timeout sweep (main).  Both
+        # paths hold _rx_log_lock for the mutation — same discipline as
+        # _chan_hash_to_name.  Dict is bounded: entries are removed on match
+        # or timeout; at most one entry per in-flight send (send commands are
+        # serialised by _cmd_lock), so size ≤ 1 in normal operation.
+        self._pending_acks: dict = {}
+        # SQLite message store — long-lived connection, opened in onStart.
+        # All access serialized via _msgdb_lock (separate from _rx_log_lock).
+        self._msgdb: sqlite3.Connection | None = None
+        self._msgdb_lock = threading.Lock()
+        # Monotonic insert counter used for pruning; reset on each onStart.
+        self._msgdb_insert_count: int = 0
 
-    def _force_kill_socket(self, mc):
-        """Kill the raw TCP socket without touching the event loop."""
-        import socket as _socket
-        import struct
+    # ── SQLite message store ──────────────────────────────────────────────────
+
+    # Max rows to keep in messages table (newest wins on prune).
+    _MSG_STORE_CAP = 20_000
+    # Prune at most once every N inserts (cheap amortised cost).
+    _MSG_STORE_PRUNE_EVERY = 200
+    # Current schema version stored in the preferences table.
+    MSG_DB_SCHEMA_VERSION = 1
+
+    def _msg_store_open(self, db_path: str):
+        """Open (or create) the SQLite message store at *db_path*.
+
+        Creates the schema if it does not exist.  Must only be called once
+        from onStart on the main thread before the worker starts.
+        """
         try:
-            transport = mc.connection_manager.connection.transport
-            if transport:
-                raw_sock = transport.get_extra_info("socket")
-                if raw_sock:
-                    try:
-                        raw_sock.setsockopt(
-                            _socket.SOL_SOCKET, _socket.SO_LINGER,
-                            struct.pack("ii", 1, 0)
-                        )
-                    except OSError:
-                        pass
+            con = sqlite3.connect(db_path, check_same_thread=False)
+            con.execute("PRAGMA journal_mode=WAL")
+            con.execute("""
+                CREATE TABLE IF NOT EXISTS messages (
+                    id        INTEGER PRIMARY KEY AUTOINCREMENT,
+                    chan      TEXT    NOT NULL,
+                    sender    TEXT    NOT NULL,
+                    epoch     INTEGER NOT NULL,
+                    bad       INTEGER NOT NULL DEFAULT 0,
+                    body      TEXT    NOT NULL,
+                    hops      INTEGER,
+                    snr       REAL,
+                    rssi      INTEGER,
+                    path      TEXT,
+                    ack       INTEGER,
+                    direction TEXT    NOT NULL DEFAULT 'in',
+                    recv_ts   INTEGER NOT NULL
+                )
+            """)
+            con.execute("CREATE INDEX IF NOT EXISTS idx_messages_chan_id ON messages(chan, id)")
+            con.execute("""
+                CREATE TABLE IF NOT EXISTS preferences (
+                    key   TEXT PRIMARY KEY,
+                    value TEXT
+                )
+            """)
+            con.commit()
+            self._msgdb = con
+            self._msgdb_insert_count = 0
+            self._msg_store_migrate()
+            Domoticz.Debug("Message store opened: " + db_path)
+        except Exception as exc:
+            Domoticz.Error(f"Message store open failed (non-fatal): {exc!r}")
+            self._msgdb = None
+
+    def _pref_get(self, key: str, default=None):
+        """Return the preferences value for *key*, or *default* if absent/error."""
+        if self._msgdb is None:
+            return default
+        try:
+            with self._msgdb_lock:
+                cur = self._msgdb.execute(
+                    "SELECT value FROM preferences WHERE key=?", (key,)
+                )
+                row = cur.fetchone()
+            return row[0] if row is not None else default
+        except Exception as exc:
+            Domoticz.Error(f"Message store pref_get failed (non-fatal): {exc!r}")
+            return default
+
+    def _pref_set(self, key: str, value: str):
+        """Upsert *key*=*value* in the preferences table. Never raises."""
+        if self._msgdb is None:
+            return
+        try:
+            with self._msgdb_lock:
+                self._msgdb.execute(
+                    "INSERT INTO preferences(key,value) VALUES(?,?)"
+                    " ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                    (key, value),
+                )
+                self._msgdb.commit()
+        except Exception as exc:
+            Domoticz.Error(f"Message store pref_set failed (non-fatal): {exc!r}")
+
+    def _msg_store_migrate(self):
+        """Apply any pending schema migrations and record the resulting version.
+
+        Migration ladder — add one ``elif ver == N:`` block per future version:
+
+            ver == 1  — baseline; preferences table already created by _msg_store_open,
+                        nothing to ALTER.
+            ver == 2  — (future) example: ALTER TABLE messages ADD COLUMN foo TEXT
+            ...
+
+        The loop is always exercised: even for a fresh DB it runs once (0→1),
+        confirming the ladder structure is live code, not a dead stub.
+        """
+        try:
+            stored = self._pref_get("db_version")
+            ver = int(stored) if stored is not None else 0
+            from_ver = ver
+
+            while ver < self.MSG_DB_SCHEMA_VERSION:
+                ver += 1
+                if ver == 1:
+                    pass  # baseline — tables already created in _msg_store_open
+                # elif ver == 2:
+                #     self._msgdb.execute("ALTER TABLE messages ADD COLUMN foo TEXT")
+                #     self._msgdb.commit()
+
+            self._pref_set("db_version", str(self.MSG_DB_SCHEMA_VERSION))
+
+            if from_ver < self.MSG_DB_SCHEMA_VERSION:
+                Domoticz.Debug(
+                    f"Message store migrated schema v{from_ver} → v{self.MSG_DB_SCHEMA_VERSION}"
+                )
+            else:
+                Domoticz.Debug(
+                    f"Message store schema v{self.MSG_DB_SCHEMA_VERSION} (up to date)"
+                )
+        except Exception as exc:
+            Domoticz.Error(f"Message store migration failed (non-fatal): {exc!r}")
+
+    def _msg_store_add(self, chan: str, sender: str, body: str, epoch: int,
+                       bad: bool = False, snr=None, hops=None, rssi=None,
+                       path: str = None, ack=None,
+                       direction: str = "in") -> "int | None":
+        """Insert one message row and return its rowid (or None on error).
+
+        Never raises — any sqlite error is caught, logged, and None is returned
+        so the caller's live message path is unaffected.
+        """
+        if self._msgdb is None:
+            return None
+        recv_ts = int(time.time())
+        bad_int = 1 if bad else 0
+        try:
+            with self._msgdb_lock:
+                cur = self._msgdb.execute(
+                    "INSERT INTO messages"
+                    " (chan, sender, epoch, bad, body, hops, snr, rssi, path, ack, direction, recv_ts)"
+                    " VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                    (chan, sender, int(epoch), bad_int, body,
+                     int(hops) if isinstance(hops, int) else None,
+                     float(snr) if snr is not None else None,
+                     int(rssi) if rssi is not None else None,
+                     path or None, ack, direction, recv_ts),
+                )
+                rowid = cur.lastrowid
+                self._msgdb.commit()
+                self._msgdb_insert_count += 1
+                # Prune periodically to cap table size. The DELETE keeps the
+                # newest _MSG_STORE_CAP rows; running it under the same lock as
+                # the insert means a reader never sees a half-pruned table.
+                if self._msgdb_insert_count % self._MSG_STORE_PRUNE_EVERY == 0:
+                    self._msgdb.execute(
+                        "DELETE FROM messages WHERE id < "
+                        "(SELECT MAX(id) - ? FROM messages)",
+                        (self._MSG_STORE_CAP,),
+                    )
+                    self._msgdb.commit()
+            return rowid
+        except Exception as exc:
+            Domoticz.Error(f"Message store insert failed (non-fatal): {exc!r}")
+            return None
+
+    def _msg_store_set_ack(self, rowid: int, delivered: bool):
+        """Update the ack column for a row by id. Silently no-ops on error."""
+        if self._msgdb is None or rowid is None:
+            return
+        try:
+            with self._msgdb_lock:
+                self._msgdb.execute(
+                    "UPDATE messages SET ack=? WHERE id=?",
+                    (1 if delivered else 0, rowid),
+                )
+                self._msgdb.commit()
+        except Exception as exc:
+            Domoticz.Error(f"Message store ack update failed (non-fatal): {exc!r}")
+
+    def _msg_store_query(self, scope: str, before=None, limit: int = 50,
+                         search: str = "") -> dict:
+        """Execute a paginated inbox query and return an inbox_page payload dict.
+
+        *scope* is 'all' (no channel filter) or a specific chan value.
+        *before* is an exclusive upper bound on id (for pagination); None = newest.
+        *limit* is clamped to 1..200.
+        *search* is a case-insensitive substring matched against body and sender;
+            '%' and '_' in the term are treated literally (escaped).
+        """
+        limit = max(1, min(200, int(limit) if limit is not None else 50))
+        search_str = str(search).strip() if search else ""
+        if search and not search_str:
+            Domoticz.Debug("inbox_query: search term was whitespace-only — ignoring it")
+        before_int = int(before) if before is not None else None
+
+        rows = []
+        has_more = False
+        oldest_id = None
+        error = None
+
+        if self._msgdb is None:
+            return {
+                "scope": scope, "search": search_str,
+                "rows": [], "has_more": False, "oldest_id": None,
+                "error": "store not available",
+            }
+
+        try:
+            # Escape LIKE special characters so user-provided '%' / '_' are literal.
+            def _like_escape(term: str) -> str:
+                return term.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+            params: list = []
+            clauses: list = []
+
+            if scope.startswith("@"):
+                # DM-thread scope: all private messages to/from this contact.
+                # Outgoing DMs are stored with sender "> <name>" or legacy "▶<name>"
+                # / "▶ <name>"; incoming DMs with sender "<name>".
+                dm_name = scope[1:]
+                clauses.append(
+                    "chan='P' AND sender IN (?,?,?,?)"
+                )
+                params.extend([
+                    dm_name,
+                    f"> {dm_name}",
+                    f"▶{dm_name}",
+                    f"▶ {dm_name}",
+                ])
+            elif scope != "all":
+                clauses.append("chan=?")
+                params.append(scope)
+
+            if search_str:
+                esc = _like_escape(search_str)
+                pat = f"%{esc}%"
+                clauses.append("(body LIKE ? ESCAPE '\\' OR sender LIKE ? ESCAPE '\\')")
+                params.extend([pat, pat])
+
+            if before_int is not None:
+                clauses.append("id<?")
+                params.append(before_int)
+
+            where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
+            fetch_limit = limit + 1
+            params.append(fetch_limit)
+
+            sql = (
+                f"SELECT id,chan,sender,epoch,bad,body,hops,snr,rssi,path,ack,direction"
+                f" FROM messages {where} ORDER BY id DESC LIMIT ?"
+            )
+            with self._msgdb_lock:
+                cur = self._msgdb.execute(sql, params)
+                fetched = cur.fetchall()
+
+            has_more = len(fetched) > limit
+            trimmed = fetched[:limit]
+            for row in trimmed:
+                rows.append({
+                    "id":     row[0],
+                    "chan":   row[1],
+                    "sender": row[2],
+                    "epoch":  row[3],
+                    "bad":    bool(row[4]),
+                    "body":   row[5],
+                    "hops":   row[6],
+                    "snr":    row[7],
+                    "rssi":   row[8],
+                    "path":   row[9],
+                    "ack":    row[10],
+                    "dir":    row[11],
+                })
+            oldest_id = rows[-1]["id"] if rows else None
+
+        except Exception as exc:
+            Domoticz.Error(f"Message store query failed (non-fatal): {exc!r}")
+            error = str(exc)
+
+        result = {
+            "scope":    scope,
+            "search":   search_str,
+            "rows":     rows,
+            "has_more": has_more,
+            "oldest_id": oldest_id,
+        }
+        if error is not None:
+            result["error"] = error
+        return result
+
+    def _force_close_serial(self, mc):
+        """Synchronously close the underlying pyserial port.
+
+        Used only on shutdown so Windows releases the COM handle immediately
+        instead of waiting for connection_lost to fire on a loop we're about
+        to tear down.
+        """
+        try:
+            connection = mc.connection_manager.connection
+            transport = getattr(connection, "transport", None)
+            if transport is None:
+                return
+            raw_serial = getattr(transport, "serial", None)
+            try:
                 transport.close()
-                if raw_sock:
-                    try:
-                        raw_sock.close()
-                    except OSError:
-                        pass
-        except Exception:
-            pass
-        try:
-            if mc.dispatcher and mc.dispatcher._task and not mc.dispatcher._task.done():
-                mc.dispatcher.running = False
-                mc.dispatcher._task.cancel()
+            except Exception:
+                pass
+            if raw_serial is not None:
+                try:
+                    raw_serial.close()
+                except Exception:
+                    pass
         except Exception:
             pass
 
-    def _node_index(self, node_name: str) -> int:
-        """Return slot index: 0 = self node, 1..N = contacts."""
-        if node_name == self._self_name:
-            return 0
-        if node_name in self._contact_names:
-            return self._contact_names.index(node_name) + 1
-        return -1
+    def _device_id_for(self, node_name: str):
+        """Resolve a node name to its DomoticzEx DeviceID.
 
-    def _node_unit(self, node_idx: int, offset: int) -> int:
-        return NODE_BASE + node_idx * NODE_SLOTS + offset
+        Returns "self" for the connected node, the 12-hex pubkey prefix for a
+        remote contact, or None when the pubkey isn't known yet (the device is
+        created on the next contacts poll once the pubkey arrives).
+        """
+        if node_name and node_name == self._self_name:
+            return SELF_DID
+        did = self._node_did.get(node_name)
+        return did or None
+
+    def _dev(self, device_id, unit):
+        """Safe accessor — returns the DomoticzEx Unit object or None."""
+        if not device_id or device_id not in Devices:
+            return None
+        dev = Devices[device_id]
+        if unit not in dev.Units:
+            return None
+        return dev.Units[unit]
+
+    def _set(self, device_id, unit, nValue=None, sValue=None):
+        """Update a DomoticzEx unit. Unlike the classic framework, the Ex
+        Update() does not take nValue/sValue kwargs — they're set as
+        attributes on the Unit object, then Update() is called.
+
+        Sets _ws_devices_dirty when the value actually changes so that
+        outgoing-message echoes (and any other _set-driven writes) trigger a
+        devices_delta push without waiting for the 90 s fallback."""
+        d = self._dev(device_id, unit)
+        if d is None:
+            return
+        changed = False
+        if nValue is not None:
+            new_n = int(nValue)
+            if new_n != d.nValue:
+                d.nValue = new_n
+                changed = True
+        if sValue is not None:
+            new_s = str(sValue)
+            if new_s != d.sValue:
+                d.sValue = new_s
+                changed = True
+        d.Update()
+        if changed:
+            self._ws_devices_dirty = True
 
     def _all_node_names(self):
         """Self node (if known) + all discovered contacts."""
@@ -190,40 +756,22 @@ class BasePlugin:
         names.extend(self._contact_names)
         return names
 
-    def _safe_disconnect(self, mc, loop):
-        """Cleanly disconnect using the library's own mc.disconnect(), then
-        fall back to a hard socket kill if that fails or times out."""
-        if mc is None:
-            return
-        # Try the library's graceful disconnect first
-        try:
-            loop.run_until_complete(asyncio.wait_for(mc.disconnect(), timeout=5))
-            Domoticz.Debug("_safe_disconnect: graceful disconnect OK.")
-        except Exception:
-            # Graceful path failed — force-kill the socket
-            Domoticz.Debug("_safe_disconnect: graceful failed, force-killing socket…")
-            self._force_kill_socket(mc)
-        # Cancel any remaining asyncio tasks (don't await — just cancel)
-        try:
-            for task in asyncio.all_tasks(loop):
-                task.cancel()
-        except Exception:
-            pass
-        time.sleep(0.5)
-        self._last_disconnect = time.monotonic()
-        Domoticz.Debug("_safe_disconnect: done.")
-
-    async def _async_disconnect(self, mc):
-        """Graceful disconnect for use inside async poll/send cycles."""
+    async def _disconnect_mc(self, mc):
+        """Graceful disconnect of the persistent connection."""
         if mc is None:
             return
         try:
             await asyncio.wait_for(mc.disconnect(), timeout=5)
-            Domoticz.Debug("_async_disconnect: OK.")
-        except Exception:
-            Domoticz.Debug("_async_disconnect: graceful failed, force-killing…")
-            self._force_kill_socket(mc)
-        self._last_disconnect = time.monotonic()
+        except Exception as exc:
+            Domoticz.Debug(f"disconnect error: {exc}")
+        if self.transport == "Serial":
+            # Force-close the raw pyserial Serial so Windows releases the COM
+            # handle right away instead of waiting for connection_lost.
+            self._force_close_serial(mc)
+            try:
+                await asyncio.sleep(0.1)
+            except Exception:
+                pass
 
     # ── Lifecycle ─────────────────────────────────────────────────────────────
 
@@ -233,39 +781,175 @@ class BasePlugin:
             return
 
         Domoticz.Debugging(int(Parameters["Mode6"] or 0))
-        self.host     = Parameters["Address"].strip()
-        self.port     = int(Parameters["Port"].strip() or 5000)
+        self.transport = (Parameters.get("Mode1") or "TCP").strip() or "TCP"
+        self.host      = Parameters.get("Address", "").strip()
+        self.port      = int((Parameters.get("Port") or "5000").strip() or 5000)
+        self.serial_port = Parameters.get("SerialPort", "").strip()
+        try:
+            self.baud_rate = int((Parameters.get("Mode2") or "115200").strip() or 115200)
+        except ValueError:
+            self.baud_rate = 115200
+
+        if self.transport == "Serial" and not self.serial_port:
+            Domoticz.Error("Serial transport selected but no serial port chosen.")
+            return
+
         self._create_base_devices()
+        # One-time cleanup: delete the legacy "Mesh Send" device (UNIT_SEND=2) if it
+        # still exists from an older install. Commands are now sent via the WebSocket
+        # channel; the text device is no longer created or needed.
+        try:
+            if MESH_DID in Devices and UNIT_SEND in Devices[MESH_DID].Units:
+                Devices[MESH_DID].Units[UNIT_SEND].Delete()
+                Domoticz.Log("Removed legacy 'Mesh Send' device (unit 2); commands are now sent via the WebSocket channel.")
+        except Exception as _exc:
+            Domoticz.Debug(f"Stale UNIT_SEND cleanup failed (non-fatal): {_exc}")
+        # Pre-existing per-contact Messages devices (OFF_MSGS=15) are deliberately
+        # left in place. DM history is now served from the SQLite store and these
+        # devices are no longer created or written, but they are NOT auto-deleted —
+        # the user removes them manually if/when they decide they're no longer needed.
         self._load_manual_locations()
+        self._load_favorites()
+        self._migrate_state_files()
+        self._load_heard()
+        self._load_rx_log()
+        self._load_stats()
+        self._load_channels()
+
+        # Open SQLite message store (non-fatal if it fails).
+        try:
+            _db_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "meshcore_messages.db")
+            self._msg_store_open(_db_path)
+        except Exception as _dbexc:
+            Domoticz.Error(f"Message store init failed (non-fatal): {_dbexc!r}")
 
         if Parameters.get("Mode4", "true") == "true":
             self._install_custom_page()
-            self._install_manual_locations()
 
         self.initialized = True
-        Domoticz.Heartbeat(30)
-        Domoticz.Log(f"MeshCore plugin started – {self.host}:{self.port}")
+        # Heartbeat is now purely for draining the worker→main queue; the
+        # actual MeshCore session is a persistent connection in a worker
+        # thread. Use a fast tick at startup so the first contacts/self_info
+        # batch is dispatched promptly, then `_dispatch` bumps it back to a
+        # steady-state cadence once the first contacts arrive.
+        Domoticz.Heartbeat(2)
+        self._heartbeat_restored = False
+        if self.transport == "Serial":
+            Domoticz.Status(f"MeshCore plugin started - Serial {self.serial_port} @ {self.baud_rate}")
+        else:
+            Domoticz.Status(f"MeshCore plugin started - TCP {self.host}:{self.port}")
+
+        self._stop_event.clear()
+        t = threading.Thread(target=self._worker_main, daemon=True, name="MeshCoreWorker")
+        self._worker_thread = t
+        t.start()
 
     def onStop(self):
         self._stopping = True
         self.initialized = False
+        self._stop_event.set()
 
-        # Forcefully RST-close any active TCP connection so the ESP32 releases it
-        mc = self._current_mc
-        if mc is not None:
-            Domoticz.Log("onStop: force-killing active connection…")
-            self._force_kill_socket(mc)
-            Domoticz.Log("onStop: socket killed.")
+        loop = self._worker_loop
+        stop_async = self._stop_async
+        if loop is not None and loop.is_running() and stop_async is not None:
+            # Wake the worker loop via its asyncio.Event so the serve loop
+            # exits at its next iteration, runs its finally block (which
+            # disconnects mc and drains serial_asyncio_fast's executor tasks)
+            # and lets the thread shut down cleanly.
+            try:
+                loop.call_soon_threadsafe(stop_async.set)
+            except Exception as exc:
+                Domoticz.Debug(f"onStop: stop dispatch failed: {exc}")
+            # Hard-cancel the _run() task too. Setting the event only breaks
+            # the serve loop at its next _wait_or_stop; if we're blocked
+            # inside an in-flight mc.* await (slow/hung network read, message
+            # drain, periodic refresh) the loop never gets there and the
+            # thread join below times out ("threads still running"). A
+            # threadsafe Task.cancel() raises CancelledError straight into
+            # that await so the worker unwinds well within the join window.
+            mt = self._main_task
+            if mt is not None:
+                try:
+                    loop.call_soon_threadsafe(mt.cancel)
+                except Exception as exc:
+                    Domoticz.Debug(f"onStop: task cancel dispatch failed: {exc}")
 
-        # Wait for any running worker thread to finish
+        # Wait for the worker thread to exit
         t = self._worker_thread
         if t is not None and t.is_alive():
-            t.join(timeout=5)
+            t.join(timeout=8)
             if t.is_alive():
-                Domoticz.Log("onStop: worker thread did not stop within 5s.")
+                Domoticz.Log("onStop: worker thread did not stop within 8s.")
+
+        # Force-close the serial port so Windows releases the COM handle even
+        # if the cancelled tasks never reached the graceful disconnect path.
+        if self.transport == "Serial" and self._mc is not None:
+            self._force_close_serial(self._mc)
+        self._mc = None
+        self._worker_thread = None
+        self._stop_async = None
+        self._main_task = None
+        # Drop references that could keep an IOCP / proactor pinned alive and
+        # force a collection so the Windows COM port handle is released by
+        # the asyncio internals.
+        gc.collect()
+        # Brief grace window — the foreign (Dummy-N) IOCP thread serving the
+        # asyncio proactor on Windows can take a moment to die after the
+        # loop's underlying handle is released. Give it 500 ms; not strictly
+        # required but avoids Domoticz spamming "1 Python thread still
+        # running" for ten seconds in the common case.
+        for _ in range(10):
+            alive_now = [t for t in threading.enumerate()
+                         if t is not threading.main_thread()
+                         and t.name != "MeshCoreWorker"]
+            if not alive_now:
+                break
+            time.sleep(0.05)
+
+        alive = [t for t in threading.enumerate() if t is not threading.main_thread()]
+        Domoticz.Debug(f"onStop: {len(alive)} non-main thread(s) alive: " +
+                       ", ".join(f"{t.name}(daemon={t.daemon})" for t in alive))
 
         self._remove_custom_page()
-        Domoticz.Log("MeshCore plugin stopped.")
+
+        # Close the message store connection (do NOT delete the .db file).
+        if self._msgdb is not None:
+            try:
+                with self._msgdb_lock:
+                    self._msgdb.close()
+            except Exception as _mexc:
+                Domoticz.Debug(f"Message store close: {_mexc!r}")
+            self._msgdb = None
+
+        Domoticz.Status("MeshCore plugin stopped.")
+
+        # Workaround: Domoticz polls threading.enumerate() after onStop and
+        # logs "Plugin has N Python threads still running" if anything besides
+        # MainThread is reported. Our Domoticz plugin-host C thread (the one
+        # currently running onStop) shows up as `Dummy-N` because it was
+        # created in C and Python only registered it on first call-in. After
+        # onStop returns this thread does exit in C, but Python's
+        # threading._active dict never gets the entry pruned — so enumerate()
+        # keeps reporting it for ~10s until Domoticz gives up. We pre-empt
+        # that by removing the entry ourselves right before returning. It's
+        # the very last thing we touch on this thread.
+        try:
+            my_tid = threading.get_ident()
+            me = threading._active.get(my_tid)
+            if me is None:
+                Domoticz.Debug("DummyThread cleanup: no entry for current thread (already gone).")
+            elif type(me).__name__ == "_DummyThread":
+                del threading._active[my_tid]
+                Domoticz.Debug("DummyThread cleanup: removed entry to silence Domoticz still-running warning.")
+            else:
+                # A future CPython rename of _DummyThread would land us here.
+                # Log so the workaround silently stopping working is visible.
+                Domoticz.Debug(
+                    f"DummyThread cleanup: current thread is {type(me).__name__!r}, not _DummyThread — "
+                    f"workaround did not run. Domoticz may report 'thread still running' until it gives up."
+                )
+        except Exception as exc:
+            Domoticz.Debug(f"DummyThread cleanup: unexpected error: {exc}")
 
     def onHeartbeat(self):
         if not self.initialized or self._stopping:
@@ -279,88 +963,306 @@ class BasePlugin:
                 break
             self._dispatch(item)
 
-        # Backoff: skip this heartbeat if we are in a cooldown period
-        now = time.monotonic()
-        if now < self._skip_until:
-            remaining = int(self._skip_until - now)
-            Domoticz.Debug(f"Backoff active — skipping heartbeat ({remaining}s remaining)")
+        # Expire pending DM ACK records that have exceeded the timeout and
+        # annotate their sent lines with "(no ack)".
+        self._sweep_pending_acks()
+
+    # ── WebSocket channel (F1+) ───────────────────────────────────────────────
+
+    def _push(self, t: str, payload: dict):
+        """Send a JSON frame to the dashboard via the plugin WebSocket channel.
+
+        Performs a one-time feature-detect on first call: if Domoticz does not
+        expose WebSocketSend (old build), logs once and sets _ws_ok=False so
+        callers can skip further pushes gracefully.
+
+        Never raises into callers — any exception from WebSocketSend is caught
+        and logged so a bad send cannot stall the heartbeat queue drain.
+        """
+        if self._ws_ok is None:
+            self._ws_ok = hasattr(Domoticz, "WebSocketSend")
+            if not self._ws_ok:
+                Domoticz.Log(
+                    "MeshCore: Domoticz.WebSocketSend not available — "
+                    "upgrade to build 17956+ for dashboard WebSocket support."
+                )
+        if not self._ws_ok:
+            return
+        msg = {"t": t}
+        msg.update(payload)
+        try:
+            # Serialize ourselves and send a string rather than handing the
+            # dict to Domoticz. Domoticz's built-in Python->JSON conversion
+            # emits non-string dict keys unquoted (invalid JSON) and renders
+            # None as the literal string "None"; json.dumps produces correct
+            # JSON (quoted keys, null) and bypasses that converter entirely.
+            Domoticz.WebSocketSend(json.dumps(msg, ensure_ascii=False, default=str))
+        except Exception as exc:
+            Domoticz.Debug(f"_push: WebSocketSend raised {exc!r}; ignoring.")
+
+    def onWebSocketMessage(self, Data):
+        # Domoticz calls this with a single positional string argument.
+        # Confirmed in PluginMessages.h (onWebSocketMessageCallback::ProcessLocked)
+        # which builds params via Py_BuildValue("(s)", m_Data.c_str()), and in
+        # plugins/examples/WebSocketChannelTest/plugin.py lines 83 & 158.
+        """Receive a message from the dashboard over the plugin WebSocket channel."""
+        try:
+            payload = json.loads(Data) if isinstance(Data, str) else Data
+        except Exception as exc:
+            Domoticz.Debug(f"onWebSocketMessage: JSON parse error: {exc}")
+            return
+        if not isinstance(payload, dict):
+            Domoticz.Debug(f"onWebSocketMessage: unexpected payload type {type(payload)}")
             return
 
-        # Watchdog: if a worker thread has been running longer than WORKER_TIMEOUT,
-        # force-kill its connection and release the lock.
-        t = self._worker_thread
-        if t is not None and t.is_alive():
-            elapsed = time.monotonic() - self._worker_started
-            if elapsed > WORKER_TIMEOUT:
-                Domoticz.Error(f"Watchdog: worker thread hung for {int(elapsed)}s — force-killing connection")
-                mc = self._current_mc
-                if mc is not None:
-                    self._force_kill_socket(mc)
-                # Give the thread a moment to die after socket kill
-                t.join(timeout=2)
-                if not t.is_alive():
-                    Domoticz.Log("Watchdog: worker thread exited after socket kill.")
-                else:
-                    Domoticz.Error("Watchdog: worker thread still alive — force-releasing lock.")
-                    # Force-release the lock so we can continue
-                    try:
-                        self._conn_lock.release()
-                    except RuntimeError:
-                        pass
-                self._worker_thread = None
+        t = payload.get("t")
+        # Correlation id: clients send an opaque integer/string id with every
+        # {t:'cmd'} frame; we echo it back in the cmd_result so the browser can
+        # resolve the exact promise that triggered the command rather than
+        # relying on FIFO shift().
+        req_id = payload.get("id")
+        Domoticz.Debug(f"onWebSocketMessage: t={t!r} id={req_id!r}")
 
-        # Cooldown: don't reconnect too soon after the last disconnect
-        if self._last_disconnect > 0:
-            since = time.monotonic() - self._last_disconnect
-            if since < POST_DISCONNECT_S:
-                Domoticz.Debug(f"Post-disconnect cooldown ({POST_DISCONNECT_S - since:.0f}s remaining)")
+        if t == "hello":
+            # Build the snapshot before sending the ack so a failure is
+            # surfaced as an explicit ok=False frame rather than swallowed
+            # silently (the client would then wait forever for a snapshot
+            # that never arrives and show a "not ready" state with no hint).
+            try:
+                snap = self._build_snapshot_payload()
+                self._push("cmd_result", {"ok": True, "target": "hello", "result": "connected", "id": req_id})
+                self._push("snapshot", snap)
+                # Deferred follow-up: heard can be large and is not needed for
+                # first paint (only shown when the heard panel opens), so it is
+                # sent as a separate frame right after the lean snapshot rather
+                # than inflating it. The frontend t:'heard' handler applies it.
+                try:
+                    self._push("heard", {"heard": self._build_heard_payload()})
+                except Exception as _hexc:
+                    Domoticz.Debug(f"hello: deferred heard push failed: {_hexc}")
+            except Exception as exc:
+                Domoticz.Error(f"hello: snapshot build failed: {exc!r}")
+                self._push("cmd_result", {
+                    "ok": False, "target": "hello",
+                    "result": f"snapshot build failed: {exc}", "id": req_id,
+                })
+
+        elif t == "cmd":
+            cmd = payload.get("cmd", "").strip()
+            # Guard against whitespace-only input so split()[0] can never IndexError.
+            target = cmd.split()[0] if cmd else "unknown"
+            if not cmd:
+                self._push("cmd_result", {"ok": False, "target": "unknown", "result": "empty cmd", "id": req_id})
                 return
+            if self._handle_local_only_command(cmd):
+                self._push("cmd_result", {"ok": True, "target": target, "result": "applied", "id": req_id})
+                return
+            loop = self._worker_loop
+            if loop is None:
+                self._push("cmd_result", {
+                    "ok": False, "target": target,
+                    "result": "not connected - auto-reconnect in progress",
+                    "id": req_id,
+                })
+                return
+            Domoticz.Debug(f"WebSocket cmd: {cmd}")
+            try:
+                asyncio.run_coroutine_threadsafe(
+                    self._send_message_for_text(cmd, req_id), loop
+                )
+            except Exception as exc:
+                self._push("cmd_result", {
+                    "ok": False, "target": target, "result": str(exc), "id": req_id,
+                })
 
-        # Prevent overlapping connections (previous heartbeat or send still running)
-        if not self._conn_lock.acquire(blocking=False):
-            Domoticz.Debug("Previous connection still active — skipping heartbeat")
-            return
+        elif t == "sub":
+            feed = payload.get("feed", "none")
+            with self._rx_log_lock:
+                self._sub_feeds = str(feed)
+            Domoticz.Debug(f"onWebSocketMessage: sub feed={feed!r}")
+            # F3: on rxlog subscription, immediately push a full window so
+            # the frontend has a baseline before the next periodic delta.
+            if feed == "rxlog":
+                try:
+                    self._push_rx_log_window()
+                except Exception as exc:
+                    Domoticz.Debug(f"sub rxlog: _push_rx_log_window failed: {exc}")
 
-        self._hb_count += 1
-        t = threading.Thread(target=self._heartbeat_worker, daemon=True, name="MeshCorePoll")
-        self._worker_thread = t
-        self._worker_started = time.monotonic()
-        t.start()
+        elif t == "resync":
+            # F7 gap-recovery: the frontend detected a seq gap in devices_delta.
+            # Clear the device-map baseline so the next _push_dirty_feeds sends
+            # a full t:'devices' message instead of a delta.  Mirrors how
+            # t:'sub' feed:'rxlog' forces a fresh rxlog window.
+            feed = payload.get("feed", "")
+            if feed == "devices":
+                with self._rx_log_lock:
+                    self._last_pushed_device_map = None
+                self._ws_devices_dirty = True
+                Domoticz.Debug("onWebSocketMessage: resync devices — baseline cleared")
 
-    def onDeviceModified(self, unit: int):
-        if unit != UNIT_SEND or self._stopping:
+        elif t == "inbox_query":
+            # Paginated inbox query.  Run the DB lookup, build the page, push back.
+            try:
+                scope  = str(payload.get("scope", "all"))
+                before = payload.get("before")
+                raw_lim = payload.get("limit", 50)
+                search = str(payload.get("search") or "")
+                page = self._msg_store_query(scope, before=before, limit=raw_lim, search=search)
+                page["id"] = req_id
+                self._push("inbox_page", page)
+            except Exception as exc:
+                Domoticz.Error(f"inbox_query handler failed: {exc!r}")
+                self._push("inbox_page", {
+                    "id":       req_id,
+                    "scope":    payload.get("scope", "all"),
+                    "search":   str(payload.get("search") or ""),
+                    "rows":     [],
+                    "has_more": False,
+                    "oldest_id": None,
+                    "error":    str(exc),
+                })
+
+        else:
+            Domoticz.Debug(f"onWebSocketMessage: unknown t={t!r}")
+
+    def _handle_local_only_command(self, text: str) -> bool:
+        """Handle commands that don't require an MC connection. Returns True if
+        consumed (caller should not spawn a send worker).
+
+        Note: we intentionally don't enqueue a "send_result" here — the
+        dashboard already performs an optimistic update of its local
+        _deviceMap.favorites array on click, so it doesn't need confirmation
+        roundtripping through the queue.
+        """
+        if not text.startswith("!favorite "):
+            return False
+        try:
+            _, action, name = text.split(None, 2)
+        except ValueError:
+            Domoticz.Error("!favorite syntax: !favorite add|remove <name>")
+            return True
+        action = action.lower()
+        if action == "add":
+            self._favorites.add(name)
+            # Create the contact's devices now instead of waiting for the
+            # next contacts poll (favourited contacts get real devices).
+            self._ensure_node_devices(name)
+        elif action == "remove":
+            self._favorites.discard(name)
+            # Remove the contact's now-unneeded Domoticz devices so the DB
+            # doesn't accumulate them. The contact still shows on the
+            # dashboard via the JSON map.
+            self._delete_node_devices(name)
+        else:
+            Domoticz.Error(f"!favorite unknown action: {action}")
+            return True
+        self._save_favorites()
+        self._write_device_map()
+        Domoticz.Debug(f"Favorite {action}: {name}")
+        return True
+
+    def _delete_node_devices(self, node_name: str):
+        """Delete all Domoticz units for a (non-self) contact's DeviceID."""
+        did = self._device_id_for(node_name)
+        if not did or did == SELF_DID or did not in Devices:
             return
-        dev = Devices.get(UNIT_SEND)
-        if not dev or not dev.sValue:
-            return
-        text = dev.sValue.strip()
-        if not text:
-            return
-        if text == self._last_sent_text:
-            return
-        self._last_sent_text = text
-        Domoticz.Log(f"Sending message immediately: {text}")
-        t = threading.Thread(
-            target=self._immediate_send_worker, args=(text,),
-            daemon=True, name="MeshCoreSend"
-        )
-        self._worker_thread = t
-        self._worker_started = time.monotonic()
-        t.start()
+        try:
+            for unit in list(Devices[did].Units):
+                Devices[did].Units[unit].Delete()
+            Domoticz.Log(f"Removed devices for node '{node_name}' (DeviceID={did})")
+        except Exception as exc:
+            Domoticz.Debug(f"_delete_node_devices({node_name}) error: {exc}")
 
     # ── Device creation ───────────────────────────────────────────────────────
 
     def _create_base_devices(self):
-        if UNIT_INBOX not in Devices:
-            Domoticz.Device(Name="Mesh Inbox", Unit=UNIT_INBOX, TypeName="Text").Create()
-        if UNIT_SEND not in Devices:
-            Domoticz.Device(Name="Mesh Send",  Unit=UNIT_SEND,  TypeName="Text").Create()
-        if UNIT_MSGS_RECV not in Devices:
-            Domoticz.Device(Name="Mesh Msgs Received", Unit=UNIT_MSGS_RECV,
-                            TypeName="Custom", Options={"Custom": "1;msgs"}).Create()
-        if UNIT_MSGS_SENT_ not in Devices:
-            Domoticz.Device(Name="Mesh Msgs Sent", Unit=UNIT_MSGS_SENT_,
-                            TypeName="Custom", Options={"Custom": "1;msgs"}).Create()
+        def _have(unit):
+            return MESH_DID in Devices and unit in Devices[MESH_DID].Units
+        if not _have(UNIT_INBOX):
+            Domoticz.Unit(Name="Mesh Inbox", DeviceID=MESH_DID, Unit=UNIT_INBOX,
+                          TypeName="Text").Create()
+        # UNIT_SEND (unit 2) is intentionally NOT created — commands are sent via the
+        # WebSocket channel. Any existing UNIT_SEND device from older installs is
+        # deleted in onStart (stale-device cleanup).
+        if not _have(UNIT_MSGS_RECV):
+            Domoticz.Unit(Name="Mesh Msgs Received", DeviceID=MESH_DID, Unit=UNIT_MSGS_RECV,
+                          TypeName="Custom", Options={"Custom": "1;msgs"}).Create()
+        if not _have(UNIT_MSGS_SENT_):
+            Domoticz.Unit(Name="Mesh Msgs Sent", DeviceID=MESH_DID, Unit=UNIT_MSGS_SENT_,
+                          TypeName="Custom", Options={"Custom": "1;msgs"}).Create()
+
+    def _favorites_path(self) -> str:
+        return os.path.join(os.path.dirname(os.path.abspath(__file__)), "meshcore_favorites.json")
+
+    def _load_favorites(self):
+        p = self._favorites_path()
+        if not os.path.isfile(p):
+            return
+        try:
+            with open(p, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if isinstance(data, list):
+                self._favorites = {str(x) for x in data}
+                Domoticz.Log(f"Loaded {len(self._favorites)} favorite contact(s).")
+        except Exception as exc:
+            Domoticz.Error(f"Could not load meshcore_favorites.json: {exc}")
+
+    def _save_favorites(self):
+        p = self._favorites_path()
+        try:
+            with open(p, "w", encoding="utf-8") as f:
+                json.dump(sorted(self._favorites), f)
+        except Exception as exc:
+            Domoticz.Error(f"Could not write meshcore_favorites.json: {exc}")
+
+    def _migrate_state_files(self, _plugin_dir: str = None, _old_dir: str = None):
+        """One-time migration: move state JSON files from the old www/templates
+        location to the plugin directory.
+
+        Prior to F4 the five state files were written into www/templates so the
+        dashboard could fetch them.  They now live in the plugin directory and
+        are never HTTP-served.  When upgrading, the new location will be empty
+        on the first start, so we copy from the old location and then remove
+        the old copy to keep things tidy.  The operation is idempotent: if the
+        new file already exists (or the old file doesn't) it is a no-op.
+
+        The ``_plugin_dir`` and ``_old_dir`` parameters exist solely to allow
+        the unit tests to inject a temporary directory without relying on
+        module-level ``__file__`` patching (which is unreliable under CPython
+        3.13's specializing adaptive interpreter).  Production code never
+        passes them.
+        """
+        plugin_dir    = _plugin_dir or os.path.dirname(os.path.abspath(__file__))
+        domoticz_root = os.path.abspath(os.path.join(plugin_dir, "..", ".."))
+        old_dir       = _old_dir or os.path.join(domoticz_root, "www", "templates")
+        for fname in (
+            "meshcore_devices.json",
+            "meshcore_rx_log.json",
+            "meshcore_heard.json",
+            "meshcore_stats.json",
+            "meshcore_channels.json",
+        ):
+            new_path = os.path.join(plugin_dir, fname)
+            old_path = os.path.join(old_dir, fname)
+            if os.path.isfile(new_path):
+                # New location already populated — nothing to do.
+                # Also remove the stale old copy so www/templates stays clean.
+                try:
+                    os.remove(old_path)
+                    Domoticz.Debug(f"Migration: removed stale {fname} from templates dir")
+                except FileNotFoundError:
+                    pass
+                except Exception as exc:
+                    Domoticz.Debug(f"Migration: could not remove old {fname}: {exc}")
+                continue
+            if not os.path.isfile(old_path):
+                continue
+            try:
+                shutil.copy2(old_path, new_path)
+                os.remove(old_path)
+                Domoticz.Log(f"Migration: moved {fname} from templates to plugin dir")
+            except Exception as exc:
+                Domoticz.Log(f"Migration: could not move {fname} (non-fatal, history may reset): {exc}")
 
     def _load_manual_locations(self):
         """Load meshcore_locations.json from the plugin directory as seed locations.
@@ -385,10 +1287,22 @@ class BasePlugin:
 
     def _ensure_node_devices(self, node_name: str):
         """Create per-node devices on first data for that node."""
-        idx = self._node_index(node_name)
-        if idx < 0:
+        did = self._device_id_for(node_name)
+        if did is None:
+            # No pubkey yet — the contacts poll will create the device once
+            # the pubkey is known. Self always resolves to SELF_DID.
             return
-        is_self = (idx == 0)
+        is_self = (did == SELF_DID)
+        # Only the self node and favourited contacts get real Domoticz
+        # devices. The mesh can carry 300+ contacts (repeaters / room
+        # servers / sensors) you never interact with — creating ~4 devices
+        # each would bloat the DB and Domoticz UI. Non-favourite contacts
+        # still appear fully on the dashboard via the WebSocket devices push
+        # (last_seen comes from _node_last_activity, plus type/last_advert/
+        # pubkey/query are all in the map). Favourite a contact and its
+        # devices are created on the next contacts poll.
+        if not is_self and node_name not in self._favorites:
+            return
         if is_self:
             specs = [
                 (OFF_STATUS,    f"{node_name} Status",      "Switch",      {}),
@@ -412,91 +1326,97 @@ class BasePlugin:
                 (OFF_HOPS,     f"{node_name} Hops",      "Custom", {"Custom": "1;hops"}),
             ]
         created = False
+        existing_units = (Devices[did].Units if did in Devices else {})
         for offset, name, typename, opts in specs:
-            unit = self._node_unit(idx, offset)
-            if unit not in Devices:
-                Domoticz.Device(Name=name, Unit=unit, TypeName=typename, Options=opts).Create()
+            if offset not in existing_units:
+                Domoticz.Unit(Name=name, DeviceID=did, Unit=offset,
+                              TypeName=typename, Options=opts).Create()
                 created = True
         if created:
-            Domoticz.Log(f"Created devices for node '{node_name}' (idx={idx})")
+            Domoticz.Log(f"Created devices for node '{node_name}' (DeviceID={did})")
             self._write_device_map()
 
     # ── Custom dashboard page ──────────────────────────────────────────────────
 
     def _install_custom_page(self):
-        template = os.path.join(os.path.dirname(os.path.abspath(__file__)), "meshcore.html")
+        plugin_dir = os.path.dirname(os.path.abspath(__file__))
+        template = os.path.join(plugin_dir, "meshcore.html")
         if not os.path.isfile(template):
             Domoticz.Error("meshcore.html template not found — dashboard not installed.")
             return
 
-        plugin_dir    = os.path.dirname(os.path.abspath(__file__))
         domoticz_root = os.path.abspath(os.path.join(plugin_dir, "..", ".."))
         dest_dir      = os.path.join(domoticz_root, "www", "templates")
         dest          = os.path.join(dest_dir, "meshcore.html")
 
         try:
-            import shutil
             os.makedirs(dest_dir, exist_ok=True)
             shutil.copy2(template, dest)
             Domoticz.Log(f"MeshCore dashboard installed: {dest}")
         except Exception as exc:
             Domoticz.Error(f"Failed to install dashboard: {exc}")
 
-    def _install_manual_locations(self):
-        """Copy meshcore_locations.json to the templates dir so the dashboard can fetch it."""
-        plugin_dir    = os.path.dirname(os.path.abspath(__file__))
-        src = os.path.join(plugin_dir, "meshcore_locations.json")
-        if not os.path.isfile(src):
+        # Bundle Leaflet locally so the topology / map panel works even when
+        # the browser's tracking-prevention blocks unpkg.com (Edge/Firefox).
+        leaflet_src = os.path.join(plugin_dir, "assets", "leaflet")
+        leaflet_dst = os.path.join(dest_dir, "leaflet")
+        if os.path.isdir(leaflet_src):
+            try:
+                os.makedirs(leaflet_dst, exist_ok=True)
+                for fname in ("leaflet.js", "leaflet.css"):
+                    s = os.path.join(leaflet_src, fname)
+                    if os.path.isfile(s):
+                        shutil.copy2(s, os.path.join(leaflet_dst, fname))
+                Domoticz.Debug(f"Leaflet installed: {leaflet_dst}")
+            except Exception as exc:
+                Domoticz.Error(f"Failed to install Leaflet: {exc}")
+
+    def _channels_path(self) -> str:
+        return os.path.join(os.path.dirname(os.path.abspath(__file__)), "meshcore_channels.json")
+
+    def _load_channels(self):
+        """Restore channel index→name map on startup so ``_channel_names``
+        (and therefore the snapshot's ``channels`` field) is populated before
+        the first connection-time channel fetch."""
+        path = self._channels_path()
+        if not os.path.isfile(path):
             return
-        domoticz_root = os.path.abspath(os.path.join(plugin_dir, "..", ".."))
-        dest = os.path.join(domoticz_root, "www", "templates", "meshcore_locations.json")
         try:
-            import shutil
-            shutil.copy2(src, dest)
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if not isinstance(data, dict):
+                return
+            # JSON keys are strings; restore as int-keyed dict to match the
+            # in-memory convention.  Skip empty-string entries (empty slots).
+            loaded = {int(k): v for k, v in data.items()
+                      if v and isinstance(v, str)}
+            if loaded:
+                self._channel_names = loaded
+                parts = [f"#{k}={v}" for k, v in sorted(loaded.items())]
+                Domoticz.Log(f"Restored channel names: {', '.join(parts)}")
         except Exception as exc:
-            Domoticz.Debug(f"Could not install meshcore_locations.json: {exc}")
+            Domoticz.Error(f"Could not load meshcore_channels.json: {exc}")
 
     def _write_channel_names(self, channel_names: dict):
-        """Write channel index→name map as JSON for the dashboard to fetch."""
-        plugin_dir    = os.path.dirname(os.path.abspath(__file__))
-        domoticz_root = os.path.abspath(os.path.join(plugin_dir, "..", ".."))
-        dest = os.path.join(domoticz_root, "www", "templates", "meshcore_channels.json")
+        """Persist channel index→name map to meshcore_channels.json (plugin dir)
+        and mark the WebSocket channel feed dirty."""
+        dest = self._channels_path()
         try:
             with open(dest, "w") as f:
                 json.dump(channel_names, f)
         except Exception as exc:
             Domoticz.Debug(f"Could not write channel names: {exc}")
+        self._ws_channels_dirty = True
+        self._ws_devices_dirty = True
 
-    def _write_device_map(self):
-        """Write meshcore_devices.json so the dashboard can look up devices by idx
-        rather than by name — rename-proof and collision-free.
-
-        Format:
-        {
-          "inbox": <idx>,
-          "self": "<node_name>",          # or null
-          "nodes": {
-            "<node_name>": {
-              "status":    <idx|null>,
-              "battery":   <idx|null>,
-              "battery_v": <idx|null>,
-              "rssi":      <idx|null>,
-              "snr":       <idx|null>,
-              "noise":     <idx|null>,
-              "last_seen": <idx|null>,
-              "hops":      <idx|null>,
-              "uptime":    <idx|null>,
-              "airtime":   <idx|null>,
-              "pkts_sent": <idx|null>,
-              "pkts_recv": <idx|null>
-            },
-            ...
-          }
-        }
+    def _build_device_map_payload(self) -> dict:
+        """Build and return the device-map dict (persisted to plugin dir and
+        pushed as ``t:'devices'`` over WebSocket).
+        Callers own the returned dict; it is safe to mutate or serialize.
         """
-        def _slot(unit):
+        def _slot(did, unit):
             """Return {idx, value, online} for a device unit, or None if not created yet."""
-            d = Devices.get(unit)
+            d = self._dev(did, unit)
             if not d:
                 return None
             return {
@@ -507,208 +1427,1268 @@ class BasePlugin:
 
         nodes = {}
         for node_name in self._all_node_names():
-            ni = self._node_index(node_name)
-            if ni < 0:
-                continue
+            did = self._device_id_for(node_name)
             loc = self._node_locations.get(node_name, {})
+            pk_full = self._node_pubkey.get(node_name, "")
+            # Build the last_seen slot. _node_last_activity is the source of
+            # truth — it's always updated regardless of whether the Domoticz
+            # device exists yet (pubkey-less contacts have no DeviceID until
+            # the contacts poll). We surface the matching device idx for the
+            # click-through to the device log when it has been created.
+            ls_slot_dev = _slot(did, OFF_LASTSEEN)
+            last_activity = self._node_last_activity.get(node_name, 0)
+            if last_activity:
+                ls_slot = {
+                    "idx": ls_slot_dev.get("idx") if ls_slot_dev else None,
+                    "value": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(last_activity)),
+                    "online": False,
+                }
+            else:
+                ls_slot = ls_slot_dev
             nodes[node_name] = {
-                "status":    _slot(self._node_unit(ni, OFF_STATUS)),
-                "battery":   _slot(self._node_unit(ni, OFF_BATT_PCT)),
-                "battery_v": _slot(self._node_unit(ni, OFF_BATT_V)),
-                "rssi":      _slot(self._node_unit(ni, OFF_RSSI)),
-                "snr":       _slot(self._node_unit(ni, OFF_SNR)),
-                "noise":     _slot(self._node_unit(ni, OFF_NOISE)),
-                "last_seen": _slot(self._node_unit(ni, OFF_LASTSEEN)),
-                "hops":      _slot(self._node_unit(ni, OFF_HOPS)),
-                "uptime":    _slot(self._node_unit(ni, OFF_UPTIME)),
-                "airtime":   _slot(self._node_unit(ni, OFF_AIRTIME)),
-                "pkts_sent": _slot(self._node_unit(ni, OFF_MSGS_SENT)),
-                "pkts_recv": _slot(self._node_unit(ni, OFF_MSGS_RECV)),
+                "status":    _slot(did, OFF_STATUS),
+                "battery":   _slot(did, OFF_BATT_PCT),
+                "battery_v": _slot(did, OFF_BATT_V),
+                "rssi":      _slot(did, OFF_RSSI),
+                "snr":       _slot(did, OFF_SNR),
+                "noise":     _slot(did, OFF_NOISE),
+                "last_seen": ls_slot,
+                "hops":      _slot(did, OFF_HOPS),
+                "uptime":    _slot(did, OFF_UPTIME),
+                "airtime":   _slot(did, OFF_AIRTIME),
+                "pkts_sent": _slot(did, OFF_MSGS_SENT),
+                "pkts_recv": _slot(did, OFF_MSGS_RECV),
                 "lat":       loc.get("lat"),
                 "lon":       loc.get("lon"),
+                # Contact metadata — used by the dashboard for type chip and sorting.
+                # type: 1=Contact, 2=Repeater, 3=Room Server, 4=Sensor (0 for self)
+                "type":          self._node_types.get(node_name, 0),
+                "last_advert":   self._node_last_advert.get(node_name, 0),
+                # Full pubkey (hex) and first-12-char prefix used by the firmware
+                # to identify message senders. The sparkline / signal-history
+                # lookup is keyed by the prefix.
+                "pubkey":        pk_full,
+                "pubkey_prefix": pk_full[:12] if pk_full else "",
+                # Per-contact query results (status / telemetry / neighbours)
+                # from req_* sync calls. None if never queried.
+                "query":         self._contact_query_results.get(node_name, {}),
             }
 
-        inbox_dev = Devices.get(UNIT_INBOX)
-        send_dev  = Devices.get(UNIT_SEND)
+            # Fall back to the latest received signal (advert OR message) for
+            # contacts that have no Domoticz device (non-favourites) or no
+            # message/direct-path data, so their cards aren't bare. Device
+            # slots (favourites with live data) win over this fallback.
+            # _contact_sig is mutated by the worker thread under _rx_log_lock;
+            # take a shallow snapshot of the single entry to avoid tearing.
+            if pk_full:
+                with self._rx_log_lock:
+                    adv = dict(self._contact_sig.get(pk_full[:12]) or {}) or None
+            else:
+                adv = None
+            # Ignore stale fallback signal (older than the node-online window)
+            # so cards don't show indefinitely-old SNR/RSSI for gone nodes.
+            if adv and (time.time() - adv.get("t", 0)) > 28800:
+                adv = None
+            if adv and did != SELF_DID:
+                e = nodes[node_name]
+                if e["snr"] is None and adv.get("snr") is not None:
+                    e["snr"] = {"value": f"{adv['snr']} dB"}
+                if e["rssi"] is None and adv.get("rssi") is not None:
+                    e["rssi"] = {"value": f"{adv['rssi']} dBm"}
+                _pl = adv.get("path_len", -1)
+                if e["hops"] is None and isinstance(_pl, int) and _pl >= 0:
+                    e["hops"] = {"value": str(_pl)}
+
+        inbox_dev = self._dev(MESH_DID, UNIT_INBOX)
         payload = {
             "inbox":        inbox_dev.ID if inbox_dev else None,
             "inbox_value":  inbox_dev.sValue if inbox_dev else None,
-            "send_idx":     send_dev.ID if send_dev else None,
             "self":         self._self_name or None,
             "nodes":        nodes,
+            # True = device blocks auto-add of new contacts from adverts
+            "manual_add_contacts": bool(self._manual_add_contacts),
+            "telemetry_mode_base": int(self._telemetry_mode_base),
+            "telemetry_mode_loc":  int(self._telemetry_mode_loc),
+            "telemetry_mode_env":  int(self._telemetry_mode_env),
+            "adv_loc_policy":      int(self._advert_loc_policy),
+            "default_flood_scope": self._default_flood_scope or "",
+            "favorites":    sorted(self._favorites),
+            "device_info":  self._device_info or {},
+            # Full self_info snapshot — radio params, our coordinates, pubkey.
+            # Dashboard self-node side panel reads from here.
+            "self_info":    {
+                "name":           self._self_info_full.get("name", self._self_name),
+                "public_key":     self._self_info_full.get("public_key", ""),
+                "adv_lat":        self._self_info_full.get("adv_lat", 0.0),
+                "adv_lon":        self._self_info_full.get("adv_lon", 0.0),
+                "adv_type":       self._self_info_full.get("adv_type", 0),
+                "radio_freq":     self._self_info_full.get("radio_freq", 0),
+                "radio_bw":       self._self_info_full.get("radio_bw", 0),
+                "radio_sf":       self._self_info_full.get("radio_sf", 0),
+                "radio_cr":       self._self_info_full.get("radio_cr", 0),
+                "tx_power":       self._self_info_full.get("tx_power", 0),
+                "max_tx_power":   self._self_info_full.get("max_tx_power", 0),
+                "multi_acks":     self._self_info_full.get("multi_acks", 0),
+            },
+            "self_telemetry": self._self_telemetry or {},
+            # Every channel slot the device has, so the dashboard can render
+            # an Add/Remove button per slot. Non-empty slots have their
+            # `name`; empty slots have name = "".
+            "channel_slots": [
+                {"idx": i, "name": self._channel_slots.get(i, "")} for i in range(MAX_CHANNEL_SLOTS)
+            ],
             "written_at":   int(time.time()),
         }
+        return payload
 
-        plugin_dir    = os.path.dirname(os.path.abspath(__file__))
-        domoticz_root = os.path.abspath(os.path.join(plugin_dir, "..", ".."))
-        dest = os.path.join(domoticz_root, "www", "templates", "meshcore_devices.json")
+    def _write_device_map(self):
+        """Persist the device map to meshcore_devices.json (plugin dir) and mark the
+        WebSocket feed dirty so the next flush pushes it to the dashboard."""
+        payload = self._build_device_map_payload()
+        dest = os.path.join(os.path.dirname(os.path.abspath(__file__)), "meshcore_devices.json")
         try:
             with open(dest, "w") as f:
                 json.dump(payload, f)
         except Exception as exc:
             Domoticz.Debug(f"Could not write device map: {exc}")
+        self._ws_devices_dirty = True
+
+    def _write_rx_log(self):
+        """Atomically write the rolling RX_LOG_DATA buffer + aggregates as JSON.
+
+        The dashboard fetches this every few seconds to render the analyzer
+        detail panel, RF firehose, signal sparklines, packet-rate heatmap,
+        duplicate-flood and channel-discovery views.
+        """
+        dest = self._rx_log_path()
+
+        now = time.time()
+        with self._rx_log_lock:
+            entries = list(self._rx_log)
+            payload_type_counts = dict(self._payload_type_counts)
+            chan_hash_counts    = dict(self._chan_hash_counts)
+            signal_history      = {k: list(v) for k, v in self._signal_history.items()}
+            dup_floods          = {k: list(v) for k, v in self._dup_floods.items() if len(v) > 1}
+            # Trim packet_times to last 24h for the heatmap, then bucket by hour-of-day
+            cutoff = now - 86400
+            while self._packet_times and self._packet_times[0] < cutoff:
+                self._packet_times.popleft()
+            heatmap = [0] * 24
+            for t in self._packet_times:
+                heatmap[time.localtime(t).tm_hour] += 1
+            # Persist the (already 24h-trimmed) timestamps so the heatmap can
+            # be restored on the next plugin start instead of resetting.
+            packet_times = [int(t) for t in self._packet_times]
+            known_channels_snap = dict(self._channel_names)
+            chan_hash_names_snap = dict(self._chan_hash_to_name)
+
+        # Build a JSON-safe view of each entry (already normalized in _on_rx_log)
+        out_entries = []
+        for e in entries:
+            row = {}
+            for k, v in e.items():
+                # Already-normalized values are JSON-safe; defend against stray bytes
+                if isinstance(v, (bytes, bytearray)):
+                    row[k] = v.hex()
+                elif isinstance(v, (str, int, float, bool)) or v is None:
+                    row[k] = v
+                else:
+                    row[k] = str(v)
+            out_entries.append(row)
+
+        payload = {
+            "written_at": int(now),
+            "entries":    out_entries,
+            "stats": {
+                "payload_type_counts": payload_type_counts,
+                "chan_hash_counts":    chan_hash_counts,
+                "signal_history":      signal_history,
+                "dup_floods":          dup_floods,
+                "heatmap_24h":         heatmap,
+            },
+            "packet_times":    packet_times,
+            "known_channels":  known_channels_snap,
+            "chan_hash_names":  chan_hash_names_snap,
+        }
+
+        try:
+            tmp = dest + ".tmp"
+            with open(tmp, "w") as f:
+                json.dump(payload, f)
+            os.replace(tmp, dest)
+        except Exception as exc:
+            Domoticz.Debug(f"Could not write rx log: {exc}")
+
+    def _rx_log_path(self) -> str:
+        return os.path.join(os.path.dirname(os.path.abspath(__file__)), "meshcore_rx_log.json")
+
+    # ── F3: rx-log on-demand push helpers ────────────────────────────────────
+
+    def _build_rx_log_payload(self, entries: list) -> dict:
+        """Serialize a list of rx-log entries into the JSON-safe shape used by
+        the file writer and the WebSocket push.
+
+        Caller must already hold ``_rx_log_lock`` (or pass a snapshot copy).
+        """
+        out = []
+        for e in entries:
+            row = {}
+            for k, v in e.items():
+                if isinstance(v, (bytes, bytearray)):
+                    row[k] = v.hex()
+                elif isinstance(v, (str, int, float, bool)) or v is None:
+                    row[k] = v
+                else:
+                    row[k] = str(v)
+            out.append(row)
+        return out
+
+    def _build_rx_log_stats(self, now: float) -> dict:
+        """Build the aggregated stats sub-object (same shape as the ``stats``
+        key in the rx-log payload).  Trims ``_packet_times`` to last 24 h
+        as a side-effect.
+
+        Must be called with ``_rx_log_lock`` held.
+        """
+        cutoff = now - 86400
+        while self._packet_times and self._packet_times[0] < cutoff:
+            self._packet_times.popleft()
+        heatmap = [0] * 24
+        for t in self._packet_times:
+            heatmap[time.localtime(t).tm_hour] += 1
+        return {
+            "payload_type_counts": dict(self._payload_type_counts),
+            "chan_hash_counts":    dict(self._chan_hash_counts),
+            "signal_history":     {k: list(v) for k, v in self._signal_history.items()},
+            "dup_floods":         {k: list(v) for k, v in self._dup_floods.items() if len(v) > 1},
+            "heatmap_24h":        heatmap,
+        }
+
+    def _push_rx_log_window(self):
+        """Push a full rx-log window to the subscribed frontend client.
+
+        Increments ``_rx_log_seq`` and records ``_rx_log_pushed_total`` so
+        subsequent ``_push_rx_log_delta`` calls can compute exactly which
+        entries are new using the absolute append counter.
+
+        Must be called WITHOUT holding ``_rx_log_lock``; acquires it internally.
+        """
+        now = time.time()
+        with self._rx_log_lock:
+            entries_snap  = list(self._rx_log)
+            stats_snap    = self._build_rx_log_stats(now)
+            self._rx_log_seq += 1
+            seq = self._rx_log_seq
+            self._rx_log_pushed_total = self._rx_log_total_appended
+            chan_hash_snap = dict(self._chan_hash_to_name)
+        self._push("rxlog", {
+            "entries":         self._build_rx_log_payload(entries_snap),
+            "stats":           stats_snap,
+            "seq":             seq,
+            "chan_hash_names":  chan_hash_snap,
+        })
+        Domoticz.Debug(f"_push_rx_log_window: seq={seq} entries={len(entries_snap)}")
+
+    def _push_rx_log_delta(self):
+        """Push only the entries appended since the last window/delta push.
+
+        Uses the monotonic absolute counter ``_rx_log_total_appended`` rather
+        than the deque length, so the full-buffer steady state (len stays at
+        RX_LOG_BUFFER=250 while old entries are evicted) never silently drops
+        new arrivals.
+
+        Fallback: if ``_rx_log_pushed_total`` is older than the oldest entry
+        still in the buffer (i.e. the client missed evicted entries), a full
+        ``_push_rx_log_window`` is issued instead.
+
+        Must be called WITHOUT holding ``_rx_log_lock``.
+        Called from the existing rx-log write cadence when a subscriber is
+        active.
+        """
+        now = time.time()
+
+        # All decision values, the slice of new entries, the stats side-effect,
+        # the seq increment, and the pushed_total update are derived under a
+        # SINGLE lock acquisition so that no interleaved append can cause the
+        # slice offset (pushed_total - start) to become stale before it is used.
+        eviction_gap = False
+        payload = None
+        with self._rx_log_lock:
+            sub          = self._sub_feeds
+            if sub != "rxlog":
+                return
+
+            current_total = self._rx_log_total_appended
+            pushed_total  = self._rx_log_pushed_total
+            buf_len       = len(self._rx_log)
+            # Oldest absolute index still present in the deque.
+            start         = current_total - buf_len
+
+            if pushed_total < start:
+                # The client missed entries that were evicted from the deque —
+                # signal the eviction-gap fallback; release the lock first so
+                # _push_rx_log_window can acquire it.
+                eviction_gap = True
+            else:
+                # Slice off only the entries the client hasn't seen yet.
+                # pushed_total - start is the number of already-sent entries
+                # that are still in the buffer; everything after that is new.
+                new_entries = list(self._rx_log)[pushed_total - start:]
+                if new_entries:
+                    stats_snap = self._build_rx_log_stats(now)
+                    self._rx_log_seq += 1
+                    seq = self._rx_log_seq
+                    self._rx_log_pushed_total = current_total
+                    chan_hash_snap = dict(self._chan_hash_to_name)
+                    payload = (new_entries, stats_snap, seq, chan_hash_snap)
+
+        # Lock released — safe to call _push / _push_rx_log_window.
+        if eviction_gap:
+            Domoticz.Debug("_push_rx_log_delta: eviction gap, pushing full window")
+            self._push_rx_log_window()
+            return
+
+        if payload is None:
+            return
+
+        new_entries, stats_snap, seq, chan_hash_snap = payload
+        self._push("rxlog_delta", {
+            "entries":         self._build_rx_log_payload(new_entries),
+            "stats":           stats_snap,
+            "seq":             seq,
+            "chan_hash_names":  chan_hash_snap,
+        })
+        Domoticz.Debug(f"_push_rx_log_delta: seq={seq} new={len(new_entries)}")
+
+    def _load_rx_log(self):
+        """Restore the packet-time history and chan_hash_names on startup.
+
+        Packet timestamps power the packets/hour heatmap; chan_hash_names
+        avoid a cold-start gap where configured channel hashes show as
+        "unknown" until _fetch_channel_names completes its first round-trip.
+        The rolling frame buffer / sparklines rebuild from live RX events.
+        """
+        # Only seed an empty buffer. On a warm disable→enable (Domoticz still
+        # running) _packet_times may already hold live samples; appending the
+        # persisted ones again would double-count the heatmap.
+        if self._packet_times:
+            return
+        path = self._rx_log_path()
+        if not os.path.isfile(path):
+            return
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if not isinstance(data, dict):
+                return
+            pts = data.get("packet_times")
+            if isinstance(pts, list):
+                cutoff = time.time() - 86400
+                pts = sorted(int(t) for t in pts if isinstance(t, (int, float)))
+                pts = [t for t in pts if t >= cutoff]
+                # Respect the deque's maxlen — keep the most recent samples.
+                self._packet_times.extend(pts)
+                Domoticz.Log(f"Restored {len(self._packet_times)} packet timestamp(s) for the heatmap")
+            chn = data.get("chan_hash_names")
+            if isinstance(chn, dict):
+                restored = {str(k).lower(): str(v) for k, v in chn.items() if k and v}
+                if restored:
+                    with self._rx_log_lock:
+                        self._chan_hash_to_name = restored
+                    Domoticz.Log(f"Restored {len(restored)} chan_hash→name mapping(s) from rx-log")
+        except Exception as exc:
+            Domoticz.Error(f"Could not load packet times from meshcore_rx_log.json: {exc}")
+
+    def _stats_path(self) -> str:
+        return os.path.join(os.path.dirname(os.path.abspath(__file__)), "meshcore_stats.json")
+
+    def _load_stats(self):
+        """Restore lifetime statistics on startup. Today's counters reset
+        when the stored day != the current local day."""
+        path = self._stats_path()
+        if not os.path.isfile(path):
+            return
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if not isinstance(data, dict):
+                return
+            s = self._stats
+            for k in ("adverts_total", "messages_total", "client_total",
+                      "repeater_total", "server_total"):
+                if isinstance(data.get(k), int):
+                    s[k] = data[k]
+            for k in ("msg_by_sender", "adv_by_sender", "msg_by_channel"):
+                if isinstance(data.get(k), dict):
+                    s[k] = {str(n): int(c) for n, c in data[k].items()
+                            if isinstance(c, (int, float))}
+            recs = data.get("hops_records")
+            if isinstance(recs, list):
+                clean = [
+                    {"hops": int(r.get("hops", -1)), "name": str(r.get("name", "")),
+                     "date": str(r.get("date", "")), "channel": str(r.get("channel", ""))}
+                    for r in recs
+                    if isinstance(r, dict) and isinstance(r.get("hops"), int)
+                    and 0 <= int(r.get("hops", -1)) < HOPS_SENTINEL
+                ]
+                clean.sort(key=lambda r: r["hops"], reverse=True)
+                s["hops_records"] = clean[:5]
+            else:
+                # Migrate the old single hops_record dict → list.
+                hr = data.get("hops_record")
+                if isinstance(hr, dict) and isinstance(hr.get("hops"), int) and hr.get("name"):
+                    s["hops_records"] = [{
+                        "hops": hr.get("hops", -1), "name": hr.get("name", ""),
+                        "date": hr.get("date", ""), "channel": hr.get("channel", ""),
+                    }]
+            today = time.strftime("%Y-%m-%d")
+            td = data.get("today")
+            if isinstance(td, dict) and td.get("date") == today:
+                s["today"] = {
+                    "date": today,
+                    "messages": int(td.get("messages", 0)),
+                    "client":   int(td.get("client", 0)),
+                    "repeater": int(td.get("repeater", 0)),
+                    "server":   int(td.get("server", 0)),
+                }
+            Domoticz.Log(
+                f"Restored stats: {s['messages_total']} msgs / "
+                f"{s['adverts_total']} adverts lifetime")
+        except Exception as exc:
+            Domoticz.Error(f"Could not load meshcore_stats.json: {exc}")
+
+    def _build_stats_payload(self) -> dict:
+        """Build and return the stats dict (persisted to plugin dir and pushed
+        as ``t:'stats'`` over WebSocket). Caller must NOT hold _rx_log_lock
+        when calling this — the method acquires it internally."""
+        with self._rx_log_lock:
+            payload = dict(self._stats)
+            payload["msg_by_sender"]  = dict(self._stats["msg_by_sender"])
+            payload["adv_by_sender"]  = dict(self._stats["adv_by_sender"])
+            payload["msg_by_channel"] = dict(self._stats["msg_by_channel"])
+            payload["hops_records"]   = [dict(r) for r in self._stats["hops_records"]]
+            payload["today"]          = dict(self._stats["today"])
+            payload["written_at"]    = int(time.time())
+        return payload
+
+    def _write_stats(self):
+        """Atomically persist lifetime statistics to the plugin directory."""
+        dest = self._stats_path()
+        payload = self._build_stats_payload()
+        try:
+            tmp = dest + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(payload, f)
+            os.replace(tmp, dest)
+        except Exception as exc:
+            Domoticz.Debug(f"Could not write stats: {exc}")
+
+    def _classify_sender(self, name: str) -> str:
+        """client / repeater / server from the contact's MeshCore type.
+        Unknown or any other type counts as client (per design)."""
+        t = self._node_types.get(name, 0)
+        if t == 2:
+            return "repeater"
+        if t == 3:
+            return "server"
+        return "client"
+
+    def _pretty_chan(self, tag: str) -> str:
+        """Friendly channel label for the hops record. 'P' → Direct (DM);
+        'C<idx>' → the channel's name if known (e.g. C0 → Public), else
+        '#<idx>'; anything else (already a name like '#test') as-is."""
+        if not tag:
+            return "?"
+        if tag == "P":
+            return "Direct (DM)"
+        if len(tag) > 1 and tag[0] == "C" and tag[1:].isdigit():
+            idx = int(tag[1:])
+            return self._channel_names.get(idx) or f"#{idx}"
+        return tag
+
+    def _bump_msg_stats(self, sender: str, hops, channel: str):
+        cls = self._classify_sender(sender)
+        today = time.strftime("%Y-%m-%d")
+        when  = time.strftime("%Y-%m-%d %H:%M:%S")
+        with self._rx_log_lock:
+            s = self._stats
+            if s["today"].get("date") != today:
+                s["today"] = {"date": today, "messages": 0,
+                              "client": 0, "repeater": 0, "server": 0}
+            s["messages_total"] += 1
+            s["today"]["messages"] += 1
+            s[f"{cls}_total"] += 1
+            s["today"][cls] += 1
+            if sender:
+                s["msg_by_sender"][sender] = s["msg_by_sender"].get(sender, 0) + 1
+            # Count channel messages by resolved channel name (known channels only).
+            # channel is the already-resolved chan_tag from _handle_message:
+            #   "P"        → private DM — not a channel
+            #   a name     → resolved from _channel_names (known channel)
+            #   "C<idx>"   → unresolved index fallback (unknown channel, skip)
+            if channel and channel != "P":
+                known_names = set(self._channel_names.values())
+                if channel in known_names:
+                    s["msg_by_channel"][channel] = s["msg_by_channel"].get(channel, 0) + 1
+            if isinstance(hops, int) and 0 <= hops < HOPS_SENTINEL and sender:
+                chan = self._pretty_chan(channel)
+                recs = s["hops_records"]
+                ex = next((r for r in recs if r["name"] == sender), None)
+                if ex is None:
+                    recs.append({"hops": hops, "name": sender,
+                                 "date": when, "channel": chan})
+                elif hops > ex["hops"]:
+                    ex.update(hops=hops, date=when, channel=chan)
+                recs.sort(key=lambda r: r["hops"], reverse=True)
+                del recs[5:]
+            self._stats_dirty = True
+            self._ws_stats_dirty = True
+
+    def _heard_path(self) -> str:
+        return os.path.join(os.path.dirname(os.path.abspath(__file__)), "meshcore_heard.json")
+
+    def _load_heard(self):
+        """Load the persisted heard-nodes store on startup."""
+        path = self._heard_path()
+        if not os.path.isfile(path):
+            return
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            nodes = data.get("nodes") if isinstance(data, dict) else None
+            if isinstance(nodes, dict):
+                self._heard_nodes = nodes
+                Domoticz.Log(f"Loaded {len(nodes)} heard node(s) from meshcore_heard.json")
+        except Exception as exc:
+            Domoticz.Error(f"Could not load meshcore_heard.json: {exc}")
+
+    def _build_heard_payload(self) -> dict:
+        """Build and return the heard-nodes dict (persisted to plugin dir and
+        pushed as ``t:'heard'`` over WebSocket).
+        Caller must NOT hold _rx_log_lock when calling this."""
+        with self._rx_log_lock:
+            payload = {
+                "written_at": int(time.time()),
+                "nodes": {k: dict(v) for k, v in self._heard_nodes.items()},
+            }
+        return payload
+
+    def _write_heard(self):
+        """Atomically persist the heard-nodes store to the plugin directory."""
+        dest = self._heard_path()
+        payload = self._build_heard_payload()
+        try:
+            tmp = dest + ".tmp"
+            with open(tmp, "w") as f:
+                json.dump(payload, f)
+            os.replace(tmp, dest)
+        except Exception as exc:
+            Domoticz.Debug(f"Could not write heard nodes: {exc}")
+
+    # ── WebSocket state-push (F2) ─────────────────────────────────────────────
+
+    def _build_snapshot_payload(self) -> dict:
+        """Build the lean snapshot payload for the ``t:'snapshot'`` message.
+
+        Only the state needed for the dashboard's first paint is included:
+        deviceMap (self + contacts + inbox), stats and channels.  ``heard``
+        is deliberately excluded — it can be hundreds of KB (hundreds of
+        nodes) and is only shown when the heard panel is opened, so it would
+        otherwise block first paint.  It is delivered as a deferred ``heard``
+        follow-up frame immediately after the snapshot (see the hello
+        handler).
+
+        Also establishes the F7 device-map delta baseline so the first
+        ``devices_delta`` after the snapshot has a valid reference to diff
+        against.  ``deviceSeq`` carries the CURRENT ``_device_seq`` as the
+        baseline marker and intentionally does NOT increment it (unlike the
+        rxlog window which does); the first subsequent ``devices_delta`` is
+        ``seq == deviceSeq + 1``.  All payloads are built BEFORE the lock
+        block so that a failure in a later build cannot leave the baseline
+        set without a matching payload having been returned.
+        """
+        device_map = self._build_device_map_payload()
+        stats = self._build_stats_payload()
+        channels = {str(k): v for k, v in self._channel_names.items()}
+        with self._rx_log_lock:
+            self._last_pushed_device_map = copy.deepcopy(device_map)
+            seq = self._device_seq
+        return {
+            "deviceMap": device_map,
+            "deviceSeq": seq,
+            "stats":     stats,
+            "channels":  channels,
+        }
+
+    def _push_devices_feed(self):
+        """Push the current device map — full ``t:'devices'`` or incremental
+        ``t:'devices_delta'`` — mirroring the rxlog full-window / delta pattern.
+
+        Full push path (``_last_pushed_device_map`` is None or diff is the whole
+        map): sends ``t:'devices'`` with the complete ``deviceMap``, stores the
+        new map as the baseline, and increments ``_device_seq``.
+
+        Delta path: diffs the new map against the stored baseline, emits
+        ``t:'devices_delta'`` with only the changed/added node objects, a list
+        of removed node names, any changed top-level scalar fields, and the new
+        ``seq``.  Then updates the stored baseline.
+
+        Must be called WITHOUT holding ``_rx_log_lock``; acquires it internally
+        (mirrors ``_push_rx_log_window`` / ``_push_rx_log_delta``).
+        """
+        new_map = self._build_device_map_payload()
+
+        with self._rx_log_lock:
+            baseline = self._last_pushed_device_map
+
+            if baseline is None:
+                # No baseline yet — send a full push and establish it.
+                self._device_seq += 1
+                seq = self._device_seq
+                self._last_pushed_device_map = copy.deepcopy(new_map)
+                send_full = True
+                delta_payload = None
+            else:
+                # Compute the diff.
+                old_nodes = baseline.get("nodes") or {}
+                if not isinstance(old_nodes, dict): old_nodes = {}
+                new_nodes = new_map.get("nodes") or {}
+                if not isinstance(new_nodes, dict): new_nodes = {}
+
+                changed_nodes = {
+                    name: node
+                    for name, node in new_nodes.items()
+                    if node != old_nodes.get(name)
+                }
+                removed_nodes = [
+                    name for name in old_nodes if name not in new_nodes
+                ]
+                # Diff scalar (non-'nodes') top-level keys generically.
+                changed_scalars = {}
+                for key, val in new_map.items():
+                    if key == "nodes":
+                        continue
+                    if val != baseline.get(key):
+                        changed_scalars[key] = val
+                # Also capture keys present in baseline but absent in new_map.
+                for key in baseline:
+                    if key == "nodes":
+                        continue
+                    if key not in new_map:
+                        changed_scalars[key] = None
+
+                # Heuristic: if the diff is effectively the entire map, fall
+                # back to a full push to avoid the overhead of a delta that
+                # carries everything anyway.
+                total_nodes = max(len(old_nodes), len(new_nodes), 1)
+                is_full_replacement = (
+                    len(changed_nodes) + len(removed_nodes) >= total_nodes
+                    and len(changed_scalars) >= max(len(new_map) - 1, 1)
+                )
+
+                if is_full_replacement:
+                    self._device_seq += 1
+                    seq = self._device_seq
+                    self._last_pushed_device_map = copy.deepcopy(new_map)
+                    send_full = True
+                    delta_payload = None
+                elif changed_nodes or removed_nodes or changed_scalars:
+                    self._device_seq += 1
+                    seq = self._device_seq
+                    self._last_pushed_device_map = copy.deepcopy(new_map)
+                    send_full = False
+                    delta_payload = {
+                        "changed": changed_nodes,
+                        "removed": removed_nodes,
+                        "scalars": changed_scalars,
+                        "seq":     seq,
+                    }
+                else:
+                    # Nothing changed — skip the push entirely.
+                    send_full = False
+                    delta_payload = None
+
+        # Lock released — safe to call _push (mirrors _push_rx_log_delta pattern).
+        if send_full:
+            Domoticz.Debug(f"_push_devices_feed: full seq={seq} nodes={len((new_map.get('nodes') or {}))}")
+            self._push("devices", {"deviceMap": new_map, "seq": seq})
+        elif delta_payload is not None:
+            Domoticz.Debug(
+                f"_push_devices_feed: delta seq={delta_payload['seq']} "
+                f"changed={len(delta_payload['changed'])} "
+                f"removed={len(delta_payload['removed'])} "
+                f"scalars={list(delta_payload['scalars'].keys())}"
+            )
+            self._push("devices_delta", delta_payload)
+
+    def _push_dirty_feeds(self):
+        """Flush any dirty feed over WebSocket, coalesced to ≤1 push/sec/feed.
+
+        Uses four independent ``_ws_*_dirty`` flags that are separate from the
+        file-write dirty flags (``_stats_dirty``, ``_heard_dirty``) so the two
+        throttling paths do not interfere with each other.
+
+        Each flag is written from BOTH the worker thread (e.g. ``_on_rx_log``,
+        ``_handle_contacts``) AND the main/onHeartbeat thread (e.g.
+        ``_write_device_map``, ``_write_channel_names``).  All four flags share
+        the same benign race: the read here on the worker loop and the write on
+        the main thread are unsynchronised, which can produce at most one extra
+        push containing a slightly stale build.  That is acceptable — the next
+        dirty event will re-push the up-to-date state.
+
+        Called from the worker loop every iteration (≈1 s cadence).
+        """
+        now = time.monotonic()
+        _PUSH_MIN_INTERVAL = 1.0
+
+        if self._ws_devices_dirty and (now - self._devices_last_push) >= _PUSH_MIN_INTERVAL:
+            self._ws_devices_dirty = False
+            self._devices_last_push = now
+            self._push_devices_feed()
+
+
+        if self._ws_stats_dirty and (now - self._stats_last_push) >= _PUSH_MIN_INTERVAL:
+            self._ws_stats_dirty = False
+            self._stats_last_push = now
+            self._push("stats", {"stats": self._build_stats_payload()})
+
+        if self._ws_heard_dirty and (now - self._heard_last_push) >= _PUSH_MIN_INTERVAL:
+            self._ws_heard_dirty = False
+            self._heard_last_push = now
+            self._push("heard", {"heard": self._build_heard_payload()})
+
+        if self._ws_channels_dirty and (now - self._channels_last_push) >= _PUSH_MIN_INTERVAL:
+            self._ws_channels_dirty = False
+            self._channels_last_push = now
+            self._push("channels", {"channels": {str(k): v for k, v in self._channel_names.items()}})
 
     def _remove_custom_page(self):
         plugin_dir    = os.path.dirname(os.path.abspath(__file__))
         domoticz_root = os.path.abspath(os.path.join(plugin_dir, "..", ".."))
+        tpl_dir = os.path.join(domoticz_root, "www", "templates")
         fname = "meshcore.html"
-        dest = os.path.join(domoticz_root, "www", "templates", fname)
+        dest = os.path.join(tpl_dir, fname)
         try:
             if os.path.isfile(dest):
                 os.remove(dest)
         except Exception as exc:
             Domoticz.Error(f"Failed to remove {fname}: {exc}")
+        leaflet_dst = os.path.join(tpl_dir, "leaflet")
+        if os.path.isdir(leaflet_dst):
+            try:
+                shutil.rmtree(leaflet_dst, ignore_errors=True)
+            except Exception as exc:
+                Domoticz.Debug(f"Failed to remove leaflet dir: {exc}")
         Domoticz.Log("MeshCore dashboard removed.")
 
-    # ── Heartbeat-driven poll worker ─────────────────────────────────────────
+    # ── Persistent-connection worker ──────────────────────────────────────────
 
-    def _heartbeat_worker(self):
-        """Run a short-lived connect→poll→disconnect cycle in a background thread."""
+    def _worker_main(self):
+        """Worker thread entry point. Owns an asyncio loop and runs _run() until
+        the plugin is stopped. The loop is exposed via self._worker_loop so the
+        main thread can schedule sends with asyncio.run_coroutine_threadsafe."""
         Domoticz.Debug("Worker: started")
         loop = asyncio.new_event_loop()
-        self._current_mc = None
+        self._worker_loop = loop
+        asyncio.set_event_loop(loop)
+        self._stop_async = asyncio.Event()
+        self._cmd_lock   = asyncio.Lock()
+        self._remote_query_tasks: set = set()
         try:
-            Domoticz.Debug("Worker: entering poll cycle…")
-            loop.run_until_complete(self._poll_cycle(loop))
-            Domoticz.Debug("Worker: poll cycle completed OK")
+            self._main_task = loop.create_task(self._run())
+            loop.run_until_complete(self._main_task)
+        except asyncio.CancelledError:
+            Domoticz.Debug("Worker: cancelled (shutdown).")
         except Exception as exc:
-            self._consec_failures = min(self._consec_failures + 1, 20)  # cap counter
-            if self._consec_failures <= BACKOFF_LOG_THRESH:
-                Domoticz.Error(f"Worker: poll error: {exc}")
-            else:
-                Domoticz.Debug(f"Worker: poll error (failure #{self._consec_failures}): {exc}")
-            delay = min(BACKOFF_BASE_S * (BACKOFF_FACTOR ** min(self._consec_failures, 10)), BACKOFF_MAX_S)
-            if delay > 0:
-                self._skip_until = time.monotonic() + delay
-                Domoticz.Log(f"Worker: backing off {int(delay)}s (failure #{self._consec_failures})")
+            Domoticz.Error(f"Worker: fatal error: {exc}")
+            Domoticz.Debug(traceback.format_exc())
         finally:
-            Domoticz.Debug("Worker: entering finally block…")
-            if self._current_mc is not None:
-                Domoticz.Debug("Worker: calling _safe_disconnect…")
-                self._safe_disconnect(self._current_mc, loop)
-                self._current_mc = None
-            Domoticz.Debug("Worker: closing event loop…")
+            Domoticz.Debug("Worker: entering shutdown sequence")
+            try:
+                for task in asyncio.all_tasks(loop):
+                    task.cancel()
+                loop.run_until_complete(asyncio.sleep(0))
+            except Exception as exc:
+                Domoticz.Debug(f"Worker: cancel-tasks step error: {exc}")
+            try:
+                loop.run_until_complete(loop.shutdown_asyncgens())
+            except Exception as exc:
+                Domoticz.Debug(f"Worker: shutdown_asyncgens error: {exc}")
+            try:
+                if hasattr(loop, "shutdown_default_executor"):
+                    loop.run_until_complete(loop.shutdown_default_executor())
+                else:
+                    ex = getattr(loop, "_default_executor", None)
+                    if ex is not None:
+                        ex.shutdown(wait=True)
+            except Exception as exc:
+                Domoticz.Debug(f"Worker: executor shutdown error: {exc}")
+            # On Windows the ProactorEventLoop owns an IOCP that has its own
+            # native completion thread (registered as Dummy-N once it calls
+            # back into Python). loop.close() is supposed to release it but
+            # in practice the thread can linger; closing the proactor first
+            # gives the IOCP a chance to flush before the loop tears down.
+            try:
+                proactor = getattr(loop, "_proactor", None)
+                if proactor is not None:
+                    proactor.close()
+            except Exception as exc:
+                Domoticz.Debug(f"Worker: proactor close error: {exc}")
             try:
                 loop.close()
-            except Exception:
-                pass
-            Domoticz.Debug("Worker: releasing _conn_lock…")
-            self._conn_lock.release()
-            Domoticz.Debug("Worker: done.")
+            except Exception as exc:
+                Domoticz.Debug(f"Worker: loop close error: {exc}")
+            self._worker_loop = None
+            Domoticz.Debug("Worker: shutdown sequence complete.")
 
-    def _immediate_send_worker(self, text: str):
-        """Short-lived connect → send → disconnect fired from onDeviceModified."""
-        Domoticz.Debug(f"SendWorker: waiting for _conn_lock…")
-        if not self._conn_lock.acquire(timeout=30):
-            Domoticz.Error("SendWorker: _conn_lock timeout after 30s")
-            self._queue.put(("send_result", {"ok": False, "target": "?",
-                                              "body": text, "result": "connection busy (timeout)"}))
+    async def _wait_or_stop(self, secs: float) -> bool:
+        """Sleep up to `secs` seconds, returning True if a stop was signalled.
+
+        Uses an asyncio.Event so onStop can wake us instantly via
+        call_soon_threadsafe(self._stop_async.set) — no cancellation needed.
+        """
+        if self._stop_async is None:
+            await asyncio.sleep(secs)
+            return self._stop_event.is_set()
+        try:
+            await asyncio.wait_for(self._stop_async.wait(), timeout=secs)
+            return True
+        except asyncio.TimeoutError:
+            return False
+
+    async def _run(self):
+        """Outer loop: connect, serve until disconnect, wait, reconnect."""
+        while not self._stop_event.is_set():
+            try:
+                await self._connect_and_serve()
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                Domoticz.Debug(f"Worker: serve error: {exc}")
+                Domoticz.Debug(traceback.format_exc())
+
+            if self._stop_event.is_set():
+                break
+
+            # Wait RECONNECT_DELAY_S before reconnecting (early-exit on stop).
+            if await self._wait_or_stop(RECONNECT_DELAY_S):
+                return
+
+    async def _connect_and_serve(self):
+        """One connection lifecycle: connect, subscribe, serve, disconnect."""
+        endpoint = (f"serial {self.serial_port} @ {self.baud_rate}"
+                    if self.transport == "Serial"
+                    else f"{self.host}:{self.port}")
+
+        try:
+            if self.transport == "Serial":
+                mc = await asyncio.wait_for(
+                    MeshCore.create_serial(self.serial_port, baudrate=self.baud_rate),
+                    timeout=CONNECT_TIMEOUT,
+                )
+            else:
+                mc = await asyncio.wait_for(
+                    MeshCore.create_tcp(self.host, self.port),
+                    timeout=CONNECT_TIMEOUT,
+                )
+        except Exception as exc:
+            if self._was_connected:
+                Domoticz.Error(f"Lost connection to MeshCore ({endpoint}): {exc}. Reconnecting in {RECONNECT_DELAY_S}s.")
+                self._was_connected = False
+            else:
+                Domoticz.Error(f"Could not connect to MeshCore ({endpoint}): {exc}. Retrying in {RECONNECT_DELAY_S}s.")
             return
 
-        Domoticz.Debug(f"SendWorker: lock acquired, starting send cycle…")
-        loop = asyncio.new_event_loop()
-        self._current_mc = None
-        try:
-            loop.run_until_complete(self._send_cycle(text, loop))
-            Domoticz.Debug("SendWorker: send cycle completed OK")
-        except Exception as exc:
-            Domoticz.Error(f"SendWorker: error: {exc}")
-            self._queue.put(("send_result", {"ok": False, "target": "?",
-                                              "body": text, "result": str(exc)}))
-        finally:
-            Domoticz.Debug("SendWorker: entering finally block…")
-            if self._current_mc is not None:
-                Domoticz.Debug("SendWorker: calling _safe_disconnect…")
-                self._safe_disconnect(self._current_mc, loop)
-                self._current_mc = None
-            Domoticz.Debug("SendWorker: closing event loop…")
+        if mc is None or not mc.is_connected:
+            Domoticz.Error(f"MeshCore ({endpoint}): create returned but not connected. Retrying in {RECONNECT_DELAY_S}s.")
             try:
-                loop.close()
+                await self._disconnect_mc(mc)
             except Exception:
                 pass
-            Domoticz.Debug("SendWorker: releasing _conn_lock…")
-            self._conn_lock.release()
-            Domoticz.Debug("SendWorker: done.")
+            return
 
-    async def _connect_with_retry(self, label: str, max_attempts: int = 3):
-        """Connect to the device with retries on appstart failure.
+        self._mc = mc
+        if not self._was_connected:
+            Domoticz.Status(f"Connected to MeshCore ({endpoint}).")
+        self._was_connected = True
 
-        On each failed attempt, disconnects cleanly, waits with progressive
-        back-off, and retries with a fresh TCPConnection + MeshCore instance.
-        Returns the connected mc instance or raises ConnectionError.
-        """
-        from meshcore.tcp_cx import TCPConnection
+        # Subscribe to push events. Callbacks run on this loop; they queue
+        # work for the main thread via self._queue (no Domoticz API calls!).
+        try:
+            mc.subscribe(EventType.CONTACT_MSG_RECV, self._on_contact_msg)
+            mc.subscribe(EventType.CHANNEL_MSG_RECV, self._on_channel_msg)
+            mc.subscribe(EventType.ADVERTISEMENT,    self._on_advertisement)
+            mc.subscribe(EventType.RX_LOG_DATA,      self._on_rx_log)
+            mc.subscribe(EventType.ACK,              self._on_ack)
+        except Exception as exc:
+            Domoticz.Error(f"Worker: subscribe failed: {exc}")
 
-        # Progressive delays between retries (seconds); gives ESP32 time to
-        # release the TCP slot and finish any in-progress work.
-        retry_delays = [3, 6, 10]
+        # Catch up on anything the firmware queued while we were disconnected
+        # (or before we subscribed). _drain_push_events() logs how many it
+        # pulled, so the user can SEE the missed-message count on (re)connect.
+        try:
+            n_missed = await self._drain_push_events(mc)
+            if n_missed:
+                Domoticz.Log(f"Reconnect catch-up: received {n_missed} message(s) "
+                             f"that were queued while disconnected.")
+            else:
+                Domoticz.Log("Reconnect catch-up: no messages were missed.")
+        except Exception as exc:
+            Domoticz.Debug(f"Worker: connect-time drain error: {exc}")
 
-        last_err = None
-        for attempt in range(1, max_attempts + 1):
-            Domoticz.Debug(f"{label}: connect attempt {attempt}/{max_attempts}…")
+        # Keep draining on every MESSAGES_WAITING signal for the life of this
+        # connection. start_auto_message_fetching() also does one immediate
+        # get_msg() (harmless — the drain above already emptied the queue, and
+        # the _handle_message signature de-dup collapses any redelivery, so
+        # this no longer causes duplicate inbox entries). Re-armed on every
+        # reconnect (bound to this mc); mc.disconnect() tears it down.
+        try:
+            await mc.start_auto_message_fetching()
+        except Exception as exc:
+            Domoticz.Error(f"Worker: start_auto_message_fetching failed: {exc}")
 
-            connection = TCPConnection(self.host, self.port)
-            mc = MeshCore(connection)
-            self._current_mc = mc
-
-            try:
-                res = await asyncio.wait_for(mc.connect(), timeout=CONNECT_TIMEOUT)
-            except Exception as exc:
-                Domoticz.Debug(f"{label}: connect exception on attempt {attempt}: {exc}")
-                await self._async_disconnect(mc)
-                last_err = exc
-                if attempt < max_attempts:
-                    delay = retry_delays[min(attempt - 1, len(retry_delays) - 1)]
-                    await asyncio.sleep(delay)
-                continue
-
-            if res is not None:
-                Domoticz.Log(f"{label}: connected on attempt {attempt}.")
-                return mc
-
-            # appstart returned None — device not ready
-            Domoticz.Debug(f"{label}: appstart failed on attempt {attempt}, retrying…")
-            await self._async_disconnect(mc)
-            last_err = ConnectionError("Device did not respond to appstart.")
-            if attempt < max_attempts:
-                delay = retry_delays[min(attempt - 1, len(retry_delays) - 1)]
-                await asyncio.sleep(delay)
-
-        raise last_err or ConnectionError("Failed to connect after retries.")
-
-    async def _send_cycle(self, text: str, loop):
-        """Connect, send one message, disconnect.  Stores mc on self._current_mc."""
-        mc = await self._connect_with_retry("SendCycle")
-
-        # We need contacts loaded for name → contact lookup
-        if not mc.contacts:
-            Domoticz.Debug("SendCycle: fetching contacts…")
-            await asyncio.wait_for(mc.commands.get_contacts(), timeout=COMMAND_TIMEOUT)
-            await asyncio.sleep(0)
-            await asyncio.sleep(0)
-
-        Domoticz.Debug(f"SendCycle: sending message…")
-        await self._send_message(mc, text)
-        Domoticz.Debug("SendCycle: message sent.")
-
-        # Gracefully disconnect inside the async context (proper TCP FIN)
-        await self._async_disconnect(mc)
-        self._current_mc = None
-
-    async def _poll_cycle(self, loop):
-        """Connect, do all work.  Stores mc on self._current_mc for cleanup."""
-        mc = await self._connect_with_retry("Poll")
-
-        Domoticz.Debug(f"Poll: connected. self_info keys={list(mc.self_info.keys()) if mc.self_info else 'None'}")
+        # ── Initial fetches ───────────────────────────────────────────────
         if mc.self_info:
             name = mc.self_info.get("name", "")
             if name:
                 self._self_name = name
             self._queue.put(("self_info", dict(mc.self_info)))
 
-        # ── Fetch contacts ────────────────────────────────────────────────
-        Domoticz.Debug("Poll: fetching contacts…")
-        for attempt in range(5):
+        try:
+            await self._refresh_contacts(mc)
+        except Exception as exc:
+            Domoticz.Debug(f"Initial get_contacts error: {exc}")
+
+        if not self._channels_fetched:
+            try:
+                await self._fetch_channel_names(mc)
+                self._channels_fetched = True
+            except Exception as exc:
+                Domoticz.Debug(f"Initial channel fetch error: {exc}")
+
+        try:
+            await self._refresh_flood_scope(mc)
+        except Exception as exc:
+            Domoticz.Debug(f"Initial flood scope error: {exc}")
+
+        try:
+            await self._refresh_device_info(mc)
+        except Exception as exc:
+            Domoticz.Debug(f"Initial device_info error: {exc}")
+
+        # Missed-message catch-up is handled by start_auto_message_fetching()
+        # above (immediate get_msg() + MESSAGES_WAITING drain loop); the
+        # _handle_message signature de-dup prevents the historical
+        # duplicate-inbox problem. _drain_push_events() is kept as a manual
+        # fallback but is no longer needed on the connect path.
+
+        try:
+            await self._poll_self_stats(mc)
+        except Exception as exc:
+            Domoticz.Debug(f"Initial self_stats error: {exc}")
+
+        # ── Serve loop ────────────────────────────────────────────────────
+        # Wrapped in try/finally so the disconnect always runs — including
+        # when the stop event triggers an early return. This is what lets
+        # serial_asyncio_fast's executor tasks (open/close) drain so the
+        # default thread pool can shut down cleanly on plugin stop.
+        try:
+            last_stats     = time.monotonic()
+            last_contacts  = time.monotonic()
+            last_msg_drain = time.monotonic()   # connect-time drain just ran
+            last_rx_write  = 0.0
+
+            while not self._stop_event.is_set():
+                stopped = await self._wait_or_stop(1.0)
+                if stopped:
+                    break
+                if not mc.is_connected:
+                    Domoticz.Error("Worker: connection lost, will reconnect.")
+                    break
+
+                now = time.monotonic()
+
+                # Periodic refreshes also acquire the command lock so they
+                # don't interleave with user-initiated sends (which would
+                # trip the meshcore library's event-subscription race).
+                async def _locked(coro):
+                    if self._cmd_lock is None:
+                        await coro
+                        return
+                    async with self._cmd_lock:
+                        await coro
+
+                if now - last_stats >= STATS_REFRESH_S:
+                    last_stats = now
+                    try:
+                        await _locked(self._refresh_flood_scope(mc))
+                    except Exception as exc:
+                        Domoticz.Debug(f"Periodic flood_scope error: {exc}")
+                    try:
+                        await _locked(self._refresh_device_info(mc))
+                    except Exception as exc:
+                        Domoticz.Debug(f"Periodic device_info error: {exc}")
+                    try:
+                        await _locked(self._poll_self_stats(mc))
+                    except Exception as exc:
+                        Domoticz.Debug(f"Periodic self_stats error: {exc}")
+
+                if now - last_contacts >= CONTACTS_REFRESH_S:
+                    last_contacts = now
+                    try:
+                        await _locked(self._refresh_contacts(mc))
+                    except Exception as exc:
+                        Domoticz.Debug(f"Periodic contacts error: {exc}")
+
+                # Safety-net message drain. start_auto_message_fetching()
+                # only pulls on MESSAGES_WAITING / unsolicited push; some
+                # firmware emits neither, so without this the node's queue
+                # grows unbounded and the plugin silently misses everything
+                # until reconnect. Polling get_msg() guarantees delivery.
+                if now - last_msg_drain >= MSG_DRAIN_S:
+                    last_msg_drain = now
+                    try:
+                        await _locked(self._drain_push_events(mc))
+                    except Exception as exc:
+                        Domoticz.Debug(f"Periodic msg drain error: {exc}")
+
+                if self._rx_log_dirty and (now - last_rx_write) >= RX_LOG_WRITE_S:
+                    last_rx_write = now
+                    self._rx_log_dirty = False
+                    # Write directly from the worker thread. _write_rx_log is
+                    # pure file I/O + dict copies under self._rx_log_lock; it
+                    # doesn't touch the Domoticz API, so it's safe off the
+                    # main thread and lets the dashboard see fresh data
+                    # without waiting for the next heartbeat tick.
+                    self._write_rx_log()
+                    # F3: push delta/window over WebSocket if subscriber wants rxlog.
+                    with self._rx_log_lock:
+                        _want_rxlog = self._sub_feeds == "rxlog"
+                    if _want_rxlog:
+                        try:
+                            self._push_rx_log_delta()
+                        except Exception as exc:
+                            Domoticz.Debug(f"_push_rx_log_delta error: {exc}")
+                    if self._heard_dirty:
+                        self._heard_dirty = False
+                        self._write_heard()
+                    if self._stats_dirty:
+                        self._stats_dirty = False
+                        self._write_stats()
+
+                # Push any dirty feeds to connected WebSocket clients (F2).
+                # Runs every loop iteration; _push_dirty_feeds coalesces to
+                # ≤1 push/sec/feed using per-feed last-push timestamps.
+                self._push_dirty_feeds()
+        finally:
+            try:
+                self._write_heard()
+            except Exception:
+                pass
+            try:
+                self._write_stats()
+            except Exception:
+                pass
+            try:
+                await self._disconnect_mc(mc)
+            except Exception:
+                pass
+            self._mc = None
+            if not self._stop_event.is_set():
+                self._was_connected = False
+                # Propagate connection loss to the Domoticz STATUS device so
+                # the dashboard's connected-node badge goes offline.  Must not
+                # call Domoticz API here (worker thread) — queue for main thread.
+                self._queue.put(("self_offline", {}))
+
+    # ── Push-event callbacks (run on worker loop) ────────────────────────────
+
+    def _on_contact_msg(self, ev):
+        self._queue.put(("message", dict(ev.payload or {})))
+
+    def _on_channel_msg(self, ev):
+        self._queue.put(("message", dict(ev.payload or {})))
+
+    def _on_advertisement(self, ev):
+        self._queue.put(("advert", dict(ev.payload or {})))
+
+    def _on_ack(self, ev):
+        """Acknowledgement from a remote node for one of our outbound TEXT_MSGs.
+
+        The ACK event carries a "code" attribute (8 hex chars) that exactly
+        matches the expected_ack returned by send_msg's MSG_SENT event.
+        We use this code as the correlation key to annotate the corresponding
+        outgoing DM line in the inbox with a delivery marker.
+
+        Correlation strategy: exact match on expected_ack hex code.
+        Limitation: if the expected_ack bytes object returned by send_msg was
+        not captured (older firmware, or a send that failed before MSG_SENT),
+        no pending record exists and the ACK is simply recorded in the rx-log
+        without annotation.  We never annotate a line we can't reliably match.
+        """
+        p = dict(ev.payload or {})
+        t = time.time()
+        ack_code = p.get("code", "")   # 8-char hex string from the ACK frame
+        matched_rec = None
+        with self._rx_log_lock:
+            if ack_code and ack_code in self._pending_acks:
+                matched_rec = self._pending_acks.pop(ack_code)
+        if matched_rec:
+            Domoticz.Debug(f"ACK matched: code={ack_code} target={matched_rec.get('target')!r}")
+            self._queue.put(("ack_result", {
+                "ack_code":   ack_code,
+                "delivered":  True,
+                "target":     matched_rec.get("target", ""),
+                "body":       matched_rec.get("body", ""),
+                "out_ts":     matched_rec.get("out_ts", 0),
+                "inbox_line": matched_rec.get("inbox_line"),
+                "dm_name":    matched_rec.get("dm_name"),
+                "msg_rowid":  matched_rec.get("msg_rowid"),
+            }))
+        synth = {
+            "payload_typename": "ACK",
+            "payload_type":     -1,
+            "route_typename":   "",
+            "snr":              p.get("SNR"),
+            "rssi":             p.get("rssi"),
+            "recv_time":        int(t),
+            "message":          "(acknowledgement)",
+            "raw_hex":          "",
+            "_t":               t,
+        }
+        # Preserve any library-supplied identifying field (pkt_hash, code, etc.)
+        for k in ("pkt_hash", "code", "ack_code", "request_hash"):
+            if k in p:
+                synth[k] = p[k]
+        with self._rx_log_lock:
+            self._rx_log.append(synth)
+            self._rx_log_total_appended += 1
+            self._payload_type_counts["ACK"] = self._payload_type_counts.get("ACK", 0) + 1
+            self._packet_times.append(t)
+        self._rx_log_dirty = True
+        Domoticz.Debug(f"ACK received: {p}")
+
+    def _on_rx_log(self, ev):
+        """Record an RX_LOG_DATA event in the rolling buffer + aggregates."""
+        p = dict(ev.payload or {})
+        # Normalize: timestamps, bytes → hex, enum → name
+        t = time.time()
+        p["_t"] = t
+        # Convert bytes-like fields to hex strings for JSON serialization
+        for k, v in list(p.items()):
+            if isinstance(v, (bytes, bytearray)):
+                p[k] = v.hex()
+            elif hasattr(v, "name") and hasattr(v, "value"):  # IntEnum
+                p[k] = v.name
+        with self._rx_log_lock:
+            self._rx_log.append(p)
+            self._rx_log_total_appended += 1
+            # Aggregates
+            pt = p.get("payload_typename") or str(p.get("payload_type", ""))
+            if pt:
+                self._payload_type_counts[pt] = self._payload_type_counts.get(pt, 0) + 1
+            ch = (p.get("chan_hash") or "").lower() or None
+            if ch:
+                p["chan_hash"] = ch
+                self._chan_hash_counts[ch] = self._chan_hash_counts.get(ch, 0) + 1
+            self._packet_times.append(t)
+            # Per-contact signal history. We key by the first 12 hex chars of
+            # the originating contact's public key (a.k.a. pubkey_prefix), so
+            # dashboard cards can pull SNR/RSSI history by looking the contact
+            # up in the device map. ADVERT carries adv_key directly. For other
+            # payload types we can't recover the originating contact from the
+            # RX frame alone (the destination is hashed), so they don't show
+            # up here — incoming messages will add their own samples via the
+            # main-thread _handle_message hook.
+            snr  = p.get("snr")
+            rssi = p.get("rssi")
+            pp   = p.get("path") or ""
+            adv_key = p.get("adv_key")
+            if p.get("payload_typename") == "ADVERT":
+                # Tally every advert we hear here — this RX_LOG frame is the
+                # canonical source (the heard-nodes store is built from it
+                # too). The higher-level ADVERTISEMENT push is a decoded
+                # duplicate of the same on-air frame and some firmware never
+                # emits it, so counting it there missed everything. We hold
+                # _rx_log_lock already, so increment inline.
+                self._stats["adverts_total"] += 1
+                _an = (p.get("adv_name") or "").strip()
+                if _an:
+                    self._stats["adv_by_sender"][_an] = \
+                        self._stats["adv_by_sender"].get(_an, 0) + 1
+                self._stats_dirty = True
+                self._ws_stats_dirty = True
+            if p.get("payload_typename") == "ADVERT" and adv_key and (snr is not None or rssi is not None):
+                prefix = adv_key[:12]
+                hist = self._signal_history.setdefault(prefix, [])
+                hist.append({"t": t, "snr": snr, "rssi": rssi, "path_len": p.get("path_len", -1), "kind": "ADVERT"})
+                if len(hist) > 60:
+                    del hist[: len(hist) - 60]
+                # If this advert is from a node that IS a contact, remember
+                # its latest signal so the contact card can show hops/SNR/
+                # RSSI even without a device, a message, or a direct path.
+                if adv_key in self._known_pubkeys:
+                    self._contact_sig[adv_key[:12]] = {
+                        "snr": snr, "rssi": rssi,
+                        "path_len": p.get("path_len", -1),
+                        "t": t, "source": "advert",
+                    }
+            # Persistent heard-nodes store: ADVERTs from nodes that are NOT
+            # already contacts. If it's a contact, the contacts poll tracks
+            # it — skip. If already heard, just refresh last_heard + signal.
+            if (p.get("payload_typename") == "ADVERT" and adv_key
+                    and adv_key not in self._known_pubkeys):
+                h = self._heard_nodes.get(adv_key)
+                if h is None:
+                    h = {"pubkey": adv_key, "first_heard": t, "count": 0}
+                    self._heard_nodes[adv_key] = h
+                h["name"]      = p.get("adv_name") or h.get("name", "")
+                h["type"]      = p.get("adv_type", h.get("type", 0))
+                lat, lon = p.get("adv_lat"), p.get("adv_lon")
+                if lat or lon:
+                    h["lat"], h["lon"] = lat, lon
+                h["snr"]       = snr
+                h["rssi"]      = rssi
+                h["path_len"]  = p.get("path_len", -1)
+                h["count"]     = (h.get("count") or 0) + 1
+                # Feed advert hops into the lifetime hops records too — a
+                # far node is usually learned via its advert, not a chat
+                # message. Inline (we already hold _rx_log_lock; calling
+                # _bump_msg_stats would re-enter the non-reentrant lock).
+                _pl = p.get("path_len", -1)
+                if isinstance(_pl, int) and 0 <= _pl < HOPS_SENTINEL:
+                    _nm = h.get("name") or adv_key[:12]
+                    _recs = self._stats["hops_records"]
+                    _ex = next((r for r in _recs if r["name"] == _nm), None)
+                    _when = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(t))
+                    if _ex is None:
+                        _recs.append({"hops": _pl, "name": _nm,
+                                      "date": _when, "channel": "Advert"})
+                    elif _pl > _ex["hops"]:
+                        _ex.update(hops=_pl, date=_when, channel="Advert")
+                    _recs.sort(key=lambda r: r["hops"], reverse=True)
+                    del _recs[5:]
+                    self._stats_dirty = True
+                    self._ws_stats_dirty = True
+                h["last_heard"] = t          # OUR local receive time
+                # The node's own advertised clock — used by the dashboard to
+                # flag a wrong RTC (compared against last_heard).
+                if p.get("adv_timestamp"):
+                    h["node_ts"] = p.get("adv_timestamp")
+                self._heard_dirty = True
+                self._ws_heard_dirty = True
+            # Duplicate-flood detection: keep last few timestamps per raw_hex
+            raw = p.get("raw_hex")
+            if raw and p.get("route_typename") in ("TC_FLOOD", "FLOOD"):
+                dl = self._dup_floods.setdefault(raw, [])
+                dl.append({"t": t, "path": pp, "snr": snr})
+                if len(dl) > 8:
+                    del dl[: len(dl) - 8]
+        self._rx_log_dirty = True
+
+    async def _refresh_contacts(self, mc):
+        """Issue get_contacts and post the snapshot to the main thread."""
+        for attempt in range(3):
             try:
                 await asyncio.wait_for(mc.commands.get_contacts(), timeout=COMMAND_TIMEOUT)
             except asyncio.TimeoutError:
@@ -716,42 +2696,41 @@ class BasePlugin:
             except Exception as exc:
                 Domoticz.Debug(f"get_contacts error (attempt {attempt + 1}): {exc}")
             await asyncio.sleep(0)
-            await asyncio.sleep(0)
             if mc.contacts:
                 break
             await asyncio.sleep(1)
-
         if mc.contacts:
-            Domoticz.Debug(f"Poll: got {len(mc.contacts)} contact(s)")
-            contacts_snapshot = {k: dict(v) for k, v in mc.contacts.items()}
-            self._queue.put(("contacts", contacts_snapshot))
-        else:
-            Domoticz.Error("Poll: no contacts returned from device.")
+            self._queue.put(("contacts", {k: dict(v) for k, v in mc.contacts.items()}))
 
-        # ── Fetch channel names (once) ────────────────────────────────────
-        if not self._channels_fetched:
-            Domoticz.Log("Poll: fetching channel names…")
-            await self._fetch_channel_names(mc)
-            self._channels_fetched = True
+    async def _refresh_flood_scope(self, mc):
+        r = await asyncio.wait_for(mc.commands.get_default_flood_scope(), timeout=5.0)
+        if r and r.type == EventType.DEFAULT_FLOOD_SCOPE:
+            payload = r.payload or {}
+            scope_name = payload.get("scope_name", "") or ""
+            scope_key  = payload.get("scope_key", "")  or ""
+            # The firmware doesn't reliably zero-pad the 31-byte scope_name
+            # buffer when overwriting, so leftover bytes from a previous scope
+            # bleed back through the meshcore library's NUL-stripping decode.
+            # scope_key is the source of truth: it's the sha256-derived
+            # routing key. If it's all zeros, the scope is actually empty
+            # (global flood). Otherwise trim scope_name to the first run of
+            # valid scope characters.
+            if scope_key and set(scope_key) <= {"0"}:
+                cleaned = ""
+            else:
+                m = re.match(r"^([#A-Za-z0-9_\-]+)", scope_name)
+                cleaned = m.group(1) if m else ""
+            if cleaned != scope_name:
+                Domoticz.Debug(
+                    f"Flood scope sanitised: raw_name={scope_name!r} "
+                    f"key_zero={scope_key and set(scope_key) <= {'0'}} cleaned={cleaned!r}"
+                )
+            self._queue.put(("flood_scope", cleaned))
 
-        # ── Collect incoming messages ─────────────────────────────────────
-        Domoticz.Debug("Poll: draining push events…")
-        await self._drain_push_events(mc)
-
-        # ── Poll self-node stats periodically ─────────────────────────────
-        if self._hb_count % SELF_STATS_HEARTBEATS == 0:
-            Domoticz.Debug("Poll: polling self stats…")
-            await self._poll_self_stats(mc)
-
-        # Connection succeeded — reset backoff
-        self._consec_failures = 0
-        self._skip_until = 0.0
-
-        # Gracefully disconnect inside the async context (proper TCP FIN)
-        await self._async_disconnect(mc)
-        self._current_mc = None
-
-        Domoticz.Debug("Poll: cycle complete.")
+    async def _refresh_device_info(self, mc):
+        r = await asyncio.wait_for(mc.commands.send_device_query(), timeout=5.0)
+        if r and r.type == EventType.DEVICE_INFO:
+            self._queue.put(("device_info", dict(r.payload or {})))
 
     async def _drain_push_events(self, mc):
         """Drain all pending messages from the device using get_msg().
@@ -776,11 +2755,12 @@ class BasePlugin:
             elif r.type == EventType.ERROR:
                 break
         if fetched:
-            Domoticz.Log(f"Fetched {fetched} pending message(s) from device.")
+            Domoticz.Log(f"Fetched {fetched} pending message(s) from device — added to inbox.")
+        return fetched
 
     async def _poll_self_stats(self, mc):
         """Poll all available stats from the connected node itself."""
-        Domoticz.Debug("Polling self-node stats…")
+        Domoticz.Debug("Polling self-node stats...")
 
         stats = {}
 
@@ -812,36 +2792,152 @@ class BasePlugin:
             self._queue.put(("self_stats", stats))
 
     async def _fetch_channel_names(self, mc):
-        """Query channel names for indices 0–7 and write meshcore_channels.json."""
-        channel_names = {}
-        for idx in range(8):
+        """Query all channel slots and record every one (including empty).
+
+        The device map exposes the full slot table so the dashboard can render
+        every slot with an Add/Remove control. The legacy meshcore_channels.json
+        only contains non-empty entries for backwards compatibility with the
+        existing channel resolver.
+        """
+        channel_names = {}        # non-empty only — used by message routing
+        all_slots: dict = {}      # idx → name ("" if empty) for all slots
+        chan_hash_to_name: dict = {}  # 2-hex chan_hash → channel_name (non-empty slots)
+        # Stop probing after this many consecutive empty / error slots so a
+        # 40-slot scan doesn't burn dozens of round-trips on sparse devices.
+        consecutive_empty = 0
+        EMPTY_RUN_STOP = 4
+        for idx in range(MAX_CHANNEL_SLOTS):
             try:
-                res = await asyncio.wait_for(mc.commands.get_channel(idx), timeout=2.0)
+                res = await asyncio.wait_for(mc.commands.get_channel(idx), timeout=5.0)
                 Domoticz.Debug(f"get_channel({idx}): type={res.type if res else None} payload={res.payload if res else None}")
                 if res and res.type == EventType.CHANNEL_INFO:
+                    # Trust the index the firmware reports in the response, NOT
+                    # the loop variable. Under a slow link a late CHANNEL_INFO
+                    # can be matched to a later get_channel() wait, so keying
+                    # off `idx` shifts/drops channels. channel_idx is
+                    # authoritative (reader.py decodes it from the response).
+                    rep_idx = res.payload.get("channel_idx", idx)
                     name = res.payload.get("channel_name", "").strip("\x00").strip()
+                    all_slots[rep_idx] = name
                     if name:
-                        channel_names[str(idx)] = name
+                        channel_names[str(rep_idx)] = name
+                        consecutive_empty = 0
+                        # Map the on-air 1-byte hash to the channel name so the
+                        # dashboard can resolve "Hashes heard on air" rows for
+                        # configured channels.
+                        ch_hash = (res.payload.get("channel_hash") or "").lower()
+                        if ch_hash:
+                            chan_hash_to_name[ch_hash] = name
+                    else:
+                        consecutive_empty += 1
                 elif res and res.type == EventType.ERROR:
-                    # ERROR = no more channels, stop probing
+                    # ERROR usually means firmware reports no such slot —
+                    # record the remaining slots as empty and stop probing.
+                    for j in range(idx, MAX_CHANNEL_SLOTS):
+                        all_slots.setdefault(j, "")
+                    break
+                else:
+                    consecutive_empty += 1
+                if consecutive_empty >= EMPTY_RUN_STOP:
+                    for j in range(idx + 1, MAX_CHANNEL_SLOTS):
+                        all_slots.setdefault(j, "")
                     break
             except asyncio.TimeoutError:
-                # Unconfigured channels may simply not respond — skip, don't abort
-                Domoticz.Debug(f"get_channel({idx}) timed out — skipping")
+                Domoticz.Debug(f"get_channel({idx}) timed out — assume empty")
+                all_slots[idx] = ""
                 continue
             except Exception as exc:
-                Domoticz.Debug(f"get_channel({idx}) error: {exc} — skipping")
+                Domoticz.Debug(f"get_channel({idx}) error: {exc} — assume empty")
+                all_slots[idx] = ""
                 continue
-        if channel_names:
+        # Ensure full coverage
+        for j in range(MAX_CHANNEL_SLOTS):
+            all_slots.setdefault(j, "")
+        with self._rx_log_lock:
+            self._channel_slots = all_slots
             self._channel_names = {int(k): v for k, v in channel_names.items()}
+            self._chan_hash_to_name = chan_hash_to_name
+        if channel_names:
             parts = [f"#{k} = {v}" for k, v in sorted(channel_names.items())]
             Domoticz.Log(f"MeshCore channels: {', '.join(parts)}")
-            self._write_channel_names(channel_names)
         else:
             Domoticz.Debug("No channel names found on device.")
+        self._write_channel_names(channel_names)
 
-    async def _send_message(self, mc, text: str):
-        """Send a message from the Mesh Send device value.
+    async def _run_remote_query(self, verb: str, name: str, coro, kind: str):
+        """Run a req_*_sync call as a detached task and queue the result.
+
+        Detaches the slow remote round-trip from the main send pipeline so an
+        unresponsive contact can't stall other sends or periodic pollers.
+        Tasks are bounded to 30s. Held under the global command lock to avoid
+        the meshcore library's per-call event subscription race.
+        """
+        lock = self._cmd_lock
+        try:
+            if lock is not None:
+                async with lock:
+                    r = await asyncio.wait_for(coro, timeout=30.0)
+            else:
+                r = await asyncio.wait_for(coro, timeout=30.0)
+            ok = r is not None and getattr(r, "type", None) != EventType.ERROR
+            if ok:
+                # The sync helpers may return either an Event (has .payload)
+                # or a raw list/dict (telemetry/neighbours). Don't touch
+                # r.payload unless r actually has it.
+                if hasattr(r, "payload"):
+                    p = r.payload
+                    payload = dict(p) if isinstance(p, dict) else (p if p is not None else None)
+                elif isinstance(r, (list, dict)):
+                    payload = r
+                else:
+                    payload = None
+                self._queue.put((kind, {"name": name, "data": payload}))
+            self._queue.put(("send_result", {
+                "ok": ok, "target": verb, "body": name,
+                "result": "received" if ok else "no response from remote",
+            }))
+        except asyncio.TimeoutError:
+            self._queue.put(("send_result", {
+                "ok": False, "target": verb, "body": name,
+                "result": "timeout - remote did not respond within 30s",
+            }))
+        except Exception as exc:
+            self._queue.put(("send_result", {
+                "ok": False, "target": verb, "body": name, "result": str(exc),
+            }))
+
+    async def _send_message_for_text(self, text: str, req_id=None):
+        """Wrapper invoked via run_coroutine_threadsafe by onWebSocketMessage.
+
+        Reads the live mc instance inside the worker loop and short-circuits
+        with a friendly result if we are mid-reconnect — the alternative is
+        a stale mc reference that would error confusingly inside the library.
+
+        Holds the global command lock so concurrent rapid-fire sends (e.g.
+        applying a preset that issues 4 verbs back-to-back) don't trip the
+        meshcore library's per-call event-subscription race condition.
+
+        req_id is the correlation id from the inbound {t:'cmd',id:...} frame;
+        it is threaded through to every send_result put so _dispatch can echo
+        it back in the cmd_result WebSocket reply.
+        """
+        mc = self._mc
+        if mc is None or not getattr(mc, "is_connected", False):
+            self._queue.put(("send_result", {
+                "ok": False, "target": "?", "body": text,
+                "result": "not connected - auto-reconnect in progress",
+                "id": req_id,
+            }))
+            return
+        lock = self._cmd_lock
+        if lock is None:
+            await self._send_message(mc, text, req_id)
+            return
+        async with lock:
+            await self._send_message(mc, text, req_id)
+
+    async def _send_message(self, mc, text: str, req_id=None):
+        """Send a message dispatched via onWebSocketMessage.
 
         Syntax accepted:
           "hello world"          → direct message to the first tracked node
@@ -849,7 +2945,926 @@ class BasePlugin:
           "#0: hello"            → broadcast on channel index 0
           "#General: hello"      → broadcast on the channel named 'General'
           "#flood: hello"        → broadcast on channel 0 (alias)
+          "!remove <name>"       → remove the named contact from the device
         """
+        # Note: "!favorite ..." is intentionally NOT handled here — it is consumed
+        # locally by _handle_local_only_command() without opening an MC session,
+        # since the operation only touches plugin state.
+
+        # ── Remote-contact verbs ─────────────────────────────────────────
+        # Helper: resolve a contact dict by adv_name from mc.contacts.
+        def _resolve_contact(name):
+            matches = [c for c in mc.contacts.values()
+                       if c.get("adv_name", "").strip() == name]
+            if len(matches) > 1:
+                Domoticz.Debug(
+                    f"_resolve_contact({name!r}): {len(matches)} contacts share this "
+                    f"adv_name — first match wins; pubkey={matches[0].get('public_key','?')[:12]}"
+                )
+            return dict(matches[0]) if matches else None
+
+        # !reset_path <contact name>
+        if text.startswith("!reset_path "):
+            name = text[len("!reset_path "):].strip()
+            contact = _resolve_contact(name)
+            if contact is None:
+                self._queue.put(("send_result", {
+                    "ok": False, "target": "!reset_path", "body": name,
+                    "result": f"contact '{name}' not found",
+                    "id": req_id,
+                }))
+                return
+            try:
+                # reset_path takes a pubkey-like key
+                pk = bytes.fromhex(contact.get("public_key", ""))
+                r = await asyncio.wait_for(mc.commands.reset_path(pk), timeout=8.0)
+                ok = r is not None and r.type == EventType.OK
+                if ok:
+                    Domoticz.Status(f"Path reset for '{name}'")
+                self._queue.put(("send_result", {
+                    "ok": ok, "target": "!reset_path", "body": name,
+                    "result": "applied" if ok else str(r),
+                
+                    "id": req_id,
+                }))
+            except Exception as exc:
+                self._queue.put(("send_result", {
+                    "ok": False, "target": "!reset_path", "body": name, "result": str(exc),
+                
+                    "id": req_id,
+                }))
+            return
+
+        # !req_status / !req_telemetry / !req_neighbours <contact name>
+        # Remote queries can block for tens of seconds while waiting for the
+        # remote node to respond. We run them as detached asyncio tasks so a
+        # slow / offline contact doesn't pin the worker loop and stall other
+        # sends or the periodic pollers.
+        for verb, fn_name, kind, ok_event_only in (
+            ("!req_status ",     "req_status_sync",     "contact_status",     False),
+            ("!req_telemetry ",  "req_telemetry_sync",  "contact_telemetry",  False),
+            ("!req_neighbours ", "req_neighbours_sync", "contact_neighbours", False),
+        ):
+            if text.startswith(verb):
+                name = text[len(verb):].strip()
+                contact = _resolve_contact(name)
+                if contact is None:
+                    self._queue.put(("send_result", {
+                        "ok": False, "target": verb.strip(), "body": name,
+                        "result": f"contact '{name}' not found",
+                        "id": req_id,
+                    }))
+                    return
+                # Hold a strong reference so the GC doesn't finalise a still-
+                # pending task with "Task was destroyed but it is pending".
+                _task = asyncio.create_task(self._run_remote_query(
+                    verb.strip(), name, getattr(mc.commands, fn_name)(contact), kind
+                ))
+                self._remote_query_tasks.add(_task)
+                _task.add_done_callback(self._remote_query_tasks.discard)
+                # Immediate optimistic ack so the UI doesn't sit on a spinner
+                self._queue.put(("send_result", {
+                    "ok": True, "target": verb.strip(), "body": name,
+                    "result": "querying (up to 30s)",
+                
+                    "id": req_id,
+                }))
+                return
+
+        # ── Self-node verbs ──────────────────────────────────────────────
+        # !send_advert [direct|flood]   default flood
+        if text.startswith("!send_advert"):
+            arg = text[len("!send_advert"):].strip().lower()
+            flood = arg != "direct"   # anything other than "direct" → flood
+            try:
+                r = await asyncio.wait_for(mc.commands.send_advert(flood=flood), timeout=8.0)
+                ok = r is not None and r.type == EventType.OK
+                if ok:
+                    Domoticz.Log(f"Advertisement sent ({'flood' if flood else 'direct'}).")
+                self._queue.put(("send_result", {
+                    "ok": ok, "target": "!send_advert",
+                    "body": "flood" if flood else "direct",
+                    "result": "applied" if ok else str(r),
+                
+                    "id": req_id,
+                }))
+            except Exception as exc:
+                self._queue.put(("send_result", {
+                    "ok": False, "target": "!send_advert", "body": arg, "result": str(exc),
+                
+                    "id": req_id,
+                }))
+            return
+
+        # !set_radio <freq_MHz> <bw_kHz> <sf 7-12> <cr 5-8>
+        if text.startswith("!set_radio"):
+            parts = text.split()
+            if len(parts) != 5:
+                self._queue.put(("send_result", {
+                    "ok": False, "target": "!set_radio", "body": text,
+                    "result": f"syntax: !set_radio <freq MHz> <bw kHz> <sf {RADIO_SF_MIN}-{RADIO_SF_MAX}> <cr {RADIO_CR_MIN}-{RADIO_CR_MAX}>",
+                    "id": req_id,
+                }))
+                return
+            try:
+                freq, bw, sf, cr = float(parts[1]), float(parts[2]), int(parts[3]), int(parts[4])
+            except ValueError as exc:
+                self._queue.put(("send_result", {
+                    "ok": False, "target": "!set_radio", "body": text, "result": f"parse error: {exc}",
+                    "id": req_id,
+                }))
+                return
+            # Sanity bounds — see module-level RADIO_* constants.
+            if not (RADIO_FREQ_MIN_MHZ <= freq <= RADIO_FREQ_MAX_MHZ):
+                self._queue.put(("send_result", {
+                    "ok": False, "target": "!set_radio", "body": text,
+                    "result": f"freq must be {RADIO_FREQ_MIN_MHZ:.0f}-{RADIO_FREQ_MAX_MHZ:.0f} MHz",
+                    "id": req_id,
+                }))
+                return
+            if not (RADIO_BW_MIN_KHZ <= bw <= RADIO_BW_MAX_KHZ):
+                self._queue.put(("send_result", {
+                    "ok": False, "target": "!set_radio", "body": text,
+                    "result": f"bw must be {RADIO_BW_MIN_KHZ:.0f}-{RADIO_BW_MAX_KHZ:.0f} kHz",
+                    "id": req_id,
+                }))
+                return
+            if not (RADIO_SF_MIN <= sf <= RADIO_SF_MAX):
+                self._queue.put(("send_result", {
+                    "ok": False, "target": "!set_radio", "body": text,
+                    "result": f"sf must be {RADIO_SF_MIN}-{RADIO_SF_MAX}",
+                    "id": req_id,
+                }))
+                return
+            if not (RADIO_CR_MIN <= cr <= RADIO_CR_MAX):
+                self._queue.put(("send_result", {
+                    "ok": False, "target": "!set_radio", "body": text,
+                    "result": f"cr must be {RADIO_CR_MIN}-{RADIO_CR_MAX} (=4/5..4/8)",
+                    "id": req_id,
+                }))
+                return
+            try:
+                r = await asyncio.wait_for(mc.commands.set_radio(freq, bw, sf, cr), timeout=8.0)
+                ok = r is not None and r.type == EventType.OK
+                if ok:
+                    Domoticz.Log(f"Radio set: freq={freq} MHz bw={bw} kHz sf={sf} cr={cr}")
+                    # Optimistically update local snapshot — firmware will re-emit
+                    # SELF_INFO on next connect / advert anyway. Match the wire
+                    # types firmware uses so equality diffs don't false-positive
+                    # (freq/bw are reported as ints when integer-valued).
+                    self._self_info_full["radio_freq"] = int(freq) if freq == int(freq) else freq
+                    self._self_info_full["radio_bw"]   = int(bw)   if bw   == int(bw)   else bw
+                    self._self_info_full["radio_sf"]   = sf
+                    self._self_info_full["radio_cr"]   = cr
+                    self._write_device_map()
+                self._queue.put(("send_result", {
+                    "ok": ok, "target": "!set_radio",
+                    "body": f"{freq}/{bw}/sf{sf}/cr{cr}",
+                    "result": "applied" if ok else str(r),
+                
+                    "id": req_id,
+                }))
+            except Exception as exc:
+                self._queue.put(("send_result", {
+                    "ok": False, "target": "!set_radio", "body": text, "result": str(exc),
+                
+                    "id": req_id,
+                }))
+            return
+
+        # !set_tx_power <dBm>
+        if text.startswith("!set_tx_power"):
+            parts = text.split()
+            if len(parts) != 2:
+                self._queue.put(("send_result", {
+                    "ok": False, "target": "!set_tx_power", "body": text,
+                    "result": "syntax: !set_tx_power <dBm>",
+                    "id": req_id,
+                }))
+                return
+            try:
+                p = int(parts[1])
+            except ValueError as exc:
+                self._queue.put(("send_result", {
+                    "ok": False, "target": "!set_tx_power", "body": text, "result": str(exc),
+                
+                    "id": req_id,
+                }))
+                return
+            # Clamp against the firmware-reported maximum to avoid bricking
+            # the radio at hardware-illegal levels. Fall back to a generous
+            # 22 dBm ceiling when max isn't known yet.
+            max_tx = int(self._self_info_full.get("max_tx_power",
+                                                   RADIO_TX_POWER_DEFAULT_MAX_DBM)
+                         or RADIO_TX_POWER_DEFAULT_MAX_DBM)
+            if not (0 <= p <= max_tx):
+                self._queue.put(("send_result", {
+                    "ok": False, "target": "!set_tx_power", "body": str(p),
+                    "result": f"tx_power must be 0-{max_tx} dBm",
+                
+                    "id": req_id,
+                }))
+                return
+            try:
+                r = await asyncio.wait_for(mc.commands.set_tx_power(p), timeout=8.0)
+                ok = r is not None and r.type == EventType.OK
+                if ok:
+                    Domoticz.Log(f"TX power set to {p} dBm")
+                    self._self_info_full["tx_power"] = p
+                    self._write_device_map()
+                self._queue.put(("send_result", {
+                    "ok": ok, "target": "!set_tx_power", "body": str(p),
+                    "result": "applied" if ok else str(r),
+                
+                    "id": req_id,
+                }))
+            except Exception as exc:
+                self._queue.put(("send_result", {
+                    "ok": False, "target": "!set_tx_power", "body": text, "result": str(exc),
+                
+                    "id": req_id,
+                }))
+            return
+
+        # !set_name <new name>
+        if text.startswith("!set_name "):
+            new_name = text[len("!set_name "):].strip()
+            if not new_name:
+                self._queue.put(("send_result", {
+                    "ok": False, "target": "!set_name", "body": text,
+                    "result": "name must not be empty",
+                    "id": req_id,
+                }))
+                return
+            # Defend in depth: HTML caps at 32 but the /json.htm endpoint
+            # bypasses that. Reject overlong / non-printable names.
+            if len(new_name) > 32:
+                self._queue.put(("send_result", {
+                    "ok": False, "target": "!set_name", "body": new_name,
+                    "result": "name must be ≤ 32 characters",
+                    "id": req_id,
+                }))
+                return
+            if not all(c.isprintable() for c in new_name):
+                self._queue.put(("send_result", {
+                    "ok": False, "target": "!set_name", "body": new_name,
+                    "result": "name contains non-printable characters",
+                    "id": req_id,
+                }))
+                return
+            try:
+                r = await asyncio.wait_for(mc.commands.set_name(new_name), timeout=8.0)
+                ok = r is not None and r.type == EventType.OK
+                if ok:
+                    Domoticz.Log(f"Device name set to: {new_name}")
+                    self._self_name = new_name
+                    self._self_info_full["name"] = new_name
+                    self._write_device_map()
+                self._queue.put(("send_result", {
+                    "ok": ok, "target": "!set_name", "body": new_name,
+                    "result": "applied" if ok else str(r),
+                
+                    "id": req_id,
+                }))
+            except Exception as exc:
+                self._queue.put(("send_result", {
+                    "ok": False, "target": "!set_name", "body": new_name, "result": str(exc),
+                
+                    "id": req_id,
+                }))
+            return
+
+        # !set_coords <lat> <lon>
+        if text.startswith("!set_coords"):
+            parts = text.split()
+            if len(parts) != 3:
+                self._queue.put(("send_result", {
+                    "ok": False, "target": "!set_coords", "body": text,
+                    "result": "syntax: !set_coords <lat> <lon>",
+                    "id": req_id,
+                }))
+                return
+            try:
+                lat, lon = float(parts[1]), float(parts[2])
+            except ValueError as exc:
+                self._queue.put(("send_result", {
+                    "ok": False, "target": "!set_coords", "body": text, "result": str(exc),
+                
+                    "id": req_id,
+                }))
+                return
+            if not (-90.0 <= lat <= 90.0 and -180.0 <= lon <= 180.0):
+                self._queue.put(("send_result", {
+                    "ok": False, "target": "!set_coords", "body": f"{lat},{lon}",
+                    "result": "lat must be -90..90 and lon must be -180..180",
+                
+                    "id": req_id,
+                }))
+                return
+            try:
+                r = await asyncio.wait_for(mc.commands.set_coords(lat, lon), timeout=8.0)
+                ok = r is not None and r.type == EventType.OK
+                if ok:
+                    Domoticz.Log(f"Coords set: lat={lat} lon={lon}")
+                    self._self_info_full["adv_lat"] = lat
+                    self._self_info_full["adv_lon"] = lon
+                    self._write_device_map()
+                self._queue.put(("send_result", {
+                    "ok": ok, "target": "!set_coords", "body": f"{lat},{lon}",
+                    "result": "applied" if ok else str(r),
+                
+                    "id": req_id,
+                }))
+            except Exception as exc:
+                self._queue.put(("send_result", {
+                    "ok": False, "target": "!set_coords", "body": text, "result": str(exc),
+                
+                    "id": req_id,
+                }))
+            return
+
+        # !set_path_hash_mode <1|2|3>
+        #   1 = 1-byte hashes (max ~64 hops)
+        #   2 = 2-byte hashes (max ~32 hops)
+        #   3 = 3-byte hashes (max ~21 hops, default on SF8)
+        if text.startswith("!set_path_hash_mode"):
+            parts = text.split()
+            if len(parts) != 2:
+                self._queue.put(("send_result", {
+                    "ok": False, "target": "!set_path_hash_mode", "body": text,
+                    "result": "syntax: !set_path_hash_mode <1|2|3>",
+                    "id": req_id,
+                }))
+                return
+            try:
+                mode = int(parts[1])
+                if mode < 1 or mode > 3:
+                    raise ValueError("mode must be 1, 2 or 3")
+            except ValueError as exc:
+                self._queue.put(("send_result", {
+                    "ok": False, "target": "!set_path_hash_mode", "body": text, "result": str(exc),
+                
+                    "id": req_id,
+                }))
+                return
+            # Wire format: firmware uses 0/1/2 to mean 1/2/3-byte hashes
+            # (off-by-one vs. the human-friendly value the UI uses). Translate
+            # at the boundary so the rest of the code can stay in 1/2/3.
+            wire_mode = mode - 1
+            try:
+                r = await asyncio.wait_for(mc.commands.set_path_hash_mode(wire_mode), timeout=8.0)
+                ok = r is not None and r.type == EventType.OK
+                if ok:
+                    Domoticz.Log(f"Path hash mode set to {mode}-byte (wire={wire_mode})")
+                    # Store the human-friendly value so the dashboard dropdown
+                    # selects the same option the user picked.
+                    self._device_info["path_hash_mode"] = mode
+                    self._write_device_map()
+                self._queue.put(("send_result", {
+                    "ok": ok, "target": "!set_path_hash_mode", "body": str(mode),
+                    "result": "applied" if ok else str(r),
+                
+                    "id": req_id,
+                }))
+            except Exception as exc:
+                self._queue.put(("send_result", {
+                    "ok": False, "target": "!set_path_hash_mode", "body": text, "result": str(exc),
+                
+                    "id": req_id,
+                }))
+            return
+
+        # !reboot
+        if text.startswith("!reboot"):
+            try:
+                # reboot doesn't wait for a response — the device acks then
+                # disconnects roughly 1s later. We only swallow disconnect-
+                # class exceptions (TimeoutError, ConnectionError) as expected;
+                # other errors (e.g. permission denied, bad state) are reported.
+                await asyncio.wait_for(mc.commands.reboot(), timeout=5.0)
+                Domoticz.Log("Reboot command sent.")
+                self._queue.put(("send_result", {
+                    "ok": True, "target": "!reboot", "body": "", "result": "sent",
+                
+                    "id": req_id,
+                }))
+            except (asyncio.TimeoutError, ConnectionError, OSError) as exc:
+                # Disconnection during reboot is expected — the device just
+                # reset and our serial/TCP link dropped. Treat as success.
+                Domoticz.Log(f"Reboot sent (device disconnected as expected: {exc})")
+                self._queue.put(("send_result", {
+                    "ok": True, "target": "!reboot", "body": "", "result": "sent",
+                
+                    "id": req_id,
+                }))
+            except Exception as exc:
+                Domoticz.Error(f"Reboot failed: {exc}")
+                self._queue.put(("send_result", {
+                    "ok": False, "target": "!reboot", "body": "", "result": str(exc),
+                
+                    "id": req_id,
+                }))
+            return
+
+        # !get_telemetry — local sensors
+        if text.startswith("!get_telemetry"):
+            try:
+                r = await asyncio.wait_for(mc.commands.get_self_telemetry(), timeout=8.0)
+                payload = dict(r.payload or {}) if r else {}
+                ok = r is not None
+                if ok:
+                    self._queue.put(("self_telemetry", payload))
+                self._queue.put(("send_result", {
+                    "ok": ok, "target": "!get_telemetry", "body": "",
+                    "result": "received" if ok else "no response",
+                
+                    "id": req_id,
+                }))
+            except Exception as exc:
+                self._queue.put(("send_result", {
+                    "ok": False, "target": "!get_telemetry", "body": "", "result": str(exc),
+                
+                    "id": req_id,
+                }))
+            return
+
+        # ── Special: set / clear a channel slot ─────────────────────────────
+        # Syntax:
+        #   !set_channel <slot> <name>            — name starting with '#'
+        #                                            auto-derives the secret
+        #   !set_channel <slot> <name> <secret>   — explicit 32-hex-char secret
+        #   !clear_channel <slot>                 — wipe slot to empty
+        if text.startswith("!set_channel"):
+            parts = text.split(None, 3)
+            if len(parts) < 3:
+                self._queue.put(("send_result", {
+                    "ok": False, "target": "!set_channel", "body": text,
+                    "result": f"syntax: !set_channel <slot 0-{MAX_CHANNEL_SLOTS-1}> <name> [secret_hex]",
+                    "id": req_id,
+                }))
+                return
+            try:
+                slot = int(parts[1])
+                if slot < 0 or slot >= MAX_CHANNEL_SLOTS:
+                    raise ValueError(f"slot must be 0..{MAX_CHANNEL_SLOTS-1}")
+            except ValueError as exc:
+                self._queue.put(("send_result", {
+                    "ok": False, "target": "!set_channel", "body": text,
+                    "result": f"bad slot: {exc}",
+                    "id": req_id,
+                }))
+                return
+            name = parts[2]
+            # Names beginning with '!' would re-enter the local command parser
+            # on the next plugin restart if anything echoed them back, and
+            # they're not valid MeshCore channel names anyway.
+            if name.startswith("!"):
+                self._queue.put(("send_result", {
+                    "ok": False, "target": "!set_channel", "body": text,
+                    "result": "channel name must not start with '!'",
+                    "id": req_id,
+                }))
+                return
+            secret = None
+            if len(parts) >= 4:
+                try:
+                    secret = bytes.fromhex(parts[3])
+                except ValueError as exc:
+                    self._queue.put(("send_result", {
+                        "ok": False, "target": "!set_channel", "body": text,
+                        "result": f"bad secret hex: {exc}",
+                        "id": req_id,
+                    }))
+                    return
+                if len(secret) != 16:
+                    self._queue.put(("send_result", {
+                        "ok": False, "target": "!set_channel", "body": text,
+                        "result": "secret must be exactly 16 bytes (32 hex chars)",
+                        "id": req_id,
+                    }))
+                    return
+            try:
+                result = await asyncio.wait_for(
+                    mc.commands.set_channel(slot, name, secret), timeout=10.0
+                )
+                ok = result is not None and result.type == EventType.OK
+                if ok:
+                    # Refresh slot table immediately so the dashboard sees it
+                    await self._fetch_channel_names(mc)
+                    self._write_device_map()
+                    Domoticz.Log(f"Channel slot {slot} set to '{name}'")
+                self._queue.put(("send_result", {
+                    "ok": ok, "target": "!set_channel",
+                    "body": f"slot={slot} name={name}",
+                    "result": "applied" if ok else str(result),
+                
+                    "id": req_id,
+                }))
+            except Exception as exc:
+                self._queue.put(("send_result", {
+                    "ok": False, "target": "!set_channel",
+                    "body": f"slot={slot} name={name}", "result": str(exc),
+                
+                    "id": req_id,
+                }))
+            return
+
+        if text.startswith("!clear_channel"):
+            parts = text.split(None, 1)
+            if len(parts) < 2:
+                self._queue.put(("send_result", {
+                    "ok": False, "target": "!clear_channel", "body": text,
+                    "result": f"syntax: !clear_channel <slot 0-{MAX_CHANNEL_SLOTS-1}>",
+                    "id": req_id,
+                }))
+                return
+            try:
+                slot = int(parts[1])
+                if slot < 0 or slot >= MAX_CHANNEL_SLOTS:
+                    raise ValueError(f"slot must be 0..{MAX_CHANNEL_SLOTS-1}")
+            except ValueError as exc:
+                self._queue.put(("send_result", {
+                    "ok": False, "target": "!clear_channel", "body": text,
+                    "result": f"bad slot: {exc}",
+                    "id": req_id,
+                }))
+                return
+            try:
+                # Clear by writing an empty name + zero secret. The library
+                # accepts any 16-byte secret; with empty name the firmware
+                # treats the slot as free.
+                result = await asyncio.wait_for(
+                    mc.commands.set_channel(slot, "", b"\x00" * 16), timeout=10.0
+                )
+                ok = result is not None and result.type == EventType.OK
+                if ok:
+                    await self._fetch_channel_names(mc)
+                    self._write_device_map()
+                    Domoticz.Log(f"Channel slot {slot} cleared.")
+                self._queue.put(("send_result", {
+                    "ok": ok, "target": "!clear_channel",
+                    "body": f"slot={slot}",
+                    "result": "cleared" if ok else str(result),
+                
+                    "id": req_id,
+                }))
+            except Exception as exc:
+                self._queue.put(("send_result", {
+                    "ok": False, "target": "!clear_channel",
+                    "body": f"slot={slot}", "result": str(exc),
+                
+                    "id": req_id,
+                }))
+            return
+
+        # ── Special: set default flood scope ───────────────────────────────
+        # Syntax: "!flood_scope <name>"  (empty name = reset to global flood)
+        if text.startswith("!flood_scope"):
+            arg = text[len("!flood_scope"):].strip()
+            # Library treats "", "0", "None", "*" as reset. We pass the empty
+            # string for reset (NOT None) because meshcore.commands.messaging
+            # has a bug where set_default_flood_scope(None) calls len(scope)
+            # on the still-None argument. Empty string takes the elif branch
+            # and resets correctly.
+            scope_to_set = arg or ""
+            # Mirror the library's disable sentinels so our UI/state stays in
+            # sync. "0", "*", "None" all mean "clear scope" — collapse to "".
+            if scope_to_set in ("0", "*", "None"):
+                scope_to_set = ""
+            try:
+                # When clearing, also clear the runtime scope first. The firmware
+                # refuses set_default_flood_scope("") while a runtime scope is
+                # active (returns ERR_CODE_ILLEGAL_ARG). Clearing the runtime
+                # scope first removes that block.
+                if not scope_to_set:
+                    try:
+                        await asyncio.wait_for(
+                            mc.commands.set_flood_scope(""), timeout=10.0
+                        )
+                    except Exception as e:
+                        Domoticz.Debug(f"set_flood_scope clear pre-step failed: {e}")
+                    # Try each disable sentinel in turn: "0", "", "*".
+                    result = None
+                    for sentinel in ("0", "", "*"):
+                        try:
+                            result = await asyncio.wait_for(
+                                mc.commands.set_default_flood_scope(sentinel),
+                                timeout=10.0,
+                            )
+                        except Exception as e:
+                            Domoticz.Debug(f"set_default_flood_scope({sentinel!r}) raised: {e}")
+                            continue
+                        if result is not None and result.type == EventType.OK:
+                            Domoticz.Debug(f"Empty-scope clear accepted with sentinel {sentinel!r}")
+                            break
+                else:
+                    result = await asyncio.wait_for(
+                        mc.commands.set_default_flood_scope(scope_to_set), timeout=10.0
+                    )
+                ok = result is not None and result.type == EventType.OK
+                if ok:
+                    # Normalize the stored value to what the device would echo back
+                    if not scope_to_set:
+                        self._default_flood_scope = ""
+                    else:
+                        s = scope_to_set
+                        if not s.startswith("#"):
+                            s = "#" + s
+                        self._default_flood_scope = s
+                    Domoticz.Log(f"Default flood scope set to {self._default_flood_scope or '(none)'}")
+                    self._write_device_map()
+                # Detect the firmware's "ILLEGAL_ARG on empty-scope set" quirk
+                # and surface a user-facing hint about !reboot. The firmware
+                # refuses to wipe an active scope_key in-place; it only clears
+                # on power-on. Reproduces consistently on fw 27 (Apr 2026).
+                err_payload = (result.payload if result is not None else None) or {}
+                is_empty_scope_quirk = (
+                    not ok and not scope_to_set
+                    and isinstance(err_payload, dict)
+                    and err_payload.get("code_string") == "ERR_CODE_ILLEGAL_ARG"
+                )
+                if is_empty_scope_quirk:
+                    result_str = ("firmware refused empty-scope set while a scope is active. "
+                                  "Workaround: clear scope via the MeshCore phone app and save, "
+                                  "or send !reboot - the scope clears on startup.")
+                else:
+                    result_str = "applied" if ok else str(result)
+                self._queue.put(("send_result", {
+                    "ok": ok, "target": "!flood_scope",
+                    "body": arg or "(reset)",
+                    "result": result_str,
+                
+                    "id": req_id,
+                }))
+            except Exception as exc:
+                self._queue.put(("send_result", {
+                    "ok": False, "target": "!flood_scope",
+                    "body": arg or "(reset)", "result": str(exc),
+                
+                    "id": req_id,
+                }))
+            return
+
+        # ── Special: set device parameter ──────────────────────────────────
+        # Syntax: "!set <key> <int-value>"
+        # Supported keys: telemetry_base, telemetry_loc, telemetry_env, adv_loc_policy
+        if text.startswith("!set "):
+            try:
+                _, key, val = text.split(None, 2)
+                ival = int(val)
+            except ValueError:
+                self._queue.put(("send_result", {"ok": False, "target": "!set", "body": text, "result": "syntax: !set <key> <int>",
+                    "id": req_id,
+                }))
+                return
+            cmd_map = {
+                "telemetry_base":  mc.commands.set_telemetry_mode_base,
+                "telemetry_loc":   mc.commands.set_telemetry_mode_loc,
+                "telemetry_env":   mc.commands.set_telemetry_mode_env,
+                "adv_loc_policy":  mc.commands.set_advert_loc_policy,
+            }
+            fn = cmd_map.get(key)
+            if fn is None:
+                self._queue.put(("send_result", {"ok": False, "target": "!set", "body": text, "result": f"unknown key '{key}'",
+                    "id": req_id,
+                }))
+                return
+            try:
+                result = await asyncio.wait_for(fn(ival), timeout=10.0)
+                ok = result is not None and result.type == EventType.OK
+                if ok:
+                    if key == "telemetry_base":     self._telemetry_mode_base = ival
+                    elif key == "telemetry_loc":    self._telemetry_mode_loc = ival
+                    elif key == "telemetry_env":    self._telemetry_mode_env = ival
+                    elif key == "adv_loc_policy":   self._advert_loc_policy = ival
+                    self._settings_set_at = time.monotonic()
+                    Domoticz.Log(f"Device {key} = {ival}")
+                self._queue.put(("send_result", {
+                    "ok": ok, "target": "!set", "body": f"{key}={ival}",
+                    "result": "applied" if ok else str(result),
+                
+                    "id": req_id,
+                }))
+            except Exception as exc:
+                self._queue.put(("send_result", {"ok": False, "target": "!set", "body": f"{key}={ival}", "result": str(exc),
+                    "id": req_id,
+                }))
+            return
+
+        # ── Special: toggle manual_add_contacts on the connected node ──────
+        if text.startswith("!manual_add"):
+            arg = text[len("!manual_add"):].strip().lower()
+            enable = arg in ("on", "1", "true", "yes")
+            try:
+                result = await asyncio.wait_for(
+                    mc.commands.set_manual_add_contacts(enable), timeout=10.0
+                )
+                ok = result is not None and result.type == EventType.OK
+                if ok:
+                    self._manual_add_contacts = enable
+                    self._settings_set_at = time.monotonic()
+                    Domoticz.Log(f"manual_add_contacts set to {enable} on device.")
+                self._queue.put(("send_result", {
+                    "ok": ok,
+                    "target": "!manual_add",
+                    "body": "on" if enable else "off",
+                    "result": "applied" if ok else str(result),
+                
+                    "id": req_id,
+                }))
+            except Exception as exc:
+                self._queue.put(("send_result", {
+                    "ok": False, "target": "!manual_add",
+                    "body": "on" if enable else "off", "result": str(exc),
+                
+                    "id": req_id,
+                }))
+            return
+
+        # ── Special: remove contact ────────────────────────────────────────
+        if text.startswith("!remove "):
+            name = text[len("!remove "):].strip()
+            if not name:
+                self._queue.put(("send_result", {"ok": False, "target": "!remove", "body": text, "result": "no contact name",
+                    "id": req_id,
+                }))
+                return
+            contact = None
+            for c in mc.contacts.values():
+                if c.get("adv_name", "").strip() == name:
+                    contact = dict(c)
+                    break
+            if contact is None:
+                self._queue.put(("send_result", {"ok": False, "target": "!remove", "body": text, "result": f"contact '{name}' not found",
+                    "id": req_id,
+                }))
+                return
+            try:
+                result = await asyncio.wait_for(mc.commands.remove_contact(contact), timeout=10.0)
+                ok = result is not None and result.type == EventType.OK
+                self._queue.put(("send_result", {
+                    "ok": ok,
+                    "target": "!remove",
+                    "body": name,
+                    "result": "removed" if ok else str(result),
+                
+                    "id": req_id,
+                }))
+                if ok:
+                    # Drop from local tracking so it disappears from the dashboard immediately
+                    if name in self._contact_names:
+                        self._contact_names.remove(name)
+                    self._node_types.pop(name, None)
+                    self._node_last_advert.pop(name, None)
+                    self._node_pubkey.pop(name, None)
+                    self._node_did.pop(name, None)
+                    self._contact_query_results.pop(name, None)
+                    self._node_last_activity.pop(name, None)
+                    self._node_locations.pop(name, None)
+                    self._ws_devices_dirty = True
+                    if name in self._favorites:
+                        self._favorites.discard(name)
+                        self._save_favorites()
+            except Exception as exc:
+                self._queue.put(("send_result", {"ok": False, "target": "!remove", "body": name, "result": str(exc),
+                    "id": req_id,
+                }))
+            return
+
+        # ── Special: add a heard node to contacts ──────────────────────────
+        # Syntax: "!heard_add <full_pubkey_hex>"
+        if text.startswith("!heard_add "):
+            pk = text[len("!heard_add "):].strip()
+            h = self._heard_nodes.get(pk)
+            if h is None:
+                self._queue.put(("send_result", {
+                    "ok": False, "target": "!heard_add", "body": pk[:12],
+                    "result": "heard node not found (rescan?)",
+                    "id": req_id,
+                }))
+                return
+            contact = {
+                "public_key":         pk,
+                "type":               int(h.get("type") or 1),
+                "flags":              0,
+                "out_path":           "",
+                "out_path_len":       -1,     # flood — no direct path known
+                "out_path_hash_mode": 0,
+                "adv_name":           h.get("name") or pk[:12],
+                "last_advert":        int(h.get("last_heard") or time.time()),
+                "adv_lat":            float(h.get("lat") or 0.0),
+                "adv_lon":            float(h.get("lon") or 0.0),
+            }
+            try:
+                result = await asyncio.wait_for(
+                    mc.commands.add_contact(contact), timeout=10.0)
+                ok = result is not None and result.type == EventType.OK
+                if ok:
+                    # _heard_nodes is also touched by _on_rx_log under this
+                    # lock. Hold it only for the mutation — _write_heard()
+                    # below re-acquires it (non-reentrant Lock).
+                    with self._rx_log_lock:
+                        self._heard_nodes.pop(pk, None)
+                    self._known_pubkeys = self._known_pubkeys | {pk}
+                    self._heard_dirty = True
+                    self._ws_heard_dirty = True
+                    self._write_heard()
+                    Domoticz.Log(f"Added heard node '{contact['adv_name']}' to contacts.")
+                    # Refresh contacts so the new device/dashboard entry appears
+                    await asyncio.wait_for(self._refresh_contacts(mc), timeout=COMMAND_TIMEOUT)
+                self._queue.put(("send_result", {
+                    "ok": ok, "target": "!heard_add",
+                    "body": contact["adv_name"],
+                    "result": "added" if ok else str(result),
+                    "id": req_id,
+                }))
+            except Exception as exc:
+                self._queue.put(("send_result", {
+                    "ok": False, "target": "!heard_add",
+                    "body": pk[:12], "result": str(exc),
+                    "id": req_id,
+                }))
+            return
+
+        # ── Special: delete a heard node from the heard list ───────────────
+        if text.startswith("!heard_delete "):
+            pk = text[len("!heard_delete "):].strip()
+            with self._rx_log_lock:
+                existed = self._heard_nodes.pop(pk, None) is not None
+            if existed:
+                self._heard_dirty = True
+                self._ws_heard_dirty = True
+                self._write_heard()
+            self._queue.put(("send_result", {
+                "ok": existed, "target": "!heard_delete", "body": pk[:12],
+                "result": "deleted" if existed else "not in heard list",
+                "id": req_id,
+            }))
+            return
+
+        # ── Special: prune heard nodes by age or frequency ─────────────────
+        if text.startswith("!heard_prune "):
+            criteria = text[len("!heard_prune "):].strip()
+            _valid = {"week", "month", "year", "once"}
+            if criteria not in _valid:
+                self._queue.put(("send_result", {
+                    "ok": False, "target": "!heard_prune", "body": criteria,
+                    "result": f"unknown criteria '{criteria}'; use: week, month, year, once",
+                    "id": req_id,
+                }))
+                return
+            now = time.time()
+            _age_thresholds = {"week": 7 * 86400, "month": 30 * 86400, "year": 365 * 86400}
+            to_remove = []
+            with self._rx_log_lock:
+                for pk, h in list(self._heard_nodes.items()):
+                    if criteria == "once":
+                        if (h.get("count") or 1) <= 1:
+                            to_remove.append(pk)
+                    else:
+                        lh = h.get("last_heard")
+                        if lh is None:
+                            # No last_heard → skip (keep) — safer than pruning
+                            continue
+                        if (now - lh) > _age_thresholds[criteria]:
+                            to_remove.append(pk)
+                for pk in to_remove:
+                    self._heard_nodes.pop(pk, None)
+            n = len(to_remove)
+            if n > 0:
+                self._heard_dirty = True
+                self._ws_heard_dirty = True
+                self._write_heard()
+            self._queue.put(("send_result", {
+                "ok": True, "target": "!heard_prune", "body": str(n),
+                "result": f"pruned {n} node(s)",
+                "id": req_id,
+            }))
+            return
+
+        # ── Special: wipe all lifetime statistics ──────────────────────────
+        if text.strip() == "!reset_stats":
+            with self._rx_log_lock:
+                self._stats = {
+                    "adverts_total":  0, "messages_total": 0,
+                    "client_total":   0, "repeater_total": 0, "server_total": 0,
+                    "msg_by_sender":  {}, "adv_by_sender":  {},
+                    "msg_by_channel": {},
+                    "hops_records":   [],
+                    "today": {"date": "", "messages": 0,
+                              "client": 0, "repeater": 0, "server": 0},
+                }
+                self._stats_dirty = False
+            self._ws_stats_dirty = True
+            self._write_stats()
+            Domoticz.Log("Lifetime statistics reset by dashboard.")
+            self._queue.put(("send_result", {
+                "ok": True, "target": "!reset_stats", "body": "",
+                "result": "statistics cleared",
+                "id": req_id,
+            }))
+            return
+
         target = None
         body   = text
 
@@ -864,15 +3879,21 @@ class BasePlugin:
                 elif chan_part.isdigit():
                     chan_idx = int(chan_part)
                 else:
-                    # Resolve channel name → index (case-insensitive)
+                    # Resolve channel name → index (case- and #-insensitive).
+                    # Stored names include the leading "#" (e.g. "#test");
+                    # the target may arrive as "#test" or "##test" depending
+                    # on the caller, so normalise both sides.
+                    want = chan_part.lstrip("#").lower()
                     chan_idx = None
                     for idx, name in self._channel_names.items():
-                        if name.lower() == chan_part.lower():
+                        if name.lstrip("#").lower() == want:
                             chan_idx = idx
                             break
                     if chan_idx is None:
                         self._queue.put(("send_result", {"ok": False, "target": prefix,
-                                                         "body": body, "result": f"Unknown channel name '{chan_part}'. Known: {self._channel_names}"}))
+                                                         "body": body, "result": f"Unknown channel name '{chan_part}'. Known: {self._channel_names}",
+                            "id": req_id,
+                        }))
                         return
                 try:
                     result = await asyncio.wait_for(
@@ -885,9 +3906,13 @@ class BasePlugin:
                     )
                     ok = result is not None and result.type == EventType.OK
                     self._queue.put(("send_result", {"ok": ok, "target": f"#{chan_idx}", "body": body,
-                                                    "result": "TX busy — try again" if tx_busy else str(result)}))
+                                                    "result": "TX busy - try again" if tx_busy else str(result),
+                        "id": req_id,
+                    }))
                 except Exception as exc:
-                    self._queue.put(("send_result", {"ok": False, "target": f"#{chan_idx}", "body": body, "result": str(exc)}))
+                    self._queue.put(("send_result", {"ok": False, "target": f"#{chan_idx}", "body": body, "result": str(exc),
+                        "id": req_id,
+                    }))
                 return
             else:
                 target = prefix  # node name
@@ -896,7 +3921,9 @@ class BasePlugin:
         if target is None:
             target = self._contact_names[0] if self._contact_names else ""
         if not target:
-            self._queue.put(("send_result", {"ok": False, "target": target, "body": body, "result": "no target node"}))
+            self._queue.put(("send_result", {"ok": False, "target": target, "body": body, "result": "no target node",
+                "id": req_id,
+            }))
             return
 
         contact = None
@@ -906,9 +3933,16 @@ class BasePlugin:
                 break
 
         if contact is None:
-            self._queue.put(("send_result", {"ok": False, "target": target, "body": body, "result": "contact not found"}))
+            self._queue.put(("send_result", {"ok": False, "target": target, "body": body, "result": "contact not found",
+                "id": req_id,
+            }))
             return
 
+        # Use plain send_msg: returns as soon as the local node has accepted
+        # the packet for TX. We register a pending-ACK record keyed by the
+        # expected_ack code returned by MSG_SENT so _on_ack can correlate
+        # exactly without timing guesswork (the code is a 4-byte hash of the
+        # message content that the firmware embeds in the ACK packet).
         try:
             result = await asyncio.wait_for(
                 mc.commands.send_msg(contact, body), timeout=15.0
@@ -919,10 +3953,28 @@ class BasePlugin:
                 and (result.payload or {}).get("reason") == "no_event_received"
             )
             ok = result is not None and result.type == EventType.MSG_SENT
+            # Register pending ACK record so _on_ack can annotate the sent line.
+            # Only do this on a clean MSG_SENT — if the TX failed there will be
+            # no ACK to wait for.
+            if ok:
+                exp_ack = (result.payload or {}).get("expected_ack")
+                if isinstance(exp_ack, (bytes, bytearray)) and len(exp_ack) == 4:
+                    ack_code = exp_ack.hex()
+                    out_ts = int(time.time())
+                    with self._rx_log_lock:
+                        self._pending_acks[ack_code] = {
+                            "target":   target,
+                            "body":     body,
+                            "out_ts":   out_ts,
+                        }
             self._queue.put(("send_result", {"ok": ok, "target": target, "body": body,
-                                             "result": "TX busy — try again" if tx_busy else str(result)}))
+                                             "result": "TX busy - try again" if tx_busy else str(result),
+                "id": req_id,
+            }))
         except Exception as exc:
-            self._queue.put(("send_result", {"ok": False, "target": target, "body": body, "result": str(exc)}))
+            self._queue.put(("send_result", {"ok": False, "target": target, "body": body, "result": str(exc),
+                "id": req_id,
+            }))
 
     # ── Queue dispatcher (runs on Domoticz main thread via onHeartbeat) ───────
 
@@ -931,43 +3983,183 @@ class BasePlugin:
         if kind == "message":
             Domoticz.Debug(f"Message: {item[1]}")
             self._handle_message(item[1])
+        elif kind == "advert":
+            # Ambient advertisement — a hint that a node is alive even before
+            # its first message. No Domoticz device is updated here; the next
+            # contacts refresh handles status/last_advert. Advert lifetime
+            # stats are tallied from the RX_LOG ADVERT frame (the canonical,
+            # always-emitted source) — counting here too would double-count.
+            pass
         elif kind == "contacts":
             self._handle_contacts(item[1])
+            # First contacts batch processed — bump heartbeat back to a
+            # steady 10s cadence. Push events still arrive instantly via
+            # the worker thread; the heartbeat is only there to drain the
+            # cross-thread queue. 10s feels live without thrashing.
+            if not self._heartbeat_restored:
+                Domoticz.Heartbeat(10)
+                self._heartbeat_restored = True
         elif kind == "self_stats":
             self._handle_self_stats(item[1])
+        elif kind == "self_telemetry":
+            # Latest local-sensor reading from get_self_telemetry. Stored in
+            # the device map so the self-node side panel can render it.
+            self._self_telemetry = item[1] or {}
+            self._write_device_map()
+        elif kind == "contact_status":
+            d = item[1] or {}
+            name = d.get("name")
+            if name:
+                self._contact_query_results.setdefault(name, {})["status"] = {
+                    "t": int(time.time()), "data": d.get("data") or {}
+                }
+                self._write_device_map()
+        elif kind == "contact_telemetry":
+            d = item[1] or {}
+            name = d.get("name")
+            if name:
+                self._contact_query_results.setdefault(name, {})["telemetry"] = {
+                    "t": int(time.time()), "data": d.get("data") or {}
+                }
+                self._write_device_map()
+        elif kind == "contact_neighbours":
+            d = item[1] or {}
+            name = d.get("name")
+            if name:
+                # Neighbours payload can be a list — preserve as-is, JSON serializer
+                # will handle it.
+                data = d.get("data")
+                self._contact_query_results.setdefault(name, {})["neighbours"] = {
+                    "t": int(time.time()), "data": data
+                }
+                self._write_device_map()
+        elif kind == "flood_scope":
+            scope = (item[1] or "").strip()
+            if scope != self._default_flood_scope:
+                self._default_flood_scope = scope
+                Domoticz.Debug(f"Default flood scope: {scope or '(none)'}")
+                self._write_device_map()
+        elif kind == "device_info":
+            info = dict(item[1] or {})
+            # Firmware reports path_hash_mode in wire format (0/1/2 = 1/2/3
+            # byte). The rest of our code and the dashboard work in the
+            # human-friendly 1/2/3 form, so translate at the boundary.
+            if "path_hash_mode" in info and isinstance(info["path_hash_mode"], int):
+                info["path_hash_mode"] = info["path_hash_mode"] + 1
+            if info != self._device_info:
+                self._device_info = info
+                fw = info.get("fw ver", "?")
+                build = info.get("fw_build", "")
+                model = info.get("model", "")
+                Domoticz.Log(f"Device info: fw={fw} build={build!r} model={model!r}")
+                self._write_device_map()
         elif kind == "self_info":
             name = item[1].get("name", "")
             Domoticz.Debug(f"Self info: name={name}, freq={item[1].get('radio_freq')} MHz")
             if name and name != self._self_name:
                 self._self_name = name
+            # Keep a full snapshot for the dashboard's self-node side panel.
+            self._self_info_full = dict(item[1])
+            self._write_device_map()
+            # Track device-side settings so the dashboard can show / toggle them.
+            # Skip while in the user-set grace window — some firmware returns
+            # the previous value briefly while persisting to flash.
+            in_grace = (time.monotonic() - self._settings_set_at) < SETTINGS_GRACE_S
+            if not in_grace:
+                mac = item[1].get("manual_add_contacts")
+                if mac is not None:
+                    self._manual_add_contacts = bool(mac)
+                for k_attr, k_info in (
+                    ("_telemetry_mode_base", "telemetry_mode_base"),
+                    ("_telemetry_mode_loc",  "telemetry_mode_loc"),
+                    ("_telemetry_mode_env",  "telemetry_mode_env"),
+                    ("_advert_loc_policy",   "adv_loc_policy"),
+                ):
+                    v = item[1].get(k_info)
+                    if v is not None:
+                        setattr(self, k_attr, int(v))
+            else:
+                Domoticz.Debug(f"In settings grace window ({int(SETTINGS_GRACE_S - (time.monotonic() - self._settings_set_at))}s left); skipping self_info settings update.")
         elif kind == "send_result":
             d = item[1]
+            # Internal control commands (!remove, !manual_add, !flood_scope,
+            # !favorite, !set, ...) shouldn't appear in the inbox or count as
+            # a sent mesh message.
+            is_internal = isinstance(d.get("target"), str) and d["target"].startswith("!")
             if d["ok"]:
-                Domoticz.Log(f"Message sent to '{d['target']}': {d['body']}")
-                self._sent_count += 1
-                if UNIT_MSGS_SENT_ in Devices:
-                    Devices[UNIT_MSGS_SENT_].Update(nValue=0, sValue=str(self._sent_count))
-                # Show sent message in the inbox so the user gets confirmation.
-                # Use the same [ChannelName|sender] / [P|sender] format as incoming msgs
-                # with a ▶ prefix on the sender to mark it as outgoing.
-                if UNIT_INBOX in Devices:
+                if is_internal:
+                    # The verb handler already logged its own success message;
+                    # don't duplicate. Debug-level keeps it greppable.
+                    Domoticz.Debug(f"Internal command ok: {d['target']} {d.get('body','')}")
+                    # Skip inbox / counter updates for internal commands.
+                else:
+                    Domoticz.Status(f"Message sent to '{d['target']}': {d['body']}")
+                    self._sent_count += 1
+                    self._set(MESH_DID, UNIT_MSGS_SENT_, 0, str(self._sent_count))
+                    # Show sent message in the inbox so the user gets confirmation.
+                    # Use the same [ChannelName|sender] / [P|sender] format as incoming msgs
+                    # with a leading "> " on the sender to mark it as outgoing. Stick to
+                    # ASCII so Windows/cp1252 stored text isn't mangled.
                     tgt = d["target"]
                     me = self._self_name or "Me"
+                    out_ts = int(time.time())   # our own message, our clock
                     if tgt.startswith("#"):
                         chan_idx_str = tgt[1:]
                         chan_idx_int = int(chan_idx_str) if chan_idx_str.isdigit() else None
                         chan_tag = self._channel_names.get(chan_idx_int, f"C{chan_idx_str}") if chan_idx_int is not None else f"C{chan_idx_str}"
-                        Devices[UNIT_INBOX].Update(
-                            nValue=0,
-                            sValue=f"[{chan_tag}|▶ {me}] {d['body']}"
+                        self._set(MESH_DID, UNIT_INBOX, 0,
+                                  self._inbox_line(chan_tag, f"> {me}", d['body'], out_ts))
+                        # Persist outgoing channel message to SQLite store.
+                        self._msg_store_add(
+                            chan=chan_tag, sender=f"> {me}", body=d['body'],
+                            epoch=out_ts, direction="out",
                         )
                     else:
-                        Devices[UNIT_INBOX].Update(
-                            nValue=0,
-                            sValue=f"[P|▶ {tgt}] {d['body']}"
+                        sent_line = self._inbox_line("P", f"> {tgt}", d['body'], out_ts)
+                        self._set(MESH_DID, UNIT_INBOX, 0, sent_line)
+                        self._log_contact_dm(tgt, sent_line)
+                        # Persist outgoing DM to SQLite store; capture rowid for ACK back-fill.
+                        _out_rowid = self._msg_store_add(
+                            chan="P", sender=f"> {tgt}", body=d['body'],
+                            epoch=out_ts, direction="out",
                         )
+                        # Back-fill the inbox_line, dm_name, and msg_rowid into the
+                        # pending_ack record so _on_ack / timeout sweep know exactly
+                        # which stored line (and DB row) to rewrite.  Match by
+                        # (target, body) — the worker wrote the record just before
+                        # queuing send_result, so at most one entry will match.
+                        # Hold the lock only for the dict lookup.
+                        with self._rx_log_lock:
+                            for _rec in self._pending_acks.values():
+                                if _rec.get("target") == tgt and _rec.get("body") == d['body']:
+                                    _rec["inbox_line"] = sent_line
+                                    _rec["dm_name"]    = tgt
+                                    _rec["msg_rowid"]  = _out_rowid
+                                    break
             else:
                 Domoticz.Error(f"Send failed to '{d['target']}': {d['result']}")
+            # Push result to any connected WebSocket client.  Wrapped so a
+            # WebSocketSend exception cannot stall the heartbeat queue drain
+            # (_push already swallows exceptions internally, but being explicit
+            # here makes the intent clear and guards against future refactors).
+            try:
+                self._push("cmd_result", {
+                    "ok":     d["ok"],
+                    "target": d.get("target", ""),
+                    "result": d.get("result", ""),
+                    "id":     d.get("id"),
+                })
+            except Exception as _exc:
+                Domoticz.Debug(f"_dispatch send_result: _push raised {_exc!r}; ignoring.")
+        elif kind == "self_offline":
+            # Worker signalled that the node connection was lost (not a clean
+            # plugin stop).  Flip the self STATUS device to Off so the dashboard
+            # badge reflects the real state.
+            if self._self_name:
+                self._set(SELF_DID, OFF_STATUS, 0, "Off")
+                self._ws_devices_dirty = True
+        elif kind == "ack_result":
+            self._handle_ack_result(item[1])
 
     # ── Data handlers ─────────────────────────────────────────────────────────
 
@@ -980,6 +4172,23 @@ class BasePlugin:
             for c in contacts.values()
         }
 
+        # Refresh the worker-readable set of known contact pubkeys and prune
+        # any heard-node entry that is now a real contact.  Both mutations are
+        # combined under a single _rx_log_lock acquisition so the worker never
+        # observes the new _known_pubkeys without the corresponding _heard_nodes
+        # pruning (or vice-versa).  _heard_nodes is also mutated by _on_rx_log
+        # on the worker thread, so the lock is mandatory anyway.
+        new_known = {
+            c.get("public_key", "") for c in contacts.values() if c.get("public_key")
+        }
+        with self._rx_log_lock:
+            self._known_pubkeys = new_known
+            if self._heard_nodes:
+                for pk in [k for k in self._heard_nodes if k in self._known_pubkeys]:
+                    self._heard_nodes.pop(pk, None)
+                    self._heard_dirty = True
+                    self._ws_heard_dirty = True
+
         # Register any new contacts (non-self) in discovery order
         for contact in contacts.values():
             name = contact.get("adv_name", "").strip()
@@ -990,11 +4199,7 @@ class BasePlugin:
         # Update self node status from self_info (always online when connected)
         if self._self_name:
             self._ensure_node_devices(self._self_name)
-            idx = self._node_index(self._self_name)
-            if idx >= 0:
-                status_unit = self._node_unit(idx, OFF_STATUS)
-                if status_unit in Devices:
-                    Devices[status_unit].Update(nValue=1, sValue="On")
+            self._set(SELF_DID, OFF_STATUS, 1, "On")
 
         # Update all remote contacts
         for contact in contacts.values():
@@ -1005,38 +4210,65 @@ class BasePlugin:
             last_advert = contact.get("last_advert", 0)
             if last_advert < 1_577_836_800:
                 last_advert = 0
+            # "Last Seen" must reflect OUR local clock, never the node's
+            # advertised timestamp (some nodes have a bad RTC and advertise a
+            # future time). When the node's advertised time changes vs what we
+            # last stored, a fresh advert arrived ~now, so record local now.
+            # The raw node-reported time is kept separately (_node_last_advert)
+            # so the dashboard can flag a wrong clock without corrupting our
+            # reliable "last seen".
+            prev_advert = self._node_last_advert.get(node_name, 0)
+            if last_advert and last_advert != prev_advert:
+                if prev_advert == 0:
+                    # First time we see this node this session (e.g. right
+                    # after a plugin restart). The contact-list snapshot is
+                    # NOT a fresh advert that arrived "now" — it's the node's
+                    # last-known advert from before. Estimating last-seen from
+                    # the node's own advert time (bounded to not exceed now)
+                    # keeps "Last Seen" sane across restarts and avoids
+                    # flagging every contact as clock-wrong. A node with a
+                    # genuinely future (bad) clock still clamps to now, so the
+                    # node-vs-our time gap is preserved and correctly flagged.
+                    self._node_last_activity[node_name] = min(now, last_advert)
+                else:
+                    self._node_last_activity[node_name] = now
             last_activity = self._node_last_activity.get(node_name, 0)
-            effective_ts  = max(last_advert, last_activity)
-            advert_online = effective_ts > 0 and (now - effective_ts) < ONLINE_THRESHOLD_S
+            advert_online = last_activity > 0 and (now - last_activity) < ONLINE_THRESHOLD_S
 
             path_len    = contact.get("out_path_len", -1)
             path_online = path_len >= 0
             online      = advert_online or path_online
-            age_s       = int(now - effective_ts) if effective_ts > 0 else -1
+            age_s       = int(now - last_activity) if last_activity > 0 else -1
+
+            # Store pubkey / DeviceID BEFORE ensuring devices — the DeviceID
+            # is derived from the pubkey, so it must be known first.
+            pk = contact.get("public_key", "")
+            if pk:
+                self._node_pubkey[node_name] = pk
+                self._node_did[node_name] = pk[:12]
 
             self._ensure_node_devices(node_name)
-            idx = self._node_index(node_name)
-            if idx < 0:
+            did = self._device_id_for(node_name)
+            if did is None:
                 continue
 
-            status_unit = self._node_unit(idx, OFF_STATUS)
-            if status_unit in Devices:
-                Devices[status_unit].Update(
-                    nValue=1 if online else 0,
-                    sValue="On" if online else "Off"
-                )
+            self._set(did, OFF_STATUS,
+                      1 if online else 0,
+                      "On" if online else "Off")
 
-            hops_unit = self._node_unit(idx, OFF_HOPS)
-            if hops_unit in Devices and path_len >= 0:
-                Devices[hops_unit].Update(nValue=0, sValue=str(path_len))
+            if 0 <= path_len < HOPS_SENTINEL:
+                self._set(did, OFF_HOPS, 0, str(path_len))
 
-            if effective_ts > 0:
-                ls_unit = self._node_unit(idx, OFF_LASTSEEN)
-                if ls_unit in Devices:
-                    ts = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(effective_ts))
-                    Devices[ls_unit].Update(nValue=0, sValue=ts)
+            if last_activity > 0:
+                ts = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(last_activity))
+                self._set(did, OFF_LASTSEEN, 0, ts)
 
             la = self._node_last_activity.get(node_name, 0)
+
+            # Store contact metadata for the dashboard map
+            self._node_types[node_name] = int(contact.get("type", 0))
+            if last_advert > 0:
+                self._node_last_advert[node_name] = last_advert
 
             # Store GPS location if the contact advertises valid coordinates
             adv_lat = contact.get("adv_lat", 0.0)
@@ -1054,14 +4286,181 @@ class BasePlugin:
 
         self._write_device_map()
 
+    @staticmethod
+    def _inbox_line(chan_tag, sender, body, ts, bad=False,
+                    snr=None, hops=None, rssi=None, path=None, ack=None):
+        """Build the inbox / conversation wire string with an embedded send
+        time so the dashboard can show the real time a message was sent (not
+        the time Domoticz happened to log it — which for messages drained on
+        reconnect is the catch-up time, not the original time).
+
+        Format:
+          [chan|sender|<epoch>]              <epoch> = trusted send time
+          [chan|sender|<epoch>|x]            <epoch> = OUR receive time,
+                                             substituted because the node's
+                                             reported time was missing /
+                                             implausible (bad RTC).
+          [chan|sender|<epoch>{|x}{|~h<hops>}{|~s<snr>}{|~r<rssi>}{|~p<path>}{|~a<0|1>}] body
+                                             optional per-message signal,
+                                             appended AFTER the epoch/x so the
+                                             existing epoch parsing is
+                                             unaffected and older lines (no
+                                             tokens) still parse unchanged.
+          ~a0 = no ACK received within timeout  (no delivery confirmation)
+          ~a1 = ACK received (message delivered)
+          ~a is only emitted on outgoing DM lines after ACK resolution.
+          Back-compat: lines without ~a parse identically to before.
+        """
+        meta = f"{chan_tag}|{sender}|{int(ts)}"
+        if bad:
+            meta += "|x"
+        if isinstance(hops, int) and hops >= 0:
+            meta += f"|~h{hops}"
+        if snr is not None:
+            try:
+                meta += f"|~s{round(float(snr), 2)}"
+            except (TypeError, ValueError):
+                pass
+        if rssi is not None:
+            try:
+                meta += f"|~r{int(rssi)}"
+            except (TypeError, ValueError):
+                pass
+        # Per-hop path = concatenated hex of each repeater's pubkey-hash
+        # prefix the packet carried. Only meaningful when present (mostly
+        # channel msgs back-filled from a matched RX_LOG frame). Strip any
+        # separators the library may add; keep hex only so the token can't
+        # contain '|' / ']' and break parsing.
+        if path:
+            ph = re.sub(r"[^0-9a-fA-F]", "", str(path))
+            if ph:
+                meta += f"|~p{ph.lower()}"
+        # Delivery ACK annotation: ~a1 = delivered, ~a0 = no ack.
+        # Only set on outgoing DM lines after ACK resolution; never on
+        # incoming messages or channel sends.
+        if ack is True:
+            meta += "|~a1"
+        elif ack is False:
+            meta += "|~a0"
+        return f"[{meta}] {body}"
+
+    def _log_contact_dm(self, node_name: str, line: str):
+        """No-op: per-contact Messages devices are retired.
+
+        DM history is now served exclusively from the SQLite message store
+        via the inbox_query / @<name> scope mechanism.  The method signature
+        is kept so call sites do not need to be touched.
+        """
+
+    @staticmethod
+    def _annotate_sent_line(line: str, delivered: bool) -> str:
+        """Return a copy of an outgoing inbox wire line with the ~a token set.
+
+        If the line already carries a ~a token it is replaced.  If the line
+        has no meta block (legacy / malformed) it is returned unchanged so we
+        never corrupt an existing entry.
+        """
+        if not line:
+            return line
+        m = re.match(r"^(\[[^\]]+\])(.*)", line, re.DOTALL)
+        if not m:
+            return line
+        meta_block = m.group(1)   # "[chan|sender|ts|...]"
+        body_part  = m.group(2)   # " body text"
+        inner = meta_block[1:-1]  # strip [ ]
+        # Remove any existing ~a token
+        parts = [seg for seg in inner.split("|") if not re.match(r"^~a[01]$", seg)]
+        # Append the new ~a token at the end
+        parts.append("~a1" if delivered else "~a0")
+        return f"[{'|'.join(parts)}]{body_part}"
+
+    def _handle_ack_result(self, d: dict):
+        """Rewrite the outgoing DM inbox/DM-device line with the ACK annotation.
+
+        Runs on the Domoticz main thread (via _dispatch), so Domoticz API
+        calls (_set) are safe here.
+        """
+        inbox_line = d.get("inbox_line")
+        dm_name    = d.get("dm_name")
+        delivered  = bool(d.get("delivered"))
+        if not inbox_line:
+            return
+        annotated = self._annotate_sent_line(inbox_line, delivered)
+        if annotated == inbox_line:
+            return   # no change (shouldn't happen, but be safe)
+        # Rewrite global inbox
+        self._set(MESH_DID, UNIT_INBOX, 0, annotated)
+        # Rewrite per-contact DM device if the contact is a favourite
+        if dm_name:
+            self._log_contact_dm(dm_name, annotated)
+        # Update ACK status in the SQLite message store.
+        msg_rowid = d.get("msg_rowid")
+        if msg_rowid is not None:
+            self._msg_store_set_ack(msg_rowid, delivered)
+        status = "delivered" if delivered else "no ack"
+        Domoticz.Debug(f"ACK annotation applied: {status} target={d.get('target')!r}")
+
+    def _sweep_pending_acks(self):
+        """Expire pending-ACK records that have exceeded DM_ACK_TIMEOUT_S.
+
+        Called from onHeartbeat (main thread).  Timed-out records result in
+        a ~a0 (no ack) annotation on the outgoing line.
+        """
+        now = time.time()
+        expired = []
+        with self._rx_log_lock:
+            for code, rec in list(self._pending_acks.items()):
+                if now - rec.get("out_ts", now) >= DM_ACK_TIMEOUT_S:
+                    expired.append((code, dict(rec)))
+            for code, _ in expired:
+                del self._pending_acks[code]
+        for _code, rec in expired:
+            if rec.get("inbox_line"):
+                Domoticz.Debug(
+                    f"DM ACK timeout: no ack for target={rec.get('target')!r} "
+                    f"body={rec.get('body','')[:40]!r}"
+                )
+                self._queue.put(("ack_result", {
+                    "delivered":  False,
+                    "target":     rec.get("target", ""),
+                    "body":       rec.get("body", ""),
+                    "out_ts":     rec.get("out_ts", 0),
+                    "inbox_line": rec.get("inbox_line"),
+                    "dm_name":    rec.get("dm_name"),
+                    "msg_rowid":  rec.get("msg_rowid"),
+                }))
+
     def _handle_message(self, msg: dict):
         """Handle an incoming message — update Inbox and per-node RSSI/SNR/LastSeen."""
         msg_type  = msg.get("type", "")
         text      = msg.get("text", "")
 
+        # De-duplicate. The sender stamps each message with sender_timestamp;
+        # (sender, channel, timestamp, text) uniquely identifies it, so a
+        # message redelivered via the get_msg() drain or repeated by a
+        # duplicate flood (different path, same content/timestamp) is dropped.
+        # Runs on the single main _dispatch thread, so no lock needed.
+        sig = (
+            msg_type,
+            msg.get("pubkey_prefix", ""),
+            msg.get("channel_idx"),
+            msg.get("sender_timestamp"),
+            text,
+        )
+        if sig in self._recent_msg_sigs:
+            Domoticz.Debug(f"Duplicate message dropped: {sig!r}")
+            return
+        self._recent_msg_sigs.append(sig)
+
         # Resolve sender name
         prefix    = msg.get("pubkey_prefix", "")
         node_name = self._prefix_to_name.get(prefix, "").strip() if prefix else ""
+        if prefix and not node_name:
+            Domoticz.Debug(
+                f"Incoming message: pubkey_prefix={prefix!r} did not match any known "
+                f"contact (have {len(self._prefix_to_name)} prefixes). per-node "
+                f"updates will be skipped."
+            )
 
         # For CHAN messages the sender name is embedded in the text as "Name: text"
         # and there is no pubkey — use text prefix up to the first ": " as hint
@@ -1083,114 +4482,167 @@ class BasePlugin:
         else:
             chan_tag = "P"
 
-        # Update global inbox — format: [ChannelName|sender] text  or  [P|sender] text
-        if UNIT_INBOX in Devices:
-            Devices[UNIT_INBOX].Update(nValue=0, sValue=f"[{chan_tag}|{display_name}] {text_body}")
+        # Decide the send time to embed. The sender stamps each message with
+        # its own RTC (sender_timestamp). Trust it only if it's plausible:
+        # not before 2020-01-01 and not more than 1h in the future relative
+        # to our clock. Otherwise the node's RTC is wrong — fall back to our
+        # system time and flag it so the dashboard can show that.
+        now_i = int(time.time())
+        st = msg.get("sender_timestamp") or 0
+        if st and 1_577_836_800 <= st <= now_i + 3600:
+            msg_ts, ts_bad = int(st), False
+        else:
+            msg_ts, ts_bad = now_i, True
+
+        # Lifetime statistics (leaderboard + client/repeater/server split).
+        _hops = msg.get("path_len")
+        self._bump_msg_stats(node_name or display_name,
+                             _hops if isinstance(_hops, int) else -1,
+                             chan_tag)
+
+        # Per-message signal, embedded in the wire line so the dashboard can
+        # show the exact signal for THIS message (channel msgs have no pubkey
+        # and no RX_LOG text match, so this is the only reliable source).
+        _msg_snr = msg.get("SNR") if msg.get("SNR") is not None else msg.get("snr")
+        _msg_rssi = msg.get("rssi")
+        # Per-hop path hashes — present when the library back-filled it from
+        # a matched RX_LOG frame (mostly channel msgs). Lets the dashboard
+        # show / resolve the actual repeater chain.
+        _msg_path = msg.get("path")
+
+        # Update global inbox — [chan|sender|<epoch>[|x][|~h..|~s..|~r..|~p..]] text
+        self._set(MESH_DID, UNIT_INBOX, 0,
+                  self._inbox_line(chan_tag, display_name, text_body, msg_ts,
+                                   ts_bad, snr=_msg_snr, hops=_hops,
+                                   rssi=_msg_rssi, path=_msg_path))
+        # Persist to SQLite message store (non-fatal).
+        self._msg_store_add(
+            chan=chan_tag, sender=display_name, body=text_body,
+            epoch=msg_ts, bad=ts_bad, snr=_msg_snr,
+            hops=_hops if isinstance(_hops, int) else None,
+            rssi=_msg_rssi, path=_msg_path, ack=None, direction="in",
+        )
+
+        # Persist private (DM) messages to the sender's per-contact Messages
+        # device so a favourite's conversation history is never lost.
+        if chan_tag == "P" and node_name:
+            self._log_contact_dm(node_name,
+                self._inbox_line("P", display_name, text_body, msg_ts,
+                                 ts_bad, snr=_msg_snr, hops=_hops,
+                                 rssi=_msg_rssi, path=_msg_path))
 
         # Update per-node devices for any known contact
         if node_name:
+            # CONTACT_MSG_RECV carries the sender's pubkey prefix — register
+            # it as the DeviceID so the device can be created on first message
+            # even before the contacts poll runs.
+            pk_prefix = msg.get("pubkey_prefix", "")
+            if pk_prefix and node_name not in self._node_did:
+                self._node_did[node_name] = pk_prefix[:12]
+
+            # Latest received signal from this message — only when we have a
+            # reliable identity (a pubkey prefix; channel msgs without one are
+            # skipped to avoid mis-attribution). Covers non-favourite contacts
+            # too (this is outside the device-only block below). RSSI is left
+            # to adverts unless the message event actually carried one.
+            if pk_prefix:
+                _msnr = msg.get("SNR")
+                if _msnr is None:
+                    _msnr = msg.get("snr")
+                with self._rx_log_lock:
+                    self._contact_sig[pk_prefix[:12]] = {
+                        "snr": float(_msnr) if _msnr is not None else None,
+                        "rssi": msg.get("rssi"),
+                        "path_len": msg.get("path_len", -1),
+                        "t": time.time(), "source": "msg",
+                    }
+
             self._ensure_node_devices(node_name)
-            idx = self._node_index(node_name)
-            if idx >= 0:
+            did = self._device_id_for(node_name)
+            if did is not None:
                 now_ts = int(time.time())
                 # Record activity — used by _handle_contacts for online detection
                 self._node_last_activity[node_name] = now_ts
 
                 # A message means the node is clearly reachable → mark online
-                status_unit = self._node_unit(idx, OFF_STATUS)
-                if status_unit in Devices:
-                    Devices[status_unit].Update(nValue=1, sValue="On")
+                self._set(did, OFF_STATUS, 1, "On")
 
                 # Last Seen
-                ls_unit = self._node_unit(idx, OFF_LASTSEEN)
-                if ls_unit in Devices:
-                    Devices[ls_unit].Update(nValue=0, sValue=time.strftime("%Y-%m-%d %H:%M:%S"))
+                self._set(did, OFF_LASTSEEN, 0, time.strftime("%Y-%m-%d %H:%M:%S"))
 
                 # SNR from message metadata; RSSI from status poll (req_status_sync)
                 snr = msg.get("SNR") if msg.get("SNR") is not None else msg.get("snr")
                 if snr is not None:
-                    snr_unit = self._node_unit(idx, OFF_SNR)
-                    if snr_unit in Devices:
-                        Devices[snr_unit].Update(nValue=0, sValue=str(round(float(snr), 2)))
+                    self._set(did, OFF_SNR, 0, str(round(float(snr), 2)))
+                if pk_prefix and snr is not None:
+                    with self._rx_log_lock:
+                        hist = self._signal_history.setdefault(pk_prefix, [])
+                        hist.append({"t": time.time(), "snr": float(snr), "rssi": None,
+                                     "path_len": msg.get("path_len", -1), "kind": "MSG"})
+                        if len(hist) > 60:
+                            del hist[: len(hist) - 60]
+                    self._rx_log_dirty = True
 
         self._write_device_map()
 
         # Increment message received counter
         self._recv_count += 1
-        if UNIT_MSGS_RECV in Devices:
-            Devices[UNIT_MSGS_RECV].Update(nValue=0, sValue=str(self._recv_count))
+        self._set(MESH_DID, UNIT_MSGS_RECV, 0, str(self._recv_count))
 
     def _handle_self_stats(self, stats: dict):
         """Update devices for the connected (self) node from polled stats."""
         if not self._self_name:
             return
         self._ensure_node_devices(self._self_name)
-        idx = self._node_index(self._self_name)
-        if idx < 0:
+        did = SELF_DID
+        if did not in Devices:
             return
+
+        def _upd(unit, nValue, sValue):
+            self._set(did, unit, nValue, sValue)
 
         # Battery (millivolts) — from stats_core
         bat_mv = stats.get("battery_mv", 0)
         if bat_mv:
-            pct   = _bat_pct(bat_mv)
-            v     = round(bat_mv / 1000, 2)
-            u_pct = self._node_unit(idx, OFF_BATT_PCT)
-            u_v   = self._node_unit(idx, OFF_BATT_V)
-            if u_pct in Devices:
-                Devices[u_pct].Update(nValue=pct, sValue=str(pct))
-            if u_v in Devices:
-                Devices[u_v].Update(nValue=0, sValue=str(v))
+            pct = _bat_pct(bat_mv)
+            v   = round(bat_mv / 1000, 2)
+            _upd(OFF_BATT_PCT, pct, str(pct))
+            _upd(OFF_BATT_V, 0, str(v))
 
         # Uptime (seconds → minutes)
         uptime_s = stats.get("uptime_secs", 0)
         if uptime_s:
-            u = self._node_unit(idx, OFF_UPTIME)
-            if u in Devices:
-                Devices[u].Update(nValue=0, sValue=str(round(uptime_s / 60, 1)))
+            _upd(OFF_UPTIME, 0, str(round(uptime_s / 60, 1)))
 
         # Radio stats
         noise = stats.get("noise_floor")
         if noise is not None:
-            u = self._node_unit(idx, OFF_NOISE)
-            if u in Devices:
-                Devices[u].Update(nValue=0, sValue=str(noise))
+            _upd(OFF_NOISE, 0, str(noise))
 
         rssi = stats.get("last_rssi")
         if rssi is not None:
-            u = self._node_unit(idx, OFF_RSSI)
-            if u in Devices:
-                Devices[u].Update(nValue=0, sValue=str(rssi))
+            _upd(OFF_RSSI, 0, str(rssi))
 
         snr = stats.get("last_snr")
         if snr is not None:
-            u = self._node_unit(idx, OFF_SNR)
-            if u in Devices:
-                Devices[u].Update(nValue=0, sValue=str(round(snr, 2)))
+            _upd(OFF_SNR, 0, str(round(snr, 2)))
 
         # TX air seconds
         tx_air = stats.get("tx_air_secs")
         if tx_air is not None:
-            u = self._node_unit(idx, OFF_AIRTIME)
-            if u in Devices:
-                Devices[u].Update(nValue=0, sValue=str(tx_air))
+            _upd(OFF_AIRTIME, 0, str(tx_air))
 
         # Packet counters
         pkt_sent = stats.get("sent")
         if pkt_sent is not None:
-            u = self._node_unit(idx, OFF_MSGS_SENT)
-            if u in Devices:
-                Devices[u].Update(nValue=0, sValue=str(pkt_sent))
+            _upd(OFF_MSGS_SENT, 0, str(pkt_sent))
 
         pkt_recv = stats.get("recv")
         if pkt_recv is not None:
-            u = self._node_unit(idx, OFF_MSGS_RECV)
-            if u in Devices:
-                Devices[u].Update(nValue=0, sValue=str(pkt_recv))
+            _upd(OFF_MSGS_RECV, 0, str(pkt_recv))
 
         # Last seen = now (we just got data from it)
-        ls_unit = self._node_unit(idx, OFF_LASTSEEN)
-        if ls_unit in Devices:
-            Devices[ls_unit].Update(nValue=0, sValue=time.strftime("%Y-%m-%d %H:%M:%S"))
+        _upd(OFF_LASTSEEN, 0, time.strftime("%Y-%m-%d %H:%M:%S"))
 
         Domoticz.Debug(f"Self stats updated: bat={bat_mv}mV uptime={uptime_s}s rssi={rssi} snr={stats.get('last_snr')}")
         self._write_device_map()
@@ -1200,7 +4652,7 @@ class BasePlugin:
 
 _plugin = BasePlugin()
 
-def onStart():            _plugin.onStart()
-def onStop():             _plugin.onStop()
-def onHeartbeat():        _plugin.onHeartbeat()
-def onDeviceModified(u):  _plugin.onDeviceModified(u)
+def onStart():                        _plugin.onStart()
+def onStop():                         _plugin.onStop()
+def onHeartbeat():                    _plugin.onHeartbeat()
+def onWebSocketMessage(Data):         _plugin.onWebSocketMessage(Data)

@@ -46,22 +46,31 @@ This plugin connects your **[MeshCore LoRa mesh nodes](https://meshcore.co.uk/)*
 ### Prerequisites
 
 - Domoticz installed and running
+  - **Minimum version: build `17956` (`2025.2.17956`, 2026-05-16) or newer.** The custom dashboard uses the plugin↔frontend WebSocket channel (`Domoticz.WebSocketSend` / `onWebSocketMessage`), which was added in that build. Older Domoticz versions can run the plugin's devices but not the real-time dashboard.
 - A [MeshCore](https://meshcore.co.uk/) node reachable over TCP (companion app or radio bridge)
-- Python package:
-
-```sh
-pip install -r requirements.txt
-```
+  - Alternative firmware: [MeshcoMod](https://www.meshcomod.com) — a MeshCore-compatible fork for Heltec v3 / v4 boards that adds native WiFi, so the node can expose its TCP companion port directly without a USB bridge.
 
 ### Setup
 
 ```sh
 cd ~/domoticz/plugins
 git clone https://github.com/galadril/Domoticz-MeshCore-Plugin.git MeshCore
+cd MeshCore
+pip install -r requirements.txt
 sudo service domoticz.sh restart
 ```
 
 Then go to **Setup → Hardware** and add a new hardware entry of type **MeshCore**.
+
+#### Docker / Docker Compose
+
+The plugin still needs the `meshcore` Python package installed inside the container. Clone the plugin into your mounted plugins folder as above, then edit `customstart.sh` (the Domoticz container's customisation hook) and add:
+
+```sh
+pip3 install meshcore
+```
+
+This runs on every container start, so the package survives image rebuilds. On Debian-12-based images you may need `pip3 install --break-system-packages meshcore`.
 
 ----------
 
@@ -69,10 +78,15 @@ Then go to **Setup → Hardware** and add a new hardware entry of type **MeshCor
 
 | Field | Description |
 |---|---|
-| **MeshCore Host** | IP address of the MeshCore TCP endpoint |
-| **MeshCore Port** | TCP port (default `5000`) |
+| **Transport** | TCP or Serial |
+| **MeshCore Host** | (TCP) IP address of the MeshCore TCP endpoint |
+| **MeshCore Port** | (TCP) TCP port (default `5000`) |
+| **Serial Port** | (Serial) COM/tty port — dropdown auto-populated by Domoticz with detected adapters |
+| **Baud Rate** | (Serial) default `115200` |
 | **Install Custom Dashboard** | Yes / No — installs `meshcore.html` into Domoticz templates (default Yes) |
 | **Debug Level** | None / Basic / All |
+
+If a serial connection drops (cable unplugged, device reset), the plugin logs an error and automatically retries every 30 s. A “Connected” log line is emitted once the link is restored.
 
 > All contacts discovered by the mesh are tracked automatically — there is no manual node list to configure.
 
@@ -135,6 +149,27 @@ Write to the **Mesh Send** device via the Domoticz API, a script, or the custom 
 | `#flood: hello` | Broadcast on channel 0 (alias) |
 
 > **Tip:** Channel names are resolved automatically by the plugin — you don't need to look up numeric indices. Available channels are logged on startup (e.g. `MeshCore channels: #0 = General, #1 = MyRoom`).
+
+### Internal control commands
+
+The **Mesh Send** device also accepts `!`-prefixed commands that configure the
+device or plugin state instead of transmitting a message. They never appear in
+the inbox or count towards the sent-messages counter. Useful for scripting.
+
+| Command | Result |
+|---|---|
+| `!remove <name>` | Remove the named contact from the connected device |
+| `!favorite add <name>` | Mark `<name>` as a favorite (sorted first on the dashboard, persisted to `meshcore_favorites.json`) |
+| `!favorite remove <name>` | Drop favorite |
+| `!manual_add on` / `!manual_add off` | Enable/disable manual-add-contacts on the device (off = auto-add adverts) |
+| `!set telemetry_base <0\|1\|2>` | Off / Public / Always |
+| `!set telemetry_env <0\|1\|2>` | Same, for environmental telemetry |
+| `!set telemetry_loc <0\|1\|2>` | Same, for location telemetry |
+| `!set adv_loc_policy <0\|1>` | Never share / Share location in adverts |
+| `!flood_scope <#tag>` | Set the device's default flood scope (empty = global flood, e.g. `!flood_scope #nl`) |
+
+`!favorite` is handled entirely in the plugin — no MC session is opened.
+The other `!` commands open a short radio session to apply the change.
 
 ----------
 
@@ -204,15 +239,17 @@ Setup → More Options → Custom Pages → meshcore
 - **Node cards** — online/offline badge, battery bar, signal quality bars (SNR), hops, last seen — every value links to its Domoticz device log
 - **Signal quality bars** — color-coded visual SNR indicator (green = excellent, yellow = fair, red = poor)
 - **Uptime formatting** — human-readable display like "2d 5h 12m" instead of raw minutes
-- **Node map** — collapsible interactive Leaflet.js map with dark CARTO tiles showing all nodes that report GPS coordinates — auto-hidden when no location data is available, supports manual coordinate overrides
+- **Node map** — click the 📍 icon on any contact card / list row to open a Leaflet map side-panel centered on that node (OpenStreetMap tiles loaded from `unpkg.com`; if your browser's tracking-prevention blocks the CDN, the panel shows a fallback message with the raw coordinates)
 - **Manual node locations** — place a `meshcore_locations.json` in the plugin folder to pin nodes without GPS on the map (see below)
-- **Message inbox** — full scrollable history with timestamps, channel tags and sender names
-- **Channel & search filters** — filter messages by channel or search by sender / text
+- **Message inbox** — backed by the SQLite message store; server-side pagination (infinite scroll for older messages) with timestamps, channel tags and sender names
+- **Channel & search filters** — per-channel scope and search are resolved server-side within the selected scope (works across the full stored history, not just what's on screen)
+- **DM conversations** — pin a contact to see its full direct-message thread (served from the store; both directions, with delivery-ACK markers)
 - **Compose bar** — select a channel or direct target, type and send
 - **Reply** — hover any message and click ↩ Reply to pre-fill the compose bar with the right target and channel
 - **@mention highlighting** — `@name` tokens are highlighted in green in message text
 - **Emoji picker** — full categorised emoji picker (700+ emoji, WhatsApp-style) with search
-- **Auto-refresh** — live updates every 10 seconds
+- **Mesh topology & path lines** — map view plots contacts and (optionally) heard nodes, and draws the real multi-hop repeater paths recent messages traversed
+- **Live updates** — pushed in real time over the plugin↔frontend WebSocket channel
 
 ----------
 
@@ -255,6 +292,20 @@ git pull
 sudo service domoticz.sh restart
 ```
 
+> **⚠️ Breaking change — DomoticzEx migration**
+>
+> This release moves the plugin to the `DomoticzEx` framework so it is no
+> longer limited to ~11 remote contacts (the old 255-unit-per-plugin cap).
+> Devices are now keyed by a stable DeviceID (`self` for the connected node,
+> the 12-char public-key prefix for each remote contact).
+>
+> After upgrading, your **old per-node devices become orphaned** — Domoticz
+> does not auto-migrate them. Delete them once:
+> *Setup → Devices*, filter by the MeshCore hardware, and remove the old
+> entries. The plugin recreates fresh devices automatically on the next
+> contact poll. No dashboard data is lost — `meshcore.html` re-reads its
+> JSON map every tick and the historical RX log is preserved.
+
 ----------
 
 ## 🧩 Troubleshooting
@@ -275,6 +326,7 @@ Enable **Basic** or **All** debug logging in plugin settings for verbose logs in
 
 | Version | Notes |
 |---|---|
+| Unreleased | WebSocket transport for the dashboard (no more JSON-file / JSON-API polling). SQLite message store (`meshcore_messages.db`) is now the single source of truth for the inbox **and** per-contact DM conversations, with server-side pagination + search and a schema-versioned `preferences` table for future migrations. Per-contact "Messages" DM devices retired (existing ones are left for the user to remove manually). Mesh topology now shows heard nodes (when enabled) and draws real multi-hop repeater path lines. Delivery-ACK annotation on sent DMs, heard-node hit counts + prune, per-channel message stats, and assorted dashboard fixes. |
 | 0.0.1 | Initial release — telemetry, inbox, send, custom dashboard |
 
 ----------

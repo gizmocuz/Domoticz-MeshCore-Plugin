@@ -4,4 +4,13 @@
 
 /.vs
 /__pycache__
+__pycache__/
 /.claude
+meshcore_favorites.json
+
+# Runtime state (per-installation; regenerated at runtime, not source)
+meshcore_devices.json
+meshcore_channels.json
+meshcore_heard.json
+meshcore_stats.json
+meshcore_rx_log.json
