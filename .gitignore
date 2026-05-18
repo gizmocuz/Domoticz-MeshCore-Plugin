@@ -14,3 +14,6 @@ meshcore_channels.json
 meshcore_heard.json
 meshcore_stats.json
 meshcore_rx_log.json
+meshcore_messages.db
+meshcore_messages.db-wal
+meshcore_messages.db-shm

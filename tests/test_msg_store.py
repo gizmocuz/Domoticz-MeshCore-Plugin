@@ -9,9 +9,11 @@ explicitly before the TemporaryDirectory context exits.
 import _bootstrap  # noqa: F401  (sys.path side-effect)
 import json
 import os
+import re
 import shutil
 import sqlite3
 import tempfile
+import time
 import unittest
 
 import DomoticzEx as _Domoticz_stub
@@ -59,7 +61,7 @@ def _send_ws(raw):
 
 # ── 1. Schema creation ────────────────────────────────────────────────────────
 
-class TestMsgStoreSchema(unittest.TestCase):
+class TestMsgStoreSchemaCreation(unittest.TestCase):
 
     def test_schema_created_idempotent(self):
         """Opening the same DB twice must not raise (CREATE IF NOT EXISTS)."""
@@ -93,20 +95,62 @@ class TestMsgStoreSchema(unittest.TestCase):
             _close_store(bp)
             shutil.rmtree(tmp, ignore_errors=True)
 
-    def test_recv_ts_is_set_on_insert(self):
-        import time
+    def test_recv_ts_is_text_datetime(self):
+        """recv_ts must be stored as a human-readable UTC TEXT, not an integer."""
         tmp = tempfile.mkdtemp()
         bp = _make_store(tmp)
         try:
-            before = int(time.time())
             bp._msg_store_add("P", "Alice", "ts-test", 1_700_000_000)
-            after = int(time.time())
             with bp._msgdb_lock:
                 cur = bp._msgdb.execute("SELECT recv_ts FROM messages ORDER BY id DESC LIMIT 1")
                 row = cur.fetchone()
             self.assertIsNotNone(row)
-            self.assertGreaterEqual(row[0], before)
-            self.assertLessEqual(row[0], after)
+            recv_ts = row[0]
+            # Must be a string, not an int.
+            self.assertIsInstance(recv_ts, str, f"recv_ts should be TEXT, got {type(recv_ts)}: {recv_ts!r}")
+            # Must match YYYY-MM-DD HH:MM:SS pattern.
+            self.assertRegex(recv_ts, r'^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$',
+                             f"recv_ts has unexpected format: {recv_ts!r}")
+        finally:
+            _close_store(bp)
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_epoch_is_text_datetime(self):
+        """epoch must be stored as a human-readable UTC TEXT, not an integer."""
+        tmp = tempfile.mkdtemp()
+        bp = _make_store(tmp)
+        try:
+            bp._msg_store_add("P", "Alice", "epoch-test", 1_700_000_000)
+            with bp._msgdb_lock:
+                cur = bp._msgdb.execute("SELECT epoch FROM messages ORDER BY id DESC LIMIT 1")
+                row = cur.fetchone()
+            self.assertIsNotNone(row)
+            epoch_val = row[0]
+            # Must be a string.
+            self.assertIsInstance(epoch_val, str, f"epoch should be TEXT, got {type(epoch_val)}: {epoch_val!r}")
+            # Must match YYYY-MM-DD HH:MM:SS pattern.
+            self.assertRegex(epoch_val, r'^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$',
+                             f"epoch has unexpected format: {epoch_val!r}")
+            # 1_700_000_000 → 2023-11-14 22:13:20 UTC
+            self.assertEqual(epoch_val, "2023-11-14 22:13:20")
+        finally:
+            _close_store(bp)
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_epoch_round_trip_to_int(self):
+        """_msg_store_query must return epoch as the original int seconds (round-trip)."""
+        tmp = tempfile.mkdtemp()
+        bp = _make_store(tmp)
+        try:
+            original_epoch = 1_700_000_000
+            bp._msg_store_add("P", "Alice", "rt-test", original_epoch)
+            page = bp._msg_store_query("all")
+            self.assertEqual(len(page["rows"]), 1)
+            returned_epoch = page["rows"][0]["epoch"]
+            self.assertIsInstance(returned_epoch, int,
+                                  f"inbox_page epoch must be int, got {type(returned_epoch)}")
+            self.assertEqual(returned_epoch, original_epoch,
+                             f"epoch round-trip failed: {returned_epoch} != {original_epoch}")
         finally:
             _close_store(bp)
             shutil.rmtree(tmp, ignore_errors=True)
@@ -551,14 +595,15 @@ class TestInboxQueryWS(unittest.TestCase):
         self.assertIn("error", pages[0])
         self.assertEqual(pages[0]["rows"], [])
 
-    def test_inbox_query_limit_clamped_low(self):
-        """limit=0 is clamped to 1; only 1 row returned."""
+    def test_inbox_query_limit_zero_means_all(self):
+        """limit<=0 means 'all': every matching row returned, has_more False."""
         _send_ws({"t": "inbox_query", "scope": "all", "limit": 0, "id": 1})
         page = self._inbox_pages()[-1]
-        self.assertEqual(len(page["rows"]), 1)
+        self.assertEqual(len(page["rows"]), 3)
+        self.assertFalse(page["has_more"])
 
     def test_inbox_query_limit_clamped_high(self):
-        """limit=9999 is clamped to 200; all 3 rows returned (< 200)."""
+        """limit=9999 is clamped to 250; all 3 rows returned (< 250)."""
         _send_ws({"t": "inbox_query", "scope": "all", "limit": 9999, "id": 2})
         page = self._inbox_pages()[-1]
         self.assertEqual(len(page["rows"]), 3)
@@ -691,10 +736,11 @@ class TestMsgStorePreferences(unittest.TestCase):
             row = cur.fetchone()
         self.assertIsNotNone(row, "preferences table not found in fresh DB")
 
-    def test_fresh_db_version_is_1(self):
-        """A fresh DB must have db_version = '1' after open."""
+    def test_fresh_db_version_is_current(self):
+        """A fresh DB must have db_version equal to MSG_DB_SCHEMA_VERSION after open."""
+        import plugin
         ver = self.bp._pref_get("db_version")
-        self.assertEqual(ver, "1")
+        self.assertEqual(ver, str(plugin.BasePlugin.MSG_DB_SCHEMA_VERSION))
 
     def test_schema_version_constant_is_1(self):
         import plugin
@@ -757,8 +803,9 @@ class TestMsgStorePreferences(unittest.TestCase):
             row = cur.fetchone()
         self.assertIsNotNone(row, "preferences table not recreated after back-compat open")
 
-        # db_version must be '1'.
-        self.assertEqual(self.bp._pref_get("db_version"), "1")
+        # db_version must be at the current schema version.
+        import plugin
+        self.assertEqual(self.bp._pref_get("db_version"), str(plugin.BasePlugin.MSG_DB_SCHEMA_VERSION))
 
         # Existing messages row must still be present.
         with self.bp._msgdb_lock:
@@ -780,7 +827,8 @@ class TestMsgStorePreferences(unittest.TestCase):
         except Exception as exc:
             self.fail(f"_msg_store_migrate raised on second call: {exc}")
 
-        self.assertEqual(self.bp._pref_get("db_version"), "1")
+        import plugin
+        self.assertEqual(self.bp._pref_get("db_version"), str(plugin.BasePlugin.MSG_DB_SCHEMA_VERSION))
 
         # Message row must be intact.
         with self.bp._msgdb_lock:
@@ -817,6 +865,303 @@ class TestMsgStorePreferences(unittest.TestCase):
             bp._pref_set("k", "v")
         except Exception as exc:
             self.fail(f"_pref_set raised with no db: {exc}")
+
+
+# ── 11. Schema — peer_key column, indexes, db_version, datetime columns ──────
+
+class TestMsgStoreSchemaBaseline(unittest.TestCase):
+    """Verify fresh-DB peer_key column, indexes, db_version='1', and epoch/recv_ts as TEXT."""
+
+    def test_fresh_db_has_peer_key_column(self):
+        """A fresh DB must have a peer_key column in the messages table."""
+        tmp = tempfile.mkdtemp()
+        bp = _make_store(tmp)
+        try:
+            with bp._msgdb_lock:
+                cur = bp._msgdb.execute("PRAGMA table_info(messages)")
+                cols = {row[1] for row in cur.fetchall()}
+            self.assertIn("peer_key", cols, "peer_key column missing from fresh DB")
+        finally:
+            _close_store(bp)
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_fresh_db_version_is_1(self):
+        tmp = tempfile.mkdtemp()
+        bp = _make_store(tmp)
+        try:
+            import plugin
+            self.assertEqual(plugin.BasePlugin.MSG_DB_SCHEMA_VERSION, 1)
+            self.assertEqual(bp._pref_get("db_version"), "1")
+        finally:
+            _close_store(bp)
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_fresh_db_peer_key_index_exists(self):
+        """The idx_messages_peerkey index must exist on a fresh DB."""
+        tmp = tempfile.mkdtemp()
+        bp = _make_store(tmp)
+        try:
+            with bp._msgdb_lock:
+                cur = bp._msgdb.execute(
+                    "SELECT name FROM sqlite_master WHERE type='index' AND name='idx_messages_peerkey'"
+                )
+                row = cur.fetchone()
+            self.assertIsNotNone(row, "idx_messages_peerkey index not found in fresh DB")
+        finally:
+            _close_store(bp)
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_fresh_db_epoch_column_is_text(self):
+        """epoch column must have TEXT affinity in the schema (not INTEGER)."""
+        tmp = tempfile.mkdtemp()
+        bp = _make_store(tmp)
+        try:
+            with bp._msgdb_lock:
+                cur = bp._msgdb.execute("PRAGMA table_info(messages)")
+                col_types = {row[1]: row[2] for row in cur.fetchall()}
+            self.assertIn("epoch", col_types)
+            self.assertEqual(col_types["epoch"].upper(), "TEXT",
+                             f"epoch column type should be TEXT, got {col_types['epoch']!r}")
+        finally:
+            _close_store(bp)
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_fresh_db_recv_ts_column_is_text(self):
+        """recv_ts column must have TEXT affinity in the schema (not INTEGER)."""
+        tmp = tempfile.mkdtemp()
+        bp = _make_store(tmp)
+        try:
+            with bp._msgdb_lock:
+                cur = bp._msgdb.execute("PRAGMA table_info(messages)")
+                col_types = {row[1]: row[2] for row in cur.fetchall()}
+            self.assertIn("recv_ts", col_types)
+            self.assertEqual(col_types["recv_ts"].upper(), "TEXT",
+                             f"recv_ts column type should be TEXT, got {col_types['recv_ts']!r}")
+        finally:
+            _close_store(bp)
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_migration_idempotent_on_fresh_db(self):
+        """Opening an already-v1 DB a second time must not raise and keeps version='1'."""
+        tmp = tempfile.mkdtemp()
+        db_path = os.path.join(tmp, "v1.db")
+        import plugin
+        bp = plugin.BasePlugin()
+        bp._msg_store_open(db_path)
+        _close_store(bp)
+        bp2 = plugin.BasePlugin()
+        bp2._msg_store_open(db_path)
+        try:
+            self.assertEqual(bp2._pref_get("db_version"), "1")
+            with bp2._msgdb_lock:
+                cur = bp2._msgdb.execute("PRAGMA table_info(messages)")
+                cols = {row[1] for row in cur.fetchall()}
+            self.assertIn("peer_key", cols)
+        finally:
+            _close_store(bp2)
+            shutil.rmtree(tmp, ignore_errors=True)
+
+
+# ── 12. _norm_peer_key ────────────────────────────────────────────────────────
+
+class TestNormPeerKey(unittest.TestCase):
+    """Unit tests for BasePlugin._norm_peer_key."""
+
+    def _norm(self, val):
+        import plugin
+        return plugin.BasePlugin._norm_peer_key(val)
+
+    def test_none_returns_none(self):
+        self.assertIsNone(self._norm(None))
+
+    def test_empty_string_returns_none(self):
+        self.assertIsNone(self._norm(""))
+
+    def test_non_hex_garbage_returns_none(self):
+        self.assertIsNone(self._norm("ZZZZ!@#$"))
+
+    def test_whitespace_only_returns_none(self):
+        self.assertIsNone(self._norm("   "))
+
+    def test_lowercases(self):
+        result = self._norm("ABCDEF123456")
+        self.assertEqual(result, "abcdef123456")
+
+    def test_strips_non_hex_chars(self):
+        result = self._norm("ab:cd:ef:01:23:45")
+        self.assertEqual(result, "abcdef012345")
+
+    def test_truncates_to_12(self):
+        result = self._norm("aabbccddeeff0011")
+        self.assertEqual(result, "aabbccddeeff")
+
+    def test_exactly_12_chars_unchanged(self):
+        result = self._norm("aabbccddeeff")
+        self.assertEqual(result, "aabbccddeeff")
+
+    def test_shorter_than_12_returned_as_is(self):
+        result = self._norm("abc123")
+        self.assertEqual(result, "abc123")
+
+    def test_mixed_case_stripped_truncated(self):
+        result = self._norm("AB-CD-EF-01-23-45-67-89")
+        self.assertEqual(result, "abcdef012345")
+
+
+# ── 13. peer_key persisted and returned by query ──────────────────────────────
+
+class TestMsgStorePeerKeyPersistence(unittest.TestCase):
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.bp = _make_store(self.tmp)
+
+    def tearDown(self):
+        _close_store(self.bp)
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_peer_key_stored_and_returned(self):
+        rid = self.bp._msg_store_add(
+            "P", "Alice", "hello", 1_700_000_000,
+            peer_key="aabbccddeeff"
+        )
+        page = self.bp._msg_store_query("all")
+        self.assertEqual(len(page["rows"]), 1)
+        row = page["rows"][0]
+        self.assertIn("peer_key", row)
+        self.assertEqual(row["peer_key"], "aabbccddeeff")
+
+    def test_peer_key_none_when_not_supplied(self):
+        self.bp._msg_store_add("General", "Alice", "no key", 1_700_000_000)
+        page = self.bp._msg_store_query("all")
+        row = page["rows"][0]
+        self.assertIn("peer_key", row)
+        self.assertIsNone(row["peer_key"])
+
+    def test_peer_key_normalised_on_store(self):
+        """Uppercase peer_key supplied to _msg_store_add is normalised to lowercase."""
+        self.bp._msg_store_add(
+            "P", "Bob", "hi", 1_700_000_000,
+            peer_key="AABBCCDDEEFF"
+        )
+        page = self.bp._msg_store_query("all")
+        self.assertEqual(page["rows"][0]["peer_key"], "aabbccddeeff")
+
+    def test_all_rows_have_peer_key_key(self):
+        """Every row returned by _msg_store_query must contain the 'peer_key' key."""
+        self.bp._msg_store_add("P", "Alice", "dm", 1_700_000_000, peer_key="aabbccddeeff")
+        self.bp._msg_store_add("General", "Bob", "ch", 1_700_000_001)
+        page = self.bp._msg_store_query("all", limit=200)
+        for row in page["rows"]:
+            self.assertIn("peer_key", row, f"row missing peer_key: {row}")
+
+
+# ── 14. @k: scope (key-based DM thread) ──────────────────────────────────────
+
+class TestMsgStoreKeyBasedDMScope(unittest.TestCase):
+    """Tests for the @k:<key> scope filter in _msg_store_query."""
+
+    KEY_A = "aabbccddeeff"
+    KEY_B = "112233445566"
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.bp = _make_store(self.tmp)
+        # Incoming from peer A.
+        self.bp._msg_store_add("P", "Alice",    "hi from alice",    1_700_000_000, peer_key=self.KEY_A)
+        # Outgoing to peer A.
+        self.bp._msg_store_add("P", "> Alice",  "reply to alice",   1_700_000_001, peer_key=self.KEY_A, direction="out")
+        # Incoming from peer B.
+        self.bp._msg_store_add("P", "Bob",      "hi from bob",      1_700_000_010, peer_key=self.KEY_B)
+        # Channel message — peer_key=None.
+        self.bp._msg_store_add("General", "Alice", "channel msg",   1_700_000_020)
+
+    def tearDown(self):
+        _close_store(self.bp)
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_key_scope_returns_only_matching_peer(self):
+        page = self.bp._msg_store_query(f"@k:{self.KEY_A}", limit=50)
+        self.assertEqual(len(page["rows"]), 2,
+                         f"Expected 2 rows for KEY_A, got: {[r['sender'] for r in page['rows']]}")
+        for row in page["rows"]:
+            self.assertEqual(row["chan"], "P")
+            self.assertEqual(row["peer_key"], self.KEY_A)
+
+    def test_key_scope_excludes_other_peer(self):
+        page = self.bp._msg_store_query(f"@k:{self.KEY_A}", limit=50)
+        senders = {r["sender"] for r in page["rows"]}
+        self.assertNotIn("Bob", senders)
+
+    def test_key_scope_excludes_channel_rows(self):
+        page = self.bp._msg_store_query(f"@k:{self.KEY_A}", limit=50)
+        for row in page["rows"]:
+            self.assertNotEqual(row["chan"], "General")
+
+    def test_key_scope_both_directions(self):
+        """Both incoming (in) and outgoing (out) rows with KEY_A are returned."""
+        page = self.bp._msg_store_query(f"@k:{self.KEY_A}", limit=50)
+        dirs = {r["dir"] for r in page["rows"]}
+        self.assertIn("in", dirs)
+        self.assertIn("out", dirs)
+
+    def test_key_scope_unknown_key_returns_empty(self):
+        page = self.bp._msg_store_query("@k:000000000000", limit=50)
+        self.assertEqual(page["rows"], [])
+        self.assertFalse(page["has_more"])
+        self.assertNotIn("error", page)
+
+    def test_key_scope_search_within_thread(self):
+        page = self.bp._msg_store_query(f"@k:{self.KEY_A}", search="reply", limit=50)
+        self.assertEqual(len(page["rows"]), 1)
+        self.assertIn("reply", page["rows"][0]["body"])
+
+    def test_key_scope_search_no_match(self):
+        page = self.bp._msg_store_query(f"@k:{self.KEY_A}", search="xyzzy_never", limit=50)
+        self.assertEqual(page["rows"], [])
+
+    def test_key_scope_pagination(self):
+        """before/oldest_id pagination must work within the @k: scope."""
+        page1 = self.bp._msg_store_query(f"@k:{self.KEY_A}", limit=1)
+        self.assertEqual(len(page1["rows"]), 1)
+        self.assertTrue(page1["has_more"])
+
+        page2 = self.bp._msg_store_query(f"@k:{self.KEY_A}", limit=1, before=page1["oldest_id"])
+        self.assertEqual(len(page2["rows"]), 1)
+        self.assertFalse(page2["has_more"])
+
+        ids1 = {r["id"] for r in page1["rows"]}
+        ids2 = {r["id"] for r in page2["rows"]}
+        self.assertTrue(ids1.isdisjoint(ids2))
+        self.assertEqual(len(ids1 | ids2), 2)
+
+    def test_key_scope_oldest_id_is_last_row(self):
+        page = self.bp._msg_store_query(f"@k:{self.KEY_A}", limit=50)
+        self.assertEqual(page["oldest_id"], page["rows"][-1]["id"])
+
+    def test_key_scope_normalises_uppercase_input(self):
+        """Supplying an uppercase key to @k: must match the stored lowercase key."""
+        page = self.bp._msg_store_query(f"@k:{self.KEY_A.upper()}", limit=50)
+        self.assertEqual(len(page["rows"]), 2)
+
+    def test_scope_all_still_returns_all(self):
+        page = self.bp._msg_store_query("all", limit=200)
+        self.assertEqual(len(page["rows"]), 4)
+
+    def test_scope_P_still_returns_all_private(self):
+        page = self.bp._msg_store_query("P", limit=200)
+        # 2 KEY_A + 1 KEY_B = 3 private rows
+        self.assertEqual(len(page["rows"]), 3)
+        for row in page["rows"]:
+            self.assertEqual(row["chan"], "P")
+
+    def test_name_scope_at_still_works(self):
+        """Existing @<name> scope must still function as back-compat fallback."""
+        page = self.bp._msg_store_query("@Alice", limit=50)
+        # Incoming "Alice" and outgoing "> Alice" are both in Bob's thread by name
+        self.assertEqual(len(page["rows"]), 2)
+        for row in page["rows"]:
+            self.assertEqual(row["chan"], "P")
 
 
 if __name__ == "__main__":

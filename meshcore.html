@@ -41,7 +41,7 @@
         #contacts-grid,
         #contacts-list {
             max-height: 50vh;
-            min-height: 180px;
+            min-height: 160px;
             overflow-y: auto;
             overflow-x: hidden;
         }
@@ -57,8 +57,6 @@
         }
         #contacts-grid::-webkit-scrollbar-thumb:hover,
         #contacts-list::-webkit-scrollbar-thumb:hover { background: var(--muted); }
-        /* Keep the inbox compact so the whole page fits in a typical viewport. */
-        #inbox-history { max-height: 180px; }
 
         header {
             display: flex;
@@ -870,13 +868,21 @@
         #status-msg { text-align: center; color: var(--muted); margin-top: 40px; font-size: 0.9rem; }
 
         /* ── Inbox history ─────────────────────────────────────── */
-        #inbox-history-section { margin-top: 16px; }
+        /* Normal page flow: the message inbox sits below the contacts. The
+           page scrolls naturally so the Domoticz host footer stays at the
+           very bottom. The list itself is internally scrollable and the
+           drag bar resizes its height. */
+        #inbox-history-section {
+            margin-top: 16px;
+            border-top: 1px solid var(--border);
+            padding-top: 10px;
+        }
 
         .inbox-section-header {
             display: flex;
             align-items: center;
             justify-content: space-between;
-            margin-bottom: 12px;
+            margin-bottom: 6px;
         }
         .inbox-section-header h2 {
             font-size: 0.9rem;
@@ -928,9 +934,39 @@
             border: 1px solid var(--border);
             border-radius: var(--radius);
             padding: 0;
-            max-height: 400px;
+            /* Short by default so the page has no browser scrollbar out of the
+               box; drag the bar above to enlarge (the saved height overrides
+               this via an inline style + max-height:none). */
+            max-height: 140px;
             overflow-y: auto;
         }
+        /* When the user has manually resized the inbox, an explicit height +
+           max-height:none (set inline by the resizer JS) overrides the
+           responsive clamp above so the chosen size is honoured exactly. */
+        #inbox-resizer {
+            height: 7px;
+            margin-bottom: 2px;
+            border-radius: 3px;
+            background: var(--border);
+            cursor: ns-resize;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            transition: background 0.15s;
+        }
+        /* Visible grip so it's obvious the bar is draggable. */
+        #inbox-resizer::before {
+            content: "";
+            width: 40px;
+            height: 3px;
+            border-radius: 2px;
+            background: var(--muted);
+        }
+        #inbox-resizer:hover,
+        body.inbox-resizing #inbox-resizer { background: var(--accent); }
+        #inbox-resizer:hover::before,
+        body.inbox-resizing #inbox-resizer::before { background: #fff; }
+        body.inbox-resizing { user-select: none; cursor: ns-resize; }
         .inbox-msg {
             display: flex;
             align-items: center;
@@ -1062,6 +1098,19 @@
         }
         #inbox-search:focus { border-color: var(--accent); }
 
+        #inbox-page-size {
+            font-size: 0.75rem;
+            padding: 3px 8px;
+            border-radius: 20px;
+            border: 1px solid var(--border);
+            background: var(--surface);
+            color: var(--text);
+            outline: none;
+            cursor: pointer;
+            align-self: flex-start;
+        }
+        #inbox-page-size:focus { border-color: var(--accent); }
+
         #inbox-empty {
             padding: 20px 16px;
             color: var(--muted);
@@ -1158,6 +1207,9 @@
 
         /* ── Generic side-panel view styles (reused across firehose/traffic/heatmap/channels) ── */
         .panel-view {
+            position: absolute;
+            inset: 0;
+            box-sizing: border-box;
             padding: 12px 14px;
             display: flex;
             flex-direction: column;
@@ -1216,7 +1268,8 @@
         }
         .firehose-controls button:hover { color: var(--accent); border-color: var(--accent); background: var(--bg); }
         #firehose-list {
-            max-height: calc(100vh - 220px);
+            flex: 1 1 auto;
+            min-height: 0;
             overflow-y: auto;
         }
 
@@ -1738,7 +1791,7 @@
 
     <div id="main-layout">
         <section id="self-section" style="display:none">
-            <h2 class="section-title">Connected Node</h2>
+            <h2 class="section-title">Observer</h2>
             <div id="self-grid"></div>
         </section>
 
@@ -1786,6 +1839,13 @@
                 </div>
             </div>
             <input id="inbox-search" type="search" placeholder="Search sender / text…" oninput="_onInboxSearch(this.value)">
+            <select id="inbox-page-size" title="Messages per page" onchange="_onInboxPageSize(this.value)">
+                <option value="25">25</option>
+                <option value="50">50</option>
+                <option value="100">100</option>
+                <option value="250">250</option>
+                <option value="all">All</option>
+            </select>
         </div>
         <!-- compose bar -->
         <div id="compose-bar" style="position:relative">
@@ -1804,6 +1864,7 @@
                 <span id="compose-status"></span>
             </div>
         </div>
+        <div id="inbox-resizer" title="Drag to resize the inbox height"></div>
         <div id="inbox-history">
             <div id="inbox-empty">No messages yet.</div>
         </div>
@@ -3013,12 +3074,31 @@
         //         recv {t:'inbox_page',  id, scope, search, rows, has_more, oldest_id}
         // rows: [{id, chan, sender, epoch, bad, body, hops, snr, rssi, path, ack, dir}]
 
-        const INBOX_PAGE_LIMIT = 50;
+        // Page size is user-selectable (25/50/100/250/All) and persisted.
+        // Stored raw value: "25".."250" or "all". Wire limit: the number, or
+        // 0 for "all" (the plugin treats limit<=0 as "no row limit").
+        const LS_INBOX_PAGE_SIZE = "meshcore.inboxPageSize";
+        let _inboxPageSizeRaw = (() => {
+            try {
+                const v = localStorage.getItem(LS_INBOX_PAGE_SIZE);
+                return ["25", "50", "100", "250", "all"].includes(v) ? v : "50";
+            } catch (_) { return "50"; }
+        })();
+        function _inboxPageLimit() {
+            return _inboxPageSizeRaw === "all" ? 0 : parseInt(_inboxPageSizeRaw, 10) || 50;
+        }
+        function _onInboxPageSize(val) {
+            _inboxPageSizeRaw = ["25", "50", "100", "250", "all"].includes(val) ? val : "50";
+            try { localStorage.setItem(LS_INBOX_PAGE_SIZE, _inboxPageSizeRaw); } catch (_) {}
+            // Re-fetch the newest page at the new size (conversation or main).
+            if (_convNode) _convQueryNewest();
+            else           _mainQueryNewest();
+        }
 
         function _sendInboxQuery(scope, before, search) {
             if (!_pluginWS) return 0;
             const id = ++_inboxReqId;
-            const msg = { t: 'inbox_query', id, scope: scope || "", limit: INBOX_PAGE_LIMIT };
+            const msg = { t: 'inbox_query', id, scope: scope || "", limit: _inboxPageLimit() };
             if (before != null) msg.before = before;
             if (search)         msg.search = search;
             _pluginWS.sendPluginCommand(msg);
@@ -3102,6 +3182,33 @@
             }
         }
 
+        // Resolve a DM conversation scope for a contact NAME. Prefer the
+        // peer's public key (stable identity — names/callsigns can change or
+        // collide): "@k:<12-hex pubkey prefix>". Fall back to the name-based
+        // "@<name>" scope when no pubkey is known yet (the plugin still
+        // matches that). The conversation is always *displayed* by name.
+        function _normPk(pk) {
+            const h = String(pk || "").toLowerCase().replace(/[^0-9a-f]/g, "").slice(0, 12);
+            return h.length ? h : null;
+        }
+        function _dmScopeFor(name) {
+            if (!name) return "@";
+            const nodes = (_deviceMap && _deviceMap.nodes) || {};
+            let pk = nodes[name] && nodes[name].pubkey;
+            if (!pk && _deviceMap && _deviceMap.self === name) {
+                const si = _deviceMap.self_info;
+                pk = si && si.public_key;
+            }
+            if (!pk) {
+                const hn = (_heard && _heard.nodes) || {};
+                for (const k in hn) {
+                    if (hn[k] && hn[k].name === name && hn[k].pubkey) { pk = hn[k].pubkey; break; }
+                }
+            }
+            const norm = _normPk(pk);
+            return norm ? ("@k:" + norm) : ("@" + name);
+        }
+
         // Request the newest page for the current conversation (resets paging).
         function _convQueryNewest() {
             if (!_convNode) return;
@@ -3113,7 +3220,7 @@
             const search = (() => {
                 try { return (document.getElementById("inbox-search") || {}).value || ""; } catch (_) { return ""; }
             })();
-            _inboxReqId = _sendInboxQuery("@" + _convNode, null, search.trim() || null);
+            _inboxReqId = _sendInboxQuery(_dmScopeFor(_convNode), null, search.trim() || null);
         }
 
         // Transient "loading older messages…" hint appended below the rows
@@ -3138,7 +3245,7 @@
             const search = (() => {
                 try { return (document.getElementById("inbox-search") || {}).value || ""; } catch (_) { return ""; }
             })();
-            _inboxReqId = _sendInboxQuery("@" + _convNode, _inboxOldestId, search.trim() || null);
+            _inboxReqId = _sendInboxQuery(_dmScopeFor(_convNode), _inboxOldestId, search.trim() || null);
         }
 
         // ── Main-inbox query drivers (mirror of _convQueryNewest / _convLoadOlderPage) ──
@@ -6043,6 +6150,96 @@ Larger = more reliable routing but smaller mesh diameter.">Path hash size</label
                 _initContactClickToCompose();
                 const _ce = document.getElementById("conv-banner-exit");
                 if (_ce) _ce.onclick = _exitConversation;
+
+                // Reflect the persisted page-size choice in the selector.
+                const _ps = document.getElementById("inbox-page-size");
+                if (_ps) _ps.value = _inboxPageSizeRaw;
+
+                // ── Resizable inbox / contacts split ──
+                // The drag bar above the inbox moves the boundary between the
+                // contacts area and the message inbox: dragging UP grows the
+                // inbox and shrinks the contacts list by the SAME amount, so
+                // their combined height is constant and the inbox's bottom
+                // edge stays put (above the footer) — only its top moves.
+                // Both heights are persisted in localStorage.
+                (() => {
+                    const box  = document.getElementById("inbox-history");
+                    const grip = document.getElementById("inbox-resizer");
+                    const cg   = document.getElementById("contacts-grid");
+                    const cl   = document.getElementById("contacts-list");
+                    if (!box || !grip) return;
+                    const LS_H  = "meshcore.inboxHeight";
+                    const LS_C  = "meshcore.contactsHeight";
+                    const _minInbox = 120;
+                    // The contacts area floor is roughly the "Connected Node"
+                    // card height, minus a 40px slack so the boundary can use
+                    // the empty space just below that card instead of stopping
+                    // short of it.
+                    const _selfSec = document.getElementById("self-section");
+                    const _minContacts = () =>
+                        Math.max(120, ((_selfSec && _selfSec.offsetHeight) || 160) - 50);
+
+                    // The contacts container currently on screen (grid or list).
+                    const _activeC = () => {
+                        if (cg && cg.offsetParent !== null) return cg;
+                        if (cl && cl.offsetParent !== null) return cl;
+                        return cg || cl;
+                    };
+                    const _setInbox = (h) => {
+                        box.style.height = Math.max(_minInbox, Math.round(h)) + "px";
+                        box.style.maxHeight = "none";
+                    };
+                    // Apply a contacts height to BOTH containers so toggling the
+                    // card/list view keeps the chosen split.
+                    const _setContacts = (h) => {
+                        const v = Math.max(_minContacts(), Math.round(h)) + "px";
+                        [cg, cl].forEach(el => {
+                            if (!el) return;
+                            el.style.height = v;
+                            el.style.maxHeight = "none";
+                        });
+                    };
+
+                    const savedH = parseInt(localStorage.getItem(LS_H) || "0", 10);
+                    const savedC = parseInt(localStorage.getItem(LS_C) || "0", 10);
+                    if (savedH >= _minInbox)       _setInbox(savedH);
+                    if (savedC >= _minContacts())  _setContacts(savedC);
+
+                    let dragging = false, startY = 0, startInbox = 0, startContacts = 0;
+                    grip.addEventListener("mousedown", (e) => {
+                        const cEl = _activeC();
+                        if (!cEl) return;
+                        dragging = true;
+                        startY = e.clientY;
+                        startInbox    = box.getBoundingClientRect().height;
+                        startContacts = cEl.getBoundingClientRect().height;
+                        document.body.classList.add("inbox-resizing");
+                        e.preventDefault();
+                    });
+                    document.addEventListener("mousemove", (e) => {
+                        if (!dragging) return;
+                        // Dragging UP (clientY decreases) grows the inbox.
+                        const d = startY - e.clientY;
+                        // Keep the sum constant: clamp so neither side goes
+                        // below its minimum. Within range the inbox bottom
+                        // stays fixed and only the boundary (its top) moves.
+                        const maxInbox = startInbox + (startContacts - _minContacts());
+                        const newInbox = Math.max(_minInbox, Math.min(maxInbox, startInbox + d));
+                        const delta    = newInbox - startInbox;
+                        _setInbox(newInbox);
+                        _setContacts(startContacts - delta);
+                    });
+                    document.addEventListener("mouseup", () => {
+                        if (!dragging) return;
+                        dragging = false;
+                        document.body.classList.remove("inbox-resizing");
+                        try {
+                            localStorage.setItem(LS_H, parseInt(box.style.height, 10) || _minInbox);
+                            const cEl = _activeC();
+                            if (cEl) localStorage.setItem(LS_C, parseInt(cEl.style.height, 10) || _minContacts());
+                        } catch (_) {}
+                    });
+                })();
 
                 // Infinite-scroll: load older pages when the user scrolls to
                 // the bottom of the inbox history container.

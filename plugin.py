@@ -42,6 +42,7 @@
 
 import DomoticzEx as Domoticz
 import asyncio
+import calendar
 import collections
 import copy
 import gc
@@ -412,7 +413,7 @@ class BasePlugin:
                     id        INTEGER PRIMARY KEY AUTOINCREMENT,
                     chan      TEXT    NOT NULL,
                     sender    TEXT    NOT NULL,
-                    epoch     INTEGER NOT NULL,
+                    epoch     TEXT    NOT NULL,
                     bad       INTEGER NOT NULL DEFAULT 0,
                     body      TEXT    NOT NULL,
                     hops      INTEGER,
@@ -421,7 +422,8 @@ class BasePlugin:
                     path      TEXT,
                     ack       INTEGER,
                     direction TEXT    NOT NULL DEFAULT 'in',
-                    recv_ts   INTEGER NOT NULL
+                    recv_ts   TEXT    NOT NULL,
+                    peer_key  TEXT
                 )
             """)
             con.execute("CREATE INDEX IF NOT EXISTS idx_messages_chan_id ON messages(chan, id)")
@@ -435,6 +437,13 @@ class BasePlugin:
             self._msgdb = con
             self._msgdb_insert_count = 0
             self._msg_store_migrate()
+            # Create indexes after migration so they are always present regardless
+            # of which path (fresh DB vs. future migration) created the table.
+            con.execute(
+                "CREATE INDEX IF NOT EXISTS idx_messages_peerkey"
+                " ON messages(peer_key, id)"
+            )
+            con.commit()
             Domoticz.Debug("Message store opened: " + db_path)
         except Exception as exc:
             Domoticz.Error(f"Message store open failed (non-fatal): {exc!r}")
@@ -475,10 +484,8 @@ class BasePlugin:
 
         Migration ladder — add one ``elif ver == N:`` block per future version:
 
-            ver == 1  — baseline; preferences table already created by _msg_store_open,
-                        nothing to ALTER.
-            ver == 2  — (future) example: ALTER TABLE messages ADD COLUMN foo TEXT
-            ...
+            ver == 1  — baseline; all columns (including peer_key) already in the
+                        CREATE TABLE statement in _msg_store_open; nothing to ALTER.
 
         The loop is always exercised: even for a fresh DB it runs once (0→1),
         confirming the ladder structure is live code, not a dead stub.
@@ -492,15 +499,12 @@ class BasePlugin:
                 ver += 1
                 if ver == 1:
                     pass  # baseline — tables already created in _msg_store_open
-                # elif ver == 2:
-                #     self._msgdb.execute("ALTER TABLE messages ADD COLUMN foo TEXT")
-                #     self._msgdb.commit()
 
             self._pref_set("db_version", str(self.MSG_DB_SCHEMA_VERSION))
 
             if from_ver < self.MSG_DB_SCHEMA_VERSION:
                 Domoticz.Debug(
-                    f"Message store migrated schema v{from_ver} → v{self.MSG_DB_SCHEMA_VERSION}"
+                    f"Message store migrated schema v{from_ver} -> v{self.MSG_DB_SCHEMA_VERSION}"
                 )
             else:
                 Domoticz.Debug(
@@ -509,10 +513,26 @@ class BasePlugin:
         except Exception as exc:
             Domoticz.Error(f"Message store migration failed (non-fatal): {exc!r}")
 
+    @staticmethod
+    def _norm_peer_key(pk) -> "str | None":
+        """Normalise a pubkey prefix to a stable 12-char lowercase hex string.
+
+        Rules:
+        - Strip any non-hex characters ([^0-9a-fA-F]).
+        - Lowercase.
+        - Truncate to the first 12 characters.
+        - Return None if the result is empty.
+        """
+        if not pk:
+            return None
+        cleaned = "".join(c for c in str(pk).lower() if c in "0123456789abcdef")
+        return cleaned[:12] or None
+
     def _msg_store_add(self, chan: str, sender: str, body: str, epoch: int,
                        bad: bool = False, snr=None, hops=None, rssi=None,
                        path: str = None, ack=None,
-                       direction: str = "in") -> "int | None":
+                       direction: str = "in",
+                       peer_key: str = None) -> "int | None":
         """Insert one message row and return its rowid (or None on error).
 
         Never raises — any sqlite error is caught, logged, and None is returned
@@ -520,19 +540,26 @@ class BasePlugin:
         """
         if self._msgdb is None:
             return None
-        recv_ts = int(time.time())
+        # Timestamps stored as UTC datetime TEXT ('%Y-%m-%d %H:%M:%S') so the DB
+        # is human-readable when opened directly.  Callers pass epoch as int seconds.
+        try:
+            epoch_text = time.strftime('%Y-%m-%d %H:%M:%S', time.gmtime(int(epoch)))
+        except (TypeError, ValueError, OSError):
+            epoch_text = time.strftime('%Y-%m-%d %H:%M:%S', time.gmtime())
+        recv_ts_text = time.strftime('%Y-%m-%d %H:%M:%S', time.gmtime())
         bad_int = 1 if bad else 0
+        norm_pk = self._norm_peer_key(peer_key)
         try:
             with self._msgdb_lock:
                 cur = self._msgdb.execute(
                     "INSERT INTO messages"
-                    " (chan, sender, epoch, bad, body, hops, snr, rssi, path, ack, direction, recv_ts)"
-                    " VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
-                    (chan, sender, int(epoch), bad_int, body,
+                    " (chan, sender, epoch, bad, body, hops, snr, rssi, path, ack, direction, recv_ts, peer_key)"
+                    " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    (chan, sender, epoch_text, bad_int, body,
                      int(hops) if isinstance(hops, int) else None,
                      float(snr) if snr is not None else None,
                      int(rssi) if rssi is not None else None,
-                     path or None, ack, direction, recv_ts),
+                     path or None, ack, direction, recv_ts_text, norm_pk),
                 )
                 rowid = cur.lastrowid
                 self._msgdb.commit()
@@ -572,14 +599,20 @@ class BasePlugin:
 
         *scope* is 'all' (no channel filter) or a specific chan value.
         *before* is an exclusive upper bound on id (for pagination); None = newest.
-        *limit* is clamped to 1..200.
+        *limit* is clamped to 1..250; a value <= 0 means "all" (no row limit —
+            returns every match for the scope/search, has_more always False).
         *search* is a case-insensitive substring matched against body and sender;
             '%' and '_' in the term are treated literally (escaped).
         """
-        limit = max(1, min(200, int(limit) if limit is not None else 50))
+        try:
+            _lim_in = int(limit) if limit is not None else 50
+        except (TypeError, ValueError):
+            _lim_in = 50
+        all_mode = _lim_in <= 0
+        limit = 0 if all_mode else max(1, min(250, _lim_in))
         search_str = str(search).strip() if search else ""
         if search and not search_str:
-            Domoticz.Debug("inbox_query: search term was whitespace-only — ignoring it")
+            Domoticz.Debug("inbox_query: search term was whitespace-only - ignoring it")
         before_int = int(before) if before is not None else None
 
         rows = []
@@ -602,8 +635,15 @@ class BasePlugin:
             params: list = []
             clauses: list = []
 
-            if scope.startswith("@"):
-                # DM-thread scope: all private messages to/from this contact.
+            if scope.startswith("@k:"):
+                # Key-based DM-thread scope: stable identity via peer_key column.
+                # Normalise the supplied key the same way as stored values.
+                dm_key = self._norm_peer_key(scope[3:])
+                clauses.append("chan='P' AND peer_key=?")
+                params.append(dm_key)
+            elif scope.startswith("@"):
+                # Name-based DM-thread scope (back-compat fallback):
+                # all private messages to/from this contact by sender name.
                 # Outgoing DMs are stored with sender "> <name>" or legacy "▶<name>"
                 # / "▶ <name>"; incoming DMs with sender "<name>".
                 dm_name = scope[1:]
@@ -631,33 +671,50 @@ class BasePlugin:
                 params.append(before_int)
 
             where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
-            fetch_limit = limit + 1
-            params.append(fetch_limit)
-
-            sql = (
-                f"SELECT id,chan,sender,epoch,bad,body,hops,snr,rssi,path,ack,direction"
-                f" FROM messages {where} ORDER BY id DESC LIMIT ?"
-            )
+            if all_mode:
+                # "all": no LIMIT — return every match; nothing left to page.
+                sql = (
+                    f"SELECT id,chan,sender,epoch,bad,body,hops,snr,rssi,path,ack,direction,peer_key"
+                    f" FROM messages {where} ORDER BY id DESC"
+                )
+            else:
+                # Fetch one extra row to detect whether an older page exists.
+                params.append(limit + 1)
+                sql = (
+                    f"SELECT id,chan,sender,epoch,bad,body,hops,snr,rssi,path,ack,direction,peer_key"
+                    f" FROM messages {where} ORDER BY id DESC LIMIT ?"
+                )
             with self._msgdb_lock:
                 cur = self._msgdb.execute(sql, params)
                 fetched = cur.fetchall()
 
-            has_more = len(fetched) > limit
-            trimmed = fetched[:limit]
+            has_more = (not all_mode) and len(fetched) > limit
+            trimmed = fetched if all_mode else fetched[:limit]
             for row in trimmed:
+                # epoch is stored as UTC TEXT; convert back to int Unix-seconds for
+                # the wire contract (frontend's _fmtEpoch and topology logic expect int).
+                raw_epoch = row[3]
+                try:
+                    epoch_int = int(calendar.timegm(time.strptime(raw_epoch, '%Y-%m-%d %H:%M:%S')))
+                except (TypeError, ValueError):
+                    # Malformed stored timestamp (shouldn't happen — the write
+                    # path validates): fall back to "now" rather than 1970 so a
+                    # stray row doesn't sort/display as ancient.
+                    epoch_int = int(time.time())
                 rows.append({
-                    "id":     row[0],
-                    "chan":   row[1],
-                    "sender": row[2],
-                    "epoch":  row[3],
-                    "bad":    bool(row[4]),
-                    "body":   row[5],
-                    "hops":   row[6],
-                    "snr":    row[7],
-                    "rssi":   row[8],
-                    "path":   row[9],
-                    "ack":    row[10],
-                    "dir":    row[11],
+                    "id":       row[0],
+                    "chan":     row[1],
+                    "sender":   row[2],
+                    "epoch":    epoch_int,
+                    "bad":      bool(row[4]),
+                    "body":     row[5],
+                    "hops":     row[6],
+                    "snr":      row[7],
+                    "rssi":     row[8],
+                    "path":     row[9],
+                    "ack":      row[10],
+                    "dir":      row[11],
+                    "peer_key": row[12],
                 })
             oldest_id = rows[-1]["id"] if rows else None
 
@@ -839,6 +896,15 @@ class BasePlugin:
         else:
             Domoticz.Status(f"MeshCore plugin started - TCP {self.host}:{self.port}")
 
+        # Proactively broadcast a snapshot so a dashboard left open across a
+        # plugin-only restart (e.g. hardware disable/enable, or an auto-
+        # reconnect) refreshes itself. The Domoticz WebSocket stays open in
+        # that case, so the page never re-sends `hello` and would otherwise
+        # show stale state until a manual reload. Broadcasting to the
+        # plugin:<key> topic reaches any still-subscribed page; if none is
+        # open the frame is simply dropped.
+        self._broadcast_snapshot("startup")
+
         self._stop_event.clear()
         t = threading.Thread(target=self._worker_main, daemon=True, name="MeshCoreWorker")
         self._worker_thread = t
@@ -969,6 +1035,25 @@ class BasePlugin:
 
     # ── WebSocket channel (F1+) ───────────────────────────────────────────────
 
+    def _broadcast_snapshot(self, reason: str):
+        """Push an unsolicited snapshot (+ deferred heard) to the topic.
+
+        Mirrors the `hello` handler but without a cmd_result/correlation id —
+        the frontend's snapshot handler resets its delta baselines and
+        re-renders on any snapshot it receives, so an open dashboard recovers
+        automatically. Never raises into the caller.
+        """
+        try:
+            snap = self._build_snapshot_payload()
+            self._push("snapshot", snap)
+            try:
+                self._push("heard", {"heard": self._build_heard_payload()})
+            except Exception as _hexc:
+                Domoticz.Debug(f"_broadcast_snapshot({reason}): deferred heard push failed: {_hexc}")
+            Domoticz.Debug(f"_broadcast_snapshot({reason}): snapshot pushed")
+        except Exception as exc:
+            Domoticz.Debug(f"_broadcast_snapshot({reason}): snapshot build/push failed: {exc!r}")
+
     def _push(self, t: str, payload: dict):
         """Send a JSON frame to the dashboard via the plugin WebSocket channel.
 
@@ -1098,7 +1183,7 @@ class BasePlugin:
                 with self._rx_log_lock:
                     self._last_pushed_device_map = None
                 self._ws_devices_dirty = True
-                Domoticz.Debug("onWebSocketMessage: resync devices — baseline cleared")
+                Domoticz.Debug("onWebSocketMessage: resync devices - baseline cleared")
 
         elif t == "inbox_query":
             # Paginated inbox query.  Run the DB lookup, build the page, push back.
@@ -1342,7 +1427,7 @@ class BasePlugin:
         plugin_dir = os.path.dirname(os.path.abspath(__file__))
         template = os.path.join(plugin_dir, "meshcore.html")
         if not os.path.isfile(template):
-            Domoticz.Error("meshcore.html template not found — dashboard not installed.")
+            Domoticz.Error("meshcore.html template not found - dashboard not installed.")
             return
 
         domoticz_root = os.path.abspath(os.path.join(plugin_dir, "..", ".."))
@@ -1795,7 +1880,7 @@ class BasePlugin:
                 if restored:
                     with self._rx_log_lock:
                         self._chan_hash_to_name = restored
-                    Domoticz.Log(f"Restored {len(restored)} chan_hash→name mapping(s) from rx-log")
+                    Domoticz.Log(f"Restored {len(restored)} chan_hash->name mapping(s) from rx-log")
         except Exception as exc:
             Domoticz.Error(f"Could not load packet times from meshcore_rx_log.json: {exc}")
 
@@ -2354,6 +2439,15 @@ class BasePlugin:
                 self._self_name = name
             self._queue.put(("self_info", dict(mc.self_info)))
 
+        # Device info (fw / build / model) is a single fast query and is shown
+        # prominently on the dashboard, so fetch it FIRST — before the slower
+        # contacts list and the slot-by-slot channel-name scan — instead of
+        # making the user wait ~10 s for it.
+        try:
+            await self._refresh_device_info(mc)
+        except Exception as exc:
+            Domoticz.Debug(f"Initial device_info error: {exc}")
+
         try:
             await self._refresh_contacts(mc)
         except Exception as exc:
@@ -2370,11 +2464,6 @@ class BasePlugin:
             await self._refresh_flood_scope(mc)
         except Exception as exc:
             Domoticz.Debug(f"Initial flood scope error: {exc}")
-
-        try:
-            await self._refresh_device_info(mc)
-        except Exception as exc:
-            Domoticz.Debug(f"Initial device_info error: {exc}")
 
         # Missed-message catch-up is handled by start_auto_message_fetching()
         # above (immediate get_msg() + MESSAGES_WAITING drain loop); the
@@ -2755,7 +2844,7 @@ class BasePlugin:
             elif r.type == EventType.ERROR:
                 break
         if fetched:
-            Domoticz.Log(f"Fetched {fetched} pending message(s) from device — added to inbox.")
+            Domoticz.Log(f"Fetched {fetched} pending message(s) from device - added to inbox.")
         return fetched
 
     async def _poll_self_stats(self, mc):
@@ -2843,11 +2932,11 @@ class BasePlugin:
                         all_slots.setdefault(j, "")
                     break
             except asyncio.TimeoutError:
-                Domoticz.Debug(f"get_channel({idx}) timed out — assume empty")
+                Domoticz.Debug(f"get_channel({idx}) timed out - assume empty")
                 all_slots[idx] = ""
                 continue
             except Exception as exc:
-                Domoticz.Debug(f"get_channel({idx}) error: {exc} — assume empty")
+                Domoticz.Debug(f"get_channel({idx}) error: {exc} - assume empty")
                 all_slots[idx] = ""
                 continue
         # Ensure full coverage
@@ -4112,16 +4201,24 @@ class BasePlugin:
                         # Persist outgoing channel message to SQLite store.
                         self._msg_store_add(
                             chan=chan_tag, sender=f"> {me}", body=d['body'],
-                            epoch=out_ts, direction="out",
+                            epoch=out_ts, direction="out", peer_key=None,
                         )
                     else:
                         sent_line = self._inbox_line("P", f"> {tgt}", d['body'], out_ts)
                         self._set(MESH_DID, UNIT_INBOX, 0, sent_line)
                         self._log_contact_dm(tgt, sent_line)
                         # Persist outgoing DM to SQLite store; capture rowid for ACK back-fill.
+                        # Resolve the peer's pubkey for the stable conversation key.
+                        _tgt_did = self._device_id_for(tgt)
+                        _tgt_pk = (
+                            _tgt_did
+                            if (_tgt_did and _tgt_did not in ("self", None) and len(_tgt_did) == 12)
+                            else self._node_did.get(tgt, "")
+                        )
                         _out_rowid = self._msg_store_add(
                             chan="P", sender=f"> {tgt}", body=d['body'],
                             epoch=out_ts, direction="out",
+                            peer_key=self._norm_peer_key(_tgt_pk),
                         )
                         # Back-fill the inbox_line, dm_name, and msg_rowid into the
                         # pending_ack record so _on_ack / timeout sweep know exactly
@@ -4521,6 +4618,7 @@ class BasePlugin:
             epoch=msg_ts, bad=ts_bad, snr=_msg_snr,
             hops=_hops if isinstance(_hops, int) else None,
             rssi=_msg_rssi, path=_msg_path, ack=None, direction="in",
+            peer_key=self._norm_peer_key(prefix),
         )
 
         # Persist private (DM) messages to the sender's per-contact Messages
