@@ -75,9 +75,14 @@ class Device:
 
 class Unit:
     def __init__(self, *a, **k):
-        self.__dict__.update(k)
+        # Defaults first so kwargs (e.g. nValue=7) override them, AND so code
+        # that reads .ID/.Name on a not-fully-populated stub unit never
+        # AttributeErrors (production Unit always has these).
+        self.ID = 0
+        self.Name = ""
         self.nValue = 0
         self.sValue = ""
+        self.__dict__.update(k)
 
     def Create(self):  pass
     def Update(self, *a, **k):  pass

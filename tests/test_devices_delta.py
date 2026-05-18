@@ -519,5 +519,81 @@ class TestDevicesDeltaResync(unittest.TestCase):
                       "Resync with unknown feed must not modify devices baseline")
 
 
+class TestSetDirtyDetection(unittest.TestCase):
+    """Fix A — _set must mark _ws_devices_dirty only when the value actually changes."""
+
+    def setUp(self):
+        import plugin
+        _Domoticz_stub.reset_ws()
+        # Ensure a unit exists at MESH_DID / UNIT_INBOX to read/write.
+        _inject_devices(plugin)
+
+    def tearDown(self):
+        import plugin
+        _eject_devices(plugin)
+
+    def _ensure_unit(self, device_id, unit_id, n=0, s=""):
+        """Create or reset a stub unit in Devices so _dev() can find it."""
+        dev = _Domoticz_stub.Devices.get(device_id)
+        if dev is None:
+            dev = _Domoticz_stub.Device(Name=device_id)
+            _Domoticz_stub.Devices[device_id] = dev
+        u = _Domoticz_stub.Unit(Name="test", nValue=n, sValue=s)
+        dev.Units[unit_id] = u
+        return u
+
+    def test_set_changed_svalue_marks_dirty(self):
+        """_set with a new sValue must set _ws_devices_dirty = True."""
+        import plugin
+        u = self._ensure_unit("mesh", 1, n=0, s="old_value")
+        plugin._plugin._ws_devices_dirty = False
+        plugin._plugin._set("mesh", 1, sValue="new_value")
+        self.assertTrue(plugin._plugin._ws_devices_dirty,
+                        "_ws_devices_dirty must be True after a sValue change")
+
+    def test_set_changed_nvalue_marks_dirty(self):
+        """_set with a new nValue must set _ws_devices_dirty = True."""
+        import plugin
+        u = self._ensure_unit("mesh", 1, n=0, s="")
+        plugin._plugin._ws_devices_dirty = False
+        plugin._plugin._set("mesh", 1, nValue=42)
+        self.assertTrue(plugin._plugin._ws_devices_dirty,
+                        "_ws_devices_dirty must be True after an nValue change")
+
+    def test_set_same_svalue_does_not_mark_dirty(self):
+        """_set with an identical sValue must NOT set _ws_devices_dirty (no-op write)."""
+        import plugin
+        u = self._ensure_unit("mesh", 1, n=0, s="same_value")
+        plugin._plugin._ws_devices_dirty = False
+        plugin._plugin._set("mesh", 1, sValue="same_value")
+        self.assertFalse(plugin._plugin._ws_devices_dirty,
+                         "_ws_devices_dirty must remain False for a no-op sValue write")
+
+    def test_set_same_nvalue_does_not_mark_dirty(self):
+        """_set with an identical nValue must NOT set _ws_devices_dirty (no-op write)."""
+        import plugin
+        u = self._ensure_unit("mesh", 1, n=7, s="")
+        plugin._plugin._ws_devices_dirty = False
+        plugin._plugin._set("mesh", 1, nValue=7)
+        self.assertFalse(plugin._plugin._ws_devices_dirty,
+                         "_ws_devices_dirty must remain False for a no-op nValue write")
+
+    def test_set_unknown_device_does_not_mark_dirty(self):
+        """_set for a non-existent device must not crash and must not set dirty."""
+        import plugin
+        plugin._plugin._ws_devices_dirty = False
+        plugin._plugin._set("nonexistent_did", 99, sValue="x")
+        self.assertFalse(plugin._plugin._ws_devices_dirty,
+                         "_ws_devices_dirty must stay False when device is not found")
+
+    def test_set_value_readable_back(self):
+        """After _set, the unit's nValue/sValue must reflect the written values."""
+        import plugin
+        u = self._ensure_unit("mesh", 1, n=0, s="before")
+        plugin._plugin._set("mesh", 1, nValue=5, sValue="after")
+        self.assertEqual(u.nValue, 5, "nValue must be updated by _set")
+        self.assertEqual(u.sValue, "after", "sValue must be updated by _set")
+
+
 if __name__ == "__main__":
     unittest.main()

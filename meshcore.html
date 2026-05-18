@@ -1017,6 +1017,10 @@
         /* Optimistic placeholder until the plugin confirms the send (~30s) */
         .inbox-msg.pending { opacity: 0.6; font-style: italic; }
         .inbox-msg.pending .msg-time { color: var(--yellow); font-style: normal; }
+        /* Delivery ACK annotation on outgoing DM rows */
+        .msg-ack { font-size: 0.72rem; flex-shrink: 0; margin-left: 0.3em; }
+        .msg-ack--delivered { color: var(--green, #4caf50); }
+        .msg-ack--noack     { color: var(--muted); }
 
         /* ── Inbox filter bar ───────────────────────────────────── */
         #inbox-filters {
@@ -2096,6 +2100,9 @@
                     if (msg.known_channels && typeof msg.known_channels === 'object') {
                         _rxLog.known_channels = msg.known_channels;
                     }
+                    if (msg.chan_hash_names && typeof msg.chan_hash_names === 'object') {
+                        _rxLog.chan_hash_names = msg.chan_hash_names;
+                    }
                     _rxLogSeq = (typeof msg.seq === 'number') ? msg.seq : _rxLogSeq;
                     if (!_rxLogFirehosePaused) _renderFirehoseIfOpen();
                     _renderTrafficIfOpen();
@@ -2125,6 +2132,10 @@
                 }
                 if (msg.stats && typeof msg.stats === 'object') {
                     _rxLog.stats = msg.stats;
+                }
+                if (msg.chan_hash_names && typeof msg.chan_hash_names === 'object') {
+                    // Merge: a delta carries the full map, so replace in-place.
+                    _rxLog.chan_hash_names = msg.chan_hash_names;
                 }
                 if (!_rxLogFirehosePaused) _renderFirehoseIfOpen();
                 _renderTrafficIfOpen();
@@ -2198,7 +2209,7 @@
                                 time: p.ts ? _fmtEpoch(p.ts) : "",
                                 channel: p.channel, sender: p.sender, text: p.text,
                                 tsWrong: p.tsWrong, snr: p.snr, hops: p.hops,
-                                rssi: p.rssi, path: p.path,
+                                rssi: p.rssi, path: p.path, ack: p.ack,
                             });
                             if (_inboxHistory.length > 200) _inboxHistory.pop();
                             _renderInbox(container);
@@ -2921,26 +2932,28 @@
             // Legacy:  [chan|sender] text  /  [C0|sender] text  /  [sender] text
 
             const m = raw.match(/^\[([^\]]+)\]\s*(.*)/s);
-            if (!m) return { channel: null, sender: "", text: raw, ts: null, tsWrong: false, snr: null, hops: null, rssi: null, path: null };
+            if (!m) return { channel: null, sender: "", text: raw, ts: null, tsWrong: false, snr: null, hops: null, rssi: null, path: null, ack: null };
             const meta = m[1], text = m[2];
             const pipe = meta.indexOf("|");
             if (pipe < 0) {
-                return { channel: null, sender: meta, text, ts: null, tsWrong: false, snr: null, hops: null, rssi: null, path: null };
+                return { channel: null, sender: meta, text, ts: null, tsWrong: false, snr: null, hops: null, rssi: null, path: null, ack: null };
             }
             const parts = meta.split("|");
             const chanPart = parts[0];
             let rest = parts.slice(1);
-            // Pull out optional per-message signal tokens (~h hops, ~s snr,
-            // ~r rssi). They are appended after the epoch/x; filtering them
-            // out first leaves the epoch/x logic below untouched, and old
-            // lines (no tokens) are unaffected.
-            let snr = null, hops = null, rssi = null, path = null;
+            // Pull out optional per-message tokens. They are appended after the
+            // epoch/x; filtering them out first leaves epoch/x logic untouched,
+            // and old lines (no tokens) are unaffected.
+            // ~h hops, ~s snr, ~r rssi, ~p path, ~a0/~a1 delivery ACK status.
+            let snr = null, hops = null, rssi = null, path = null, ack = null;
             rest = rest.filter(seg => {
                 let mm;
                 if ((mm = /^~h(-?\d+)$/.exec(seg)))        { hops = Number(mm[1]); return false; }
                 if ((mm = /^~s(-?\d+(?:\.\d+)?)$/.exec(seg))) { snr  = Number(mm[1]); return false; }
                 if ((mm = /^~r(-?\d+)$/.exec(seg)))        { rssi = Number(mm[1]); return false; }
                 if ((mm = /^~p([0-9a-fA-F]+)$/.exec(seg))) { path = mm[1].toLowerCase(); return false; }
+                if (seg === "~a1")                          { ack  = true;  return false; }
+                if (seg === "~a0")                          { ack  = false; return false; }
                 return true;
             });
             let ts = null, tsWrong = false;
@@ -2963,7 +2976,7 @@
             } else {
                 channel = chanPart;
             }
-            return { channel, sender, text, ts, tsWrong, snr, hops, rssi, path };
+            return { channel, sender, text, ts, tsWrong, snr, hops, rssi, path, ack };
         }
 
         async function _fetchTextLog(idx) {
@@ -3015,6 +3028,7 @@
                         time: p.ts ? _fmtEpoch(p.ts) : time,
                         channel: p.channel, sender: p.sender, text: p.text,
                         tsWrong: p.tsWrong, snr: p.snr, hops: p.hops, rssi: p.rssi, path: p.path,
+                        ack: p.ack,
                     });
                 }
                 // After loading history, record the current LastUpdate so we don't
@@ -3043,6 +3057,7 @@
                     time: _p.ts ? _fmtEpoch(_p.ts) : update,
                     channel, sender, text, tsWrong: _p.tsWrong,
                     snr: _p.snr, hops: _p.hops, rssi: _p.rssi, path: _p.path,
+                    ack: _p.ack,
                 });
                 if (_inboxHistory.length > 200) _inboxHistory.pop();
             }
@@ -3131,6 +3146,7 @@
                     time: p.ts ? _fmtEpoch(p.ts) : (e.Date || ""),
                     channel: p.channel, sender: p.sender, text: p.text,
                     tsWrong: p.tsWrong, snr: p.snr, hops: p.hops, rssi: p.rssi, path: p.path,
+                    ack: p.ack,
                     _sort: _se(p, e),
                 });
             }
@@ -3150,6 +3166,7 @@
                         time: p.ts ? _fmtEpoch(p.ts) : (e.Date || ""),
                         channel: p.channel, sender: p.sender, text: p.text,
                         tsWrong: p.tsWrong, snr: p.snr, hops: p.hops, rssi: p.rssi, path: p.path,
+                        ack: p.ack,
                         _sort: _se(p, e), _chanCtx: true,
                     });
                 }
@@ -3202,7 +3219,7 @@
                 return;
             }
 
-            const html = visible.map(({ time, channel, sender, text, _pending, tsWrong, snr, hops, rssi, path }) => {
+            const html = visible.map(({ time, channel, sender, text, _pending, tsWrong, snr, hops, rssi, path, ack }) => {
                 // Outgoing marker may be "> " (current, ASCII-safe) or "▶" (legacy)
                 const isSent = sender && (sender.startsWith("> ") || sender.startsWith("▶"));
                 const isPending = !!_pending;
@@ -3232,6 +3249,14 @@
                 const tsWrongIcon = (!isPending && tsWrong)
                     ? ` <i class="fa-solid fa-triangle-exclamation" title="${escHtml(tsWrongTip)}"></i>`
                     : "";
+                // Delivery ACK marker: only shown on outgoing DM rows that have
+                // been annotated after ACK resolution (ack===true or ack===false).
+                // ack===null means not yet resolved — no marker shown.
+                const ackHtml = (isSent && !isPending && ack !== null && ack !== undefined)
+                    ? (ack
+                        ? `<span class="msg-ack msg-ack--delivered" title="Message delivered">(&#x2713; delivered)</span>`
+                        : `<span class="msg-ack msg-ack--noack" title="No delivery confirmation received">(no ack)</span>`)
+                    : "";
                 // Stash the message in a data attribute we can read on click;
                 // base64-encode so JSON quotes don't break the attribute.
                 // Best-effort parse of the Domoticz timestamp to Unix seconds so
@@ -3256,7 +3281,7 @@
           ${infoBtn}
           ${chanHtml}
           ${sender ? `<span class="msg-sender">${escHtml(sender)}</span>` : ""}
-          <span class="msg-text">${_renderMsgText(text)}</span>
+          <span class="msg-text">${_renderMsgText(text)}</span>${ackHtml}
           ${dmBtn}
           ${replyBtn}
         </div>`;
@@ -3713,6 +3738,7 @@
                     time: p.ts ? _fmtEpoch(p.ts) : "",
                     channel: p.channel, sender: p.sender, text: p.text,
                     tsWrong: p.tsWrong, snr: p.snr, hops: p.hops, rssi: p.rssi, path: p.path,
+                    ack: p.ack,
                     _snapshot: true,
                 });
                 _renderInbox(container);
@@ -4503,10 +4529,18 @@
             const view = document.getElementById("channels-view");
             if (!view) return;
             const counts = (_rxLog.stats && _rxLog.stats.chan_hash_counts) || {};
-            // Try to build a hash → channel-name map from recent entries
-            // (the firmware tags each GRP_TXT entry with chan_name when we
-            // have its key, which lets us resolve hashes to readable names).
-            const hashToName = {};
+            // Build hash → channel-name map with three sources (priority: entry
+            // chan_name > plugin chan_hash_names > nothing).
+            //
+            // 1. Plugin-provided map: chan_hash (2-hex) → name for every
+            //    configured channel whose CHANNEL_INFO has been fetched.  This
+            //    covers channels we're subscribed to even when the raw RX_LOG
+            //    frames never carried chan_name (they only carry it after the
+            //    library has the secret and can HMAC-verify the ciphertext).
+            const hashToName = Object.assign({}, (_rxLog.chan_hash_names) || {});
+            // 2. Per-entry chan_name tags: these are set by the library when it
+            //    can verify/decrypt a frame.  They take precedence (last-write
+            //    wins, but they agree for any given hash).
             for (const e of (_rxLog.entries || [])) {
                 if (e.chan_hash && e.chan_name) hashToName[e.chan_hash] = e.chan_name;
             }
@@ -4699,6 +4733,16 @@
                             `<button class="view-btn heard-type-btn${_heardShowType[t] ? " active" : ""}" data-htype="${t}" title="Show/hide ${_HEARD_ADV_TYPE[t]}s"><i class="fa-solid ${_HEARD_TYPE_ICON[t]}"></i> <span class="htc">0</span></button>`
                         ).join("")}
                     </div>
+                    <div id="heard-prune-bar" style="display:flex;align-items:center;gap:4px;margin:4px 0 6px">
+                        <select id="heard-prune-sel" style="font-size:0.75rem;padding:2px 4px;background:var(--input-bg,var(--panel));color:var(--text);border:1px solid var(--border,#555);border-radius:4px">
+                            <option value="">Prune…</option>
+                            <option value="week">Older than 1 week</option>
+                            <option value="month">Older than 1 month</option>
+                            <option value="year">Older than 1 year</option>
+                            <option value="once">Heard only once</option>
+                        </select>
+                        <button id="heard-prune-btn" class="view-btn" style="font-size:0.75rem;padding:2px 8px">Prune</button>
+                    </div>
                     <div id="heard-list-wrap"></div>
                     <div id="heard-map" style="display:none"></div>`;
                 listWrap = document.getElementById("heard-list-wrap");
@@ -4711,6 +4755,28 @@
                         _renderHeardIfOpen();
                     };
                 });
+                const pruneBtn = document.getElementById("heard-prune-btn");
+                const pruneSel = document.getElementById("heard-prune-sel");
+                if (pruneBtn && pruneSel) {
+                    pruneBtn.onclick = async () => {
+                        const criteria = pruneSel.value;
+                        if (!criteria) return;
+                        const _labels = {
+                            week: "older than 1 week",
+                            month: "older than 1 month",
+                            year: "older than 1 year",
+                            once: "heard only once",
+                        };
+                        const msg = criteria === "once"
+                            ? "Prune nodes heard only once? This cannot be undone."
+                            : `Prune heard nodes ${_labels[criteria]}? This cannot be undone.`;
+                        if (!confirm(msg)) return;
+                        pruneSel.value = "";
+                        await _sendDeviceCmd(`!heard_prune ${criteria}`);
+                        // The plugin pushes a fresh t:'heard' frame after pruning,
+                        // which the reducer applies and triggers _renderHeardIfOpen.
+                    };
+                }
             }
 
             // Refresh the per-type count badges every render.
@@ -4756,6 +4822,7 @@
                             <span class="heard-chip">${escHtml(kind)}</span>
                             <span class="heard-chip">${hops}</span>
                             <span class="heard-chip">${escHtml(sig)} dB/dBm</span>
+                            <span class="heard-chip" title="Times heard">${h.count || 1}×</span>
                         </div>
                         <div class="heard-pk" title="${escHtml(pk)}">${escHtml(pk)}</div>
                         <div class="heard-extra"><span title="Last heard at">${escHtml(t)}</span>${skewWrong ? `<i class="fa-solid fa-triangle-exclamation clock-warn" title="${escHtml(skewTip).replace(/\n/g, "&#10;")}"></i>` : ""}</div>

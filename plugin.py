@@ -144,6 +144,11 @@ RX_LOG_BUFFER      = 250
 # How often we re-write meshcore_rx_log.json at most (seconds)
 RX_LOG_WRITE_S     = 2.0
 
+# Seconds after a DM send_msg before we give up waiting for an ACK and
+# annotate the sent line with "(no ack)".  The firmware's suggested_timeout
+# is typically 20–60 s; 90 s gives slow multi-hop paths a generous margin.
+DM_ACK_TIMEOUT_S   = 90
+
 # After the user changes a setting, ignore device-side self_info echoes of
 # manual_add_contacts/telemetry/adv_loc_policy for this many seconds. Some
 # firmware briefly returns the prior value while flushing to flash, which
@@ -236,6 +241,12 @@ class BasePlugin:
         # Full 8-slot table, including empty slots (idx → name). Exposed via
         # the device map so the dashboard can render every slot with controls.
         self._channel_slots: dict = {}
+        # chan_hash (2-hex string, e.g. "a3") → channel_name for every configured
+        # channel whose CHANNEL_INFO has been fetched.  Lets the dashboard resolve
+        # "Hashes heard on air" rows to a readable name even when the raw RX_LOG
+        # frames never carried chan_name (which only happens when the library can
+        # HMAC-verify the ciphertext, which requires the channel secret).
+        self._chan_hash_to_name: dict = {}
         # Persistent-connection worker state
         self._worker_thread: threading.Thread | None = None
         self._worker_loop: asyncio.AbstractEventLoop | None = None
@@ -353,6 +364,17 @@ class BasePlugin:
         # message, or a direct path. RSSI is only set when the frame actually
         # carried one (adverts do; message events usually don't).
         self._contact_sig: dict = {}
+        # Pending DM delivery-ACK records.
+        # Keyed by expected_ack hex code (8 hex chars from MSG_SENT payload).
+        # Value: {"target": str, "body": str, "out_ts": float,
+        #         "inbox_line": str, "dm_name": str|None}
+        # Written by the worker thread (_send_message), read and cleared by
+        # _on_ack (worker) and by onHeartbeat timeout sweep (main).  Both
+        # paths hold _rx_log_lock for the mutation — same discipline as
+        # _chan_hash_to_name.  Dict is bounded: entries are removed on match
+        # or timeout; at most one entry per in-flight send (send commands are
+        # serialised by _cmd_lock), so size ≤ 1 in normal operation.
+        self._pending_acks: dict = {}
 
     def _force_close_serial(self, mc):
         """Synchronously close the underlying pyserial port.
@@ -403,15 +425,28 @@ class BasePlugin:
     def _set(self, device_id, unit, nValue=None, sValue=None):
         """Update a DomoticzEx unit. Unlike the classic framework, the Ex
         Update() does not take nValue/sValue kwargs — they're set as
-        attributes on the Unit object, then Update() is called."""
+        attributes on the Unit object, then Update() is called.
+
+        Sets _ws_devices_dirty when the value actually changes so that
+        outgoing-message echoes (and any other _set-driven writes) trigger a
+        devices_delta push without waiting for the 90 s fallback."""
         d = self._dev(device_id, unit)
         if d is None:
             return
+        changed = False
         if nValue is not None:
-            d.nValue = int(nValue)
+            new_n = int(nValue)
+            if new_n != d.nValue:
+                d.nValue = new_n
+                changed = True
         if sValue is not None:
-            d.sValue = str(sValue)
+            new_s = str(sValue)
+            if new_s != d.sValue:
+                d.sValue = new_s
+                changed = True
         d.Update()
+        if changed:
+            self._ws_devices_dirty = True
 
     def _all_node_names(self):
         """Self node (if known) + all discovered contacts."""
@@ -489,9 +524,9 @@ class BasePlugin:
         Domoticz.Heartbeat(2)
         self._heartbeat_restored = False
         if self.transport == "Serial":
-            Domoticz.Log(f"MeshCore plugin started - Serial {self.serial_port} @ {self.baud_rate}")
+            Domoticz.Status(f"MeshCore plugin started - Serial {self.serial_port} @ {self.baud_rate}")
         else:
-            Domoticz.Log(f"MeshCore plugin started - TCP {self.host}:{self.port}")
+            Domoticz.Status(f"MeshCore plugin started - TCP {self.host}:{self.port}")
 
         self._stop_event.clear()
         t = threading.Thread(target=self._worker_main, daemon=True, name="MeshCoreWorker")
@@ -565,7 +600,7 @@ class BasePlugin:
                        ", ".join(f"{t.name}(daemon={t.daemon})" for t in alive))
 
         self._remove_custom_page()
-        Domoticz.Log("MeshCore plugin stopped.")
+        Domoticz.Status("MeshCore plugin stopped.")
 
         # Workaround: Domoticz polls threading.enumerate() after onStop and
         # logs "Plugin has N Python threads still running" if anything besides
@@ -606,6 +641,10 @@ class BasePlugin:
             except queue.Empty:
                 break
             self._dispatch(item)
+
+        # Expire pending DM ACK records that have exceeded the timeout and
+        # annotate their sent lines with "(no ack)".
+        self._sweep_pending_acks()
 
     # ── WebSocket channel (F1+) ───────────────────────────────────────────────
 
@@ -1199,6 +1238,8 @@ class BasePlugin:
             # Persist the (already 24h-trimmed) timestamps so the heatmap can
             # be restored on the next plugin start instead of resetting.
             packet_times = [int(t) for t in self._packet_times]
+            known_channels_snap = dict(self._channel_names)
+            chan_hash_names_snap = dict(self._chan_hash_to_name)
 
         # Build a JSON-safe view of each entry (already normalized in _on_rx_log)
         out_entries = []
@@ -1224,8 +1265,9 @@ class BasePlugin:
                 "dup_floods":          dup_floods,
                 "heatmap_24h":         heatmap,
             },
-            "packet_times":   packet_times,
-            "known_channels": self._channel_names,
+            "packet_times":    packet_times,
+            "known_channels":  known_channels_snap,
+            "chan_hash_names":  chan_hash_names_snap,
         }
 
         try:
@@ -1297,10 +1339,12 @@ class BasePlugin:
             self._rx_log_seq += 1
             seq = self._rx_log_seq
             self._rx_log_pushed_total = self._rx_log_total_appended
+            chan_hash_snap = dict(self._chan_hash_to_name)
         self._push("rxlog", {
-            "entries": self._build_rx_log_payload(entries_snap),
-            "stats":   stats_snap,
-            "seq":     seq,
+            "entries":         self._build_rx_log_payload(entries_snap),
+            "stats":           stats_snap,
+            "seq":             seq,
+            "chan_hash_names":  chan_hash_snap,
         })
         Domoticz.Debug(f"_push_rx_log_window: seq={seq} entries={len(entries_snap)}")
 
@@ -1354,7 +1398,8 @@ class BasePlugin:
                     self._rx_log_seq += 1
                     seq = self._rx_log_seq
                     self._rx_log_pushed_total = current_total
-                    payload = (new_entries, stats_snap, seq)
+                    chan_hash_snap = dict(self._chan_hash_to_name)
+                    payload = (new_entries, stats_snap, seq, chan_hash_snap)
 
         # Lock released — safe to call _push / _push_rx_log_window.
         if eviction_gap:
@@ -1365,19 +1410,23 @@ class BasePlugin:
         if payload is None:
             return
 
-        new_entries, stats_snap, seq = payload
+        new_entries, stats_snap, seq, chan_hash_snap = payload
         self._push("rxlog_delta", {
-            "entries": self._build_rx_log_payload(new_entries),
-            "stats":   stats_snap,
-            "seq":     seq,
+            "entries":         self._build_rx_log_payload(new_entries),
+            "stats":           stats_snap,
+            "seq":             seq,
+            "chan_hash_names":  chan_hash_snap,
         })
         Domoticz.Debug(f"_push_rx_log_delta: seq={seq} new={len(new_entries)}")
 
     def _load_rx_log(self):
-        """Restore the packet-time history on startup so the packets/hour
-        heatmap survives a plugin restart instead of resetting to zero.
-        Only the heatmap source (packet_times) is restored; the rolling
-        frame buffer / sparklines rebuild from live RX events."""
+        """Restore the packet-time history and chan_hash_names on startup.
+
+        Packet timestamps power the packets/hour heatmap; chan_hash_names
+        avoid a cold-start gap where configured channel hashes show as
+        "unknown" until _fetch_channel_names completes its first round-trip.
+        The rolling frame buffer / sparklines rebuild from live RX events.
+        """
         # Only seed an empty buffer. On a warm disable→enable (Domoticz still
         # running) _packet_times may already hold live samples; appending the
         # persisted ones again would double-count the heatmap.
@@ -1389,15 +1438,23 @@ class BasePlugin:
         try:
             with open(path, "r", encoding="utf-8") as f:
                 data = json.load(f)
-            pts = data.get("packet_times") if isinstance(data, dict) else None
-            if not isinstance(pts, list):
+            if not isinstance(data, dict):
                 return
-            cutoff = time.time() - 86400
-            pts = sorted(int(t) for t in pts if isinstance(t, (int, float)))
-            pts = [t for t in pts if t >= cutoff]
-            # Respect the deque's maxlen — keep the most recent samples.
-            self._packet_times.extend(pts)
-            Domoticz.Log(f"Restored {len(self._packet_times)} packet timestamp(s) for the heatmap")
+            pts = data.get("packet_times")
+            if isinstance(pts, list):
+                cutoff = time.time() - 86400
+                pts = sorted(int(t) for t in pts if isinstance(t, (int, float)))
+                pts = [t for t in pts if t >= cutoff]
+                # Respect the deque's maxlen — keep the most recent samples.
+                self._packet_times.extend(pts)
+                Domoticz.Log(f"Restored {len(self._packet_times)} packet timestamp(s) for the heatmap")
+            chn = data.get("chan_hash_names")
+            if isinstance(chn, dict):
+                restored = {str(k).lower(): str(v) for k, v in chn.items() if k and v}
+                if restored:
+                    with self._rx_log_lock:
+                        self._chan_hash_to_name = restored
+                    Domoticz.Log(f"Restored {len(restored)} chan_hash→name mapping(s) from rx-log")
         except Exception as exc:
             Domoticz.Error(f"Could not load packet times from meshcore_rx_log.json: {exc}")
 
@@ -1900,7 +1957,7 @@ class BasePlugin:
 
         self._mc = mc
         if not self._was_connected:
-            Domoticz.Log(f"Connected to MeshCore ({endpoint}).")
+            Domoticz.Status(f"Connected to MeshCore ({endpoint}).")
         self._was_connected = True
 
         # Subscribe to push events. Callbacks run on this loop; they queue
@@ -2106,14 +2163,35 @@ class BasePlugin:
     def _on_ack(self, ev):
         """Acknowledgement from a remote node for one of our outbound TEXT_MSGs.
 
-        We don't currently match the ACK back to a specific send (the library
-        does that internally for send_msg_with_retry) — but synthesising an
-        entry in the rolling RX-log buffer lets the dashboard show ACKs on
-        the firehose and gives outbound messages a chance to display an
-        "ack received" indicator by timing.
+        The ACK event carries a "code" attribute (8 hex chars) that exactly
+        matches the expected_ack returned by send_msg's MSG_SENT event.
+        We use this code as the correlation key to annotate the corresponding
+        outgoing DM line in the inbox with a delivery marker.
+
+        Correlation strategy: exact match on expected_ack hex code.
+        Limitation: if the expected_ack bytes object returned by send_msg was
+        not captured (older firmware, or a send that failed before MSG_SENT),
+        no pending record exists and the ACK is simply recorded in the rx-log
+        without annotation.  We never annotate a line we can't reliably match.
         """
         p = dict(ev.payload or {})
         t = time.time()
+        ack_code = p.get("code", "")   # 8-char hex string from the ACK frame
+        matched_rec = None
+        with self._rx_log_lock:
+            if ack_code and ack_code in self._pending_acks:
+                matched_rec = self._pending_acks.pop(ack_code)
+        if matched_rec:
+            Domoticz.Debug(f"ACK matched: code={ack_code} target={matched_rec.get('target')!r}")
+            self._queue.put(("ack_result", {
+                "ack_code":   ack_code,
+                "delivered":  True,
+                "target":     matched_rec.get("target", ""),
+                "body":       matched_rec.get("body", ""),
+                "out_ts":     matched_rec.get("out_ts", 0),
+                "inbox_line": matched_rec.get("inbox_line"),
+                "dm_name":    matched_rec.get("dm_name"),
+            }))
         synth = {
             "payload_typename": "ACK",
             "payload_type":     -1,
@@ -2156,8 +2234,9 @@ class BasePlugin:
             pt = p.get("payload_typename") or str(p.get("payload_type", ""))
             if pt:
                 self._payload_type_counts[pt] = self._payload_type_counts.get(pt, 0) + 1
-            ch = p.get("chan_hash")
+            ch = (p.get("chan_hash") or "").lower() or None
             if ch:
+                p["chan_hash"] = ch
                 self._chan_hash_counts[ch] = self._chan_hash_counts.get(ch, 0) + 1
             self._packet_times.append(t)
             # Per-contact signal history. We key by the first 12 hex chars of
@@ -2208,7 +2287,7 @@ class BasePlugin:
                     and adv_key not in self._known_pubkeys):
                 h = self._heard_nodes.get(adv_key)
                 if h is None:
-                    h = {"pubkey": adv_key, "first_heard": t}
+                    h = {"pubkey": adv_key, "first_heard": t, "count": 0}
                     self._heard_nodes[adv_key] = h
                 h["name"]      = p.get("adv_name") or h.get("name", "")
                 h["type"]      = p.get("adv_type", h.get("type", 0))
@@ -2218,6 +2297,7 @@ class BasePlugin:
                 h["snr"]       = snr
                 h["rssi"]      = rssi
                 h["path_len"]  = p.get("path_len", -1)
+                h["count"]     = (h.get("count") or 0) + 1
                 # Feed advert hops into the lifetime hops records too — a
                 # far node is usually learned via its advert, not a chat
                 # message. Inline (we already hold _rx_log_lock; calling
@@ -2368,6 +2448,7 @@ class BasePlugin:
         """
         channel_names = {}        # non-empty only — used by message routing
         all_slots: dict = {}      # idx → name ("" if empty) for all slots
+        chan_hash_to_name: dict = {}  # 2-hex chan_hash → channel_name (non-empty slots)
         # Stop probing after this many consecutive empty / error slots so a
         # 40-slot scan doesn't burn dozens of round-trips on sparse devices.
         consecutive_empty = 0
@@ -2388,6 +2469,12 @@ class BasePlugin:
                     if name:
                         channel_names[str(rep_idx)] = name
                         consecutive_empty = 0
+                        # Map the on-air 1-byte hash to the channel name so the
+                        # dashboard can resolve "Hashes heard on air" rows for
+                        # configured channels.
+                        ch_hash = (res.payload.get("channel_hash") or "").lower()
+                        if ch_hash:
+                            chan_hash_to_name[ch_hash] = name
                     else:
                         consecutive_empty += 1
                 elif res and res.type == EventType.ERROR:
@@ -2413,8 +2500,10 @@ class BasePlugin:
         # Ensure full coverage
         for j in range(MAX_CHANNEL_SLOTS):
             all_slots.setdefault(j, "")
-        self._channel_slots = all_slots
-        self._channel_names = {int(k): v for k, v in channel_names.items()}
+        with self._rx_log_lock:
+            self._channel_slots = all_slots
+            self._channel_names = {int(k): v for k, v in channel_names.items()}
+            self._chan_hash_to_name = chan_hash_to_name
         if channel_names:
             parts = [f"#{k} = {v}" for k, v in sorted(channel_names.items())]
             Domoticz.Log(f"MeshCore channels: {', '.join(parts)}")
@@ -2538,7 +2627,7 @@ class BasePlugin:
                 r = await asyncio.wait_for(mc.commands.reset_path(pk), timeout=8.0)
                 ok = r is not None and r.type == EventType.OK
                 if ok:
-                    Domoticz.Log(f"Path reset for '{name}'")
+                    Domoticz.Status(f"Path reset for '{name}'")
                 self._queue.put(("send_result", {
                     "ok": ok, "target": "!reset_path", "body": name,
                     "result": "applied" if ok else str(r),
@@ -3360,6 +3449,46 @@ class BasePlugin:
             }))
             return
 
+        # ── Special: prune heard nodes by age or frequency ─────────────────
+        if text.startswith("!heard_prune "):
+            criteria = text[len("!heard_prune "):].strip()
+            _valid = {"week", "month", "year", "once"}
+            if criteria not in _valid:
+                self._queue.put(("send_result", {
+                    "ok": False, "target": "!heard_prune", "body": criteria,
+                    "result": f"unknown criteria '{criteria}'; use: week, month, year, once",
+                    "id": req_id,
+                }))
+                return
+            now = time.time()
+            _age_thresholds = {"week": 7 * 86400, "month": 30 * 86400, "year": 365 * 86400}
+            to_remove = []
+            with self._rx_log_lock:
+                for pk, h in list(self._heard_nodes.items()):
+                    if criteria == "once":
+                        if (h.get("count") or 1) <= 1:
+                            to_remove.append(pk)
+                    else:
+                        lh = h.get("last_heard")
+                        if lh is None:
+                            # No last_heard → skip (keep) — safer than pruning
+                            continue
+                        if (now - lh) > _age_thresholds[criteria]:
+                            to_remove.append(pk)
+                for pk in to_remove:
+                    self._heard_nodes.pop(pk, None)
+            n = len(to_remove)
+            if n > 0:
+                self._heard_dirty = True
+                self._ws_heard_dirty = True
+                self._write_heard()
+            self._queue.put(("send_result", {
+                "ok": True, "target": "!heard_prune", "body": str(n),
+                "result": f"pruned {n} node(s)",
+                "id": req_id,
+            }))
+            return
+
         # ── Special: wipe all lifetime statistics ──────────────────────────
         if text.strip() == "!reset_stats":
             with self._rx_log_lock:
@@ -3456,11 +3585,10 @@ class BasePlugin:
             return
 
         # Use plain send_msg: returns as soon as the local node has accepted
-        # the packet for TX. We don't wait for the destination ACK here —
-        # send_msg_with_retry's 40-60s wait was too painful in practice for
-        # cases where the recipient is offline. (If you want delivered/no-ACK
-        # status, the path is to switch back to send_msg_with_retry or wire
-        # up a non-blocking background ACK listener.)
+        # the packet for TX. We register a pending-ACK record keyed by the
+        # expected_ack code returned by MSG_SENT so _on_ack can correlate
+        # exactly without timing guesswork (the code is a 4-byte hash of the
+        # message content that the firmware embeds in the ACK packet).
         try:
             result = await asyncio.wait_for(
                 mc.commands.send_msg(contact, body), timeout=15.0
@@ -3471,6 +3599,20 @@ class BasePlugin:
                 and (result.payload or {}).get("reason") == "no_event_received"
             )
             ok = result is not None and result.type == EventType.MSG_SENT
+            # Register pending ACK record so _on_ack can annotate the sent line.
+            # Only do this on a clean MSG_SENT — if the TX failed there will be
+            # no ACK to wait for.
+            if ok:
+                exp_ack = (result.payload or {}).get("expected_ack")
+                if isinstance(exp_ack, (bytes, bytearray)) and len(exp_ack) == 4:
+                    ack_code = exp_ack.hex()
+                    out_ts = int(time.time())
+                    with self._rx_log_lock:
+                        self._pending_acks[ack_code] = {
+                            "target":   target,
+                            "body":     body,
+                            "out_ts":   out_ts,
+                        }
             self._queue.put(("send_result", {"ok": ok, "target": target, "body": body,
                                              "result": "TX busy - try again" if tx_busy else str(result),
                 "id": req_id,
@@ -3597,7 +3739,7 @@ class BasePlugin:
                     Domoticz.Debug(f"Internal command ok: {d['target']} {d.get('body','')}")
                     # Skip inbox / counter updates for internal commands.
                 else:
-                    Domoticz.Log(f"Message sent to '{d['target']}': {d['body']}")
+                    Domoticz.Status(f"Message sent to '{d['target']}': {d['body']}")
                     self._sent_count += 1
                     self._set(MESH_DID, UNIT_MSGS_SENT_, 0, str(self._sent_count))
                     # Show sent message in the inbox so the user gets confirmation.
@@ -3614,10 +3756,20 @@ class BasePlugin:
                         self._set(MESH_DID, UNIT_INBOX, 0,
                                   self._inbox_line(chan_tag, f"> {me}", d['body'], out_ts))
                     else:
-                        self._set(MESH_DID, UNIT_INBOX, 0,
-                                  self._inbox_line("P", f"> {tgt}", d['body'], out_ts))
-                        self._log_contact_dm(tgt,
-                            self._inbox_line("P", f"> {tgt}", d['body'], out_ts))
+                        sent_line = self._inbox_line("P", f"> {tgt}", d['body'], out_ts)
+                        self._set(MESH_DID, UNIT_INBOX, 0, sent_line)
+                        self._log_contact_dm(tgt, sent_line)
+                        # Back-fill the inbox_line and dm_name into the pending_ack
+                        # record so _on_ack / timeout sweep know exactly which stored
+                        # line to rewrite.  Match by (target, body) — the worker wrote
+                        # the record just before queuing send_result, so at most one
+                        # entry will match. Hold the lock only for the dict lookup.
+                        with self._rx_log_lock:
+                            for _rec in self._pending_acks.values():
+                                if _rec.get("target") == tgt and _rec.get("body") == d['body']:
+                                    _rec["inbox_line"] = sent_line
+                                    _rec["dm_name"]    = tgt
+                                    break
             else:
                 Domoticz.Error(f"Send failed to '{d['target']}': {d['result']}")
             # Push result to any connected WebSocket client.  Wrapped so a
@@ -3640,6 +3792,8 @@ class BasePlugin:
             if self._self_name:
                 self._set(SELF_DID, OFF_STATUS, 0, "Off")
                 self._ws_devices_dirty = True
+        elif kind == "ack_result":
+            self._handle_ack_result(item[1])
 
     # ── Data handlers ─────────────────────────────────────────────────────────
 
@@ -3768,7 +3922,7 @@ class BasePlugin:
 
     @staticmethod
     def _inbox_line(chan_tag, sender, body, ts, bad=False,
-                    snr=None, hops=None, rssi=None, path=None):
+                    snr=None, hops=None, rssi=None, path=None, ack=None):
         """Build the inbox / conversation wire string with an embedded send
         time so the dashboard can show the real time a message was sent (not
         the time Domoticz happened to log it — which for messages drained on
@@ -3780,12 +3934,16 @@ class BasePlugin:
                                              substituted because the node's
                                              reported time was missing /
                                              implausible (bad RTC).
-          [chan|sender|<epoch>{|x}{|~h<hops>}{|~s<snr>}{|~r<rssi>}] body
+          [chan|sender|<epoch>{|x}{|~h<hops>}{|~s<snr>}{|~r<rssi>}{|~p<path>}{|~a<0|1>}] body
                                              optional per-message signal,
                                              appended AFTER the epoch/x so the
                                              existing epoch parsing is
                                              unaffected and older lines (no
                                              tokens) still parse unchanged.
+          ~a0 = no ACK received within timeout  (no delivery confirmation)
+          ~a1 = ACK received (message delivered)
+          ~a is only emitted on outgoing DM lines after ACK resolution.
+          Back-compat: lines without ~a parse identically to before.
         """
         meta = f"{chan_tag}|{sender}|{int(ts)}"
         if bad:
@@ -3811,6 +3969,13 @@ class BasePlugin:
             ph = re.sub(r"[^0-9a-fA-F]", "", str(path))
             if ph:
                 meta += f"|~p{ph.lower()}"
+        # Delivery ACK annotation: ~a1 = delivered, ~a0 = no ack.
+        # Only set on outgoing DM lines after ACK resolution; never on
+        # incoming messages or channel sends.
+        if ack is True:
+            meta += "|~a1"
+        elif ack is False:
+            meta += "|~a0"
         return f"[{meta}] {body}"
 
     def _log_contact_dm(self, node_name: str, line: str):
@@ -3827,6 +3992,79 @@ class BasePlugin:
         if OFF_MSGS not in units:
             return
         self._set(did, OFF_MSGS, 0, line)
+
+    @staticmethod
+    def _annotate_sent_line(line: str, delivered: bool) -> str:
+        """Return a copy of an outgoing inbox wire line with the ~a token set.
+
+        If the line already carries a ~a token it is replaced.  If the line
+        has no meta block (legacy / malformed) it is returned unchanged so we
+        never corrupt an existing entry.
+        """
+        if not line:
+            return line
+        m = re.match(r"^(\[[^\]]+\])(.*)", line, re.DOTALL)
+        if not m:
+            return line
+        meta_block = m.group(1)   # "[chan|sender|ts|...]"
+        body_part  = m.group(2)   # " body text"
+        inner = meta_block[1:-1]  # strip [ ]
+        # Remove any existing ~a token
+        parts = [seg for seg in inner.split("|") if not re.match(r"^~a[01]$", seg)]
+        # Append the new ~a token at the end
+        parts.append("~a1" if delivered else "~a0")
+        return f"[{'|'.join(parts)}]{body_part}"
+
+    def _handle_ack_result(self, d: dict):
+        """Rewrite the outgoing DM inbox/DM-device line with the ACK annotation.
+
+        Runs on the Domoticz main thread (via _dispatch), so Domoticz API
+        calls (_set) are safe here.
+        """
+        inbox_line = d.get("inbox_line")
+        dm_name    = d.get("dm_name")
+        delivered  = bool(d.get("delivered"))
+        if not inbox_line:
+            return
+        annotated = self._annotate_sent_line(inbox_line, delivered)
+        if annotated == inbox_line:
+            return   # no change (shouldn't happen, but be safe)
+        # Rewrite global inbox
+        self._set(MESH_DID, UNIT_INBOX, 0, annotated)
+        # Rewrite per-contact DM device if the contact is a favourite
+        if dm_name:
+            self._log_contact_dm(dm_name, annotated)
+        status = "delivered" if delivered else "no ack"
+        Domoticz.Debug(f"ACK annotation applied: {status} target={d.get('target')!r}")
+
+    def _sweep_pending_acks(self):
+        """Expire pending-ACK records that have exceeded DM_ACK_TIMEOUT_S.
+
+        Called from onHeartbeat (main thread).  Timed-out records result in
+        a ~a0 (no ack) annotation on the outgoing line.
+        """
+        now = time.time()
+        expired = []
+        with self._rx_log_lock:
+            for code, rec in list(self._pending_acks.items()):
+                if now - rec.get("out_ts", now) >= DM_ACK_TIMEOUT_S:
+                    expired.append((code, dict(rec)))
+            for code, _ in expired:
+                del self._pending_acks[code]
+        for _code, rec in expired:
+            if rec.get("inbox_line"):
+                Domoticz.Debug(
+                    f"DM ACK timeout: no ack for target={rec.get('target')!r} "
+                    f"body={rec.get('body','')[:40]!r}"
+                )
+                self._queue.put(("ack_result", {
+                    "delivered":  False,
+                    "target":     rec.get("target", ""),
+                    "body":       rec.get("body", ""),
+                    "out_ts":     rec.get("out_ts", 0),
+                    "inbox_line": rec.get("inbox_line"),
+                    "dm_name":    rec.get("dm_name"),
+                }))
 
     def _handle_message(self, msg: dict):
         """Handle an incoming message — update Inbox and per-node RSSI/SNR/LastSeen."""
