@@ -50,6 +50,7 @@ import os
 import queue
 import re
 import shutil
+import sqlite3
 import threading
 import time
 import traceback
@@ -157,6 +158,11 @@ DM_ACK_TIMEOUT_S   = 90
 # comes from a separate get_default_flood_scope() round-trip and the device
 # returns the just-written value reliably there, so no grace needed for it.
 SETTINGS_GRACE_S = 45
+
+# MeshCore firmware encodes "no path / direct or unknown" as path_len=255 (0xFF).
+# This is a sentinel value, NOT a real hop count.  Exclude it everywhere we
+# record or display hop counts so it never appears in hops_records or UI.
+HOPS_SENTINEL = 255
 
 
 def _bat_pct(mv: int) -> int:
@@ -341,6 +347,7 @@ class BasePlugin:
             "server_total":   0,
             "msg_by_sender":  {},   # sender name -> message count
             "adv_by_sender":  {},   # advert name -> advert count
+            "msg_by_channel": {},   # resolved channel name -> message count (known channels only)
             "hops_records":   [],   # top-5 [{hops,name,date,channel}], best per name
             "today":          {"date": "", "messages": 0,
                                "client": 0, "repeater": 0, "server": 0},
@@ -375,6 +382,299 @@ class BasePlugin:
         # or timeout; at most one entry per in-flight send (send commands are
         # serialised by _cmd_lock), so size ≤ 1 in normal operation.
         self._pending_acks: dict = {}
+        # SQLite message store — long-lived connection, opened in onStart.
+        # All access serialized via _msgdb_lock (separate from _rx_log_lock).
+        self._msgdb: sqlite3.Connection | None = None
+        self._msgdb_lock = threading.Lock()
+        # Monotonic insert counter used for pruning; reset on each onStart.
+        self._msgdb_insert_count: int = 0
+
+    # ── SQLite message store ──────────────────────────────────────────────────
+
+    # Max rows to keep in messages table (newest wins on prune).
+    _MSG_STORE_CAP = 20_000
+    # Prune at most once every N inserts (cheap amortised cost).
+    _MSG_STORE_PRUNE_EVERY = 200
+    # Current schema version stored in the preferences table.
+    MSG_DB_SCHEMA_VERSION = 1
+
+    def _msg_store_open(self, db_path: str):
+        """Open (or create) the SQLite message store at *db_path*.
+
+        Creates the schema if it does not exist.  Must only be called once
+        from onStart on the main thread before the worker starts.
+        """
+        try:
+            con = sqlite3.connect(db_path, check_same_thread=False)
+            con.execute("PRAGMA journal_mode=WAL")
+            con.execute("""
+                CREATE TABLE IF NOT EXISTS messages (
+                    id        INTEGER PRIMARY KEY AUTOINCREMENT,
+                    chan      TEXT    NOT NULL,
+                    sender    TEXT    NOT NULL,
+                    epoch     INTEGER NOT NULL,
+                    bad       INTEGER NOT NULL DEFAULT 0,
+                    body      TEXT    NOT NULL,
+                    hops      INTEGER,
+                    snr       REAL,
+                    rssi      INTEGER,
+                    path      TEXT,
+                    ack       INTEGER,
+                    direction TEXT    NOT NULL DEFAULT 'in',
+                    recv_ts   INTEGER NOT NULL
+                )
+            """)
+            con.execute("CREATE INDEX IF NOT EXISTS idx_messages_chan_id ON messages(chan, id)")
+            con.execute("""
+                CREATE TABLE IF NOT EXISTS preferences (
+                    key   TEXT PRIMARY KEY,
+                    value TEXT
+                )
+            """)
+            con.commit()
+            self._msgdb = con
+            self._msgdb_insert_count = 0
+            self._msg_store_migrate()
+            Domoticz.Debug("Message store opened: " + db_path)
+        except Exception as exc:
+            Domoticz.Error(f"Message store open failed (non-fatal): {exc!r}")
+            self._msgdb = None
+
+    def _pref_get(self, key: str, default=None):
+        """Return the preferences value for *key*, or *default* if absent/error."""
+        if self._msgdb is None:
+            return default
+        try:
+            with self._msgdb_lock:
+                cur = self._msgdb.execute(
+                    "SELECT value FROM preferences WHERE key=?", (key,)
+                )
+                row = cur.fetchone()
+            return row[0] if row is not None else default
+        except Exception as exc:
+            Domoticz.Error(f"Message store pref_get failed (non-fatal): {exc!r}")
+            return default
+
+    def _pref_set(self, key: str, value: str):
+        """Upsert *key*=*value* in the preferences table. Never raises."""
+        if self._msgdb is None:
+            return
+        try:
+            with self._msgdb_lock:
+                self._msgdb.execute(
+                    "INSERT INTO preferences(key,value) VALUES(?,?)"
+                    " ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                    (key, value),
+                )
+                self._msgdb.commit()
+        except Exception as exc:
+            Domoticz.Error(f"Message store pref_set failed (non-fatal): {exc!r}")
+
+    def _msg_store_migrate(self):
+        """Apply any pending schema migrations and record the resulting version.
+
+        Migration ladder — add one ``elif ver == N:`` block per future version:
+
+            ver == 1  — baseline; preferences table already created by _msg_store_open,
+                        nothing to ALTER.
+            ver == 2  — (future) example: ALTER TABLE messages ADD COLUMN foo TEXT
+            ...
+
+        The loop is always exercised: even for a fresh DB it runs once (0→1),
+        confirming the ladder structure is live code, not a dead stub.
+        """
+        try:
+            stored = self._pref_get("db_version")
+            ver = int(stored) if stored is not None else 0
+            from_ver = ver
+
+            while ver < self.MSG_DB_SCHEMA_VERSION:
+                ver += 1
+                if ver == 1:
+                    pass  # baseline — tables already created in _msg_store_open
+                # elif ver == 2:
+                #     self._msgdb.execute("ALTER TABLE messages ADD COLUMN foo TEXT")
+                #     self._msgdb.commit()
+
+            self._pref_set("db_version", str(self.MSG_DB_SCHEMA_VERSION))
+
+            if from_ver < self.MSG_DB_SCHEMA_VERSION:
+                Domoticz.Debug(
+                    f"Message store migrated schema v{from_ver} → v{self.MSG_DB_SCHEMA_VERSION}"
+                )
+            else:
+                Domoticz.Debug(
+                    f"Message store schema v{self.MSG_DB_SCHEMA_VERSION} (up to date)"
+                )
+        except Exception as exc:
+            Domoticz.Error(f"Message store migration failed (non-fatal): {exc!r}")
+
+    def _msg_store_add(self, chan: str, sender: str, body: str, epoch: int,
+                       bad: bool = False, snr=None, hops=None, rssi=None,
+                       path: str = None, ack=None,
+                       direction: str = "in") -> "int | None":
+        """Insert one message row and return its rowid (or None on error).
+
+        Never raises — any sqlite error is caught, logged, and None is returned
+        so the caller's live message path is unaffected.
+        """
+        if self._msgdb is None:
+            return None
+        recv_ts = int(time.time())
+        bad_int = 1 if bad else 0
+        try:
+            with self._msgdb_lock:
+                cur = self._msgdb.execute(
+                    "INSERT INTO messages"
+                    " (chan, sender, epoch, bad, body, hops, snr, rssi, path, ack, direction, recv_ts)"
+                    " VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                    (chan, sender, int(epoch), bad_int, body,
+                     int(hops) if isinstance(hops, int) else None,
+                     float(snr) if snr is not None else None,
+                     int(rssi) if rssi is not None else None,
+                     path or None, ack, direction, recv_ts),
+                )
+                rowid = cur.lastrowid
+                self._msgdb.commit()
+                self._msgdb_insert_count += 1
+                # Prune periodically to cap table size. The DELETE keeps the
+                # newest _MSG_STORE_CAP rows; running it under the same lock as
+                # the insert means a reader never sees a half-pruned table.
+                if self._msgdb_insert_count % self._MSG_STORE_PRUNE_EVERY == 0:
+                    self._msgdb.execute(
+                        "DELETE FROM messages WHERE id < "
+                        "(SELECT MAX(id) - ? FROM messages)",
+                        (self._MSG_STORE_CAP,),
+                    )
+                    self._msgdb.commit()
+            return rowid
+        except Exception as exc:
+            Domoticz.Error(f"Message store insert failed (non-fatal): {exc!r}")
+            return None
+
+    def _msg_store_set_ack(self, rowid: int, delivered: bool):
+        """Update the ack column for a row by id. Silently no-ops on error."""
+        if self._msgdb is None or rowid is None:
+            return
+        try:
+            with self._msgdb_lock:
+                self._msgdb.execute(
+                    "UPDATE messages SET ack=? WHERE id=?",
+                    (1 if delivered else 0, rowid),
+                )
+                self._msgdb.commit()
+        except Exception as exc:
+            Domoticz.Error(f"Message store ack update failed (non-fatal): {exc!r}")
+
+    def _msg_store_query(self, scope: str, before=None, limit: int = 50,
+                         search: str = "") -> dict:
+        """Execute a paginated inbox query and return an inbox_page payload dict.
+
+        *scope* is 'all' (no channel filter) or a specific chan value.
+        *before* is an exclusive upper bound on id (for pagination); None = newest.
+        *limit* is clamped to 1..200.
+        *search* is a case-insensitive substring matched against body and sender;
+            '%' and '_' in the term are treated literally (escaped).
+        """
+        limit = max(1, min(200, int(limit) if limit is not None else 50))
+        search_str = str(search).strip() if search else ""
+        if search and not search_str:
+            Domoticz.Debug("inbox_query: search term was whitespace-only — ignoring it")
+        before_int = int(before) if before is not None else None
+
+        rows = []
+        has_more = False
+        oldest_id = None
+        error = None
+
+        if self._msgdb is None:
+            return {
+                "scope": scope, "search": search_str,
+                "rows": [], "has_more": False, "oldest_id": None,
+                "error": "store not available",
+            }
+
+        try:
+            # Escape LIKE special characters so user-provided '%' / '_' are literal.
+            def _like_escape(term: str) -> str:
+                return term.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+            params: list = []
+            clauses: list = []
+
+            if scope.startswith("@"):
+                # DM-thread scope: all private messages to/from this contact.
+                # Outgoing DMs are stored with sender "> <name>" or legacy "▶<name>"
+                # / "▶ <name>"; incoming DMs with sender "<name>".
+                dm_name = scope[1:]
+                clauses.append(
+                    "chan='P' AND sender IN (?,?,?,?)"
+                )
+                params.extend([
+                    dm_name,
+                    f"> {dm_name}",
+                    f"▶{dm_name}",
+                    f"▶ {dm_name}",
+                ])
+            elif scope != "all":
+                clauses.append("chan=?")
+                params.append(scope)
+
+            if search_str:
+                esc = _like_escape(search_str)
+                pat = f"%{esc}%"
+                clauses.append("(body LIKE ? ESCAPE '\\' OR sender LIKE ? ESCAPE '\\')")
+                params.extend([pat, pat])
+
+            if before_int is not None:
+                clauses.append("id<?")
+                params.append(before_int)
+
+            where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
+            fetch_limit = limit + 1
+            params.append(fetch_limit)
+
+            sql = (
+                f"SELECT id,chan,sender,epoch,bad,body,hops,snr,rssi,path,ack,direction"
+                f" FROM messages {where} ORDER BY id DESC LIMIT ?"
+            )
+            with self._msgdb_lock:
+                cur = self._msgdb.execute(sql, params)
+                fetched = cur.fetchall()
+
+            has_more = len(fetched) > limit
+            trimmed = fetched[:limit]
+            for row in trimmed:
+                rows.append({
+                    "id":     row[0],
+                    "chan":   row[1],
+                    "sender": row[2],
+                    "epoch":  row[3],
+                    "bad":    bool(row[4]),
+                    "body":   row[5],
+                    "hops":   row[6],
+                    "snr":    row[7],
+                    "rssi":   row[8],
+                    "path":   row[9],
+                    "ack":    row[10],
+                    "dir":    row[11],
+                })
+            oldest_id = rows[-1]["id"] if rows else None
+
+        except Exception as exc:
+            Domoticz.Error(f"Message store query failed (non-fatal): {exc!r}")
+            error = str(exc)
+
+        result = {
+            "scope":    scope,
+            "search":   search_str,
+            "rows":     rows,
+            "has_more": has_more,
+            "oldest_id": oldest_id,
+        }
+        if error is not None:
+            result["error"] = error
+        return result
 
     def _force_close_serial(self, mc):
         """Synchronously close the underlying pyserial port.
@@ -504,6 +804,10 @@ class BasePlugin:
                 Domoticz.Log("Removed legacy 'Mesh Send' device (unit 2); commands are now sent via the WebSocket channel.")
         except Exception as _exc:
             Domoticz.Debug(f"Stale UNIT_SEND cleanup failed (non-fatal): {_exc}")
+        # Pre-existing per-contact Messages devices (OFF_MSGS=15) are deliberately
+        # left in place. DM history is now served from the SQLite store and these
+        # devices are no longer created or written, but they are NOT auto-deleted —
+        # the user removes them manually if/when they decide they're no longer needed.
         self._load_manual_locations()
         self._load_favorites()
         self._migrate_state_files()
@@ -511,6 +815,13 @@ class BasePlugin:
         self._load_rx_log()
         self._load_stats()
         self._load_channels()
+
+        # Open SQLite message store (non-fatal if it fails).
+        try:
+            _db_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "meshcore_messages.db")
+            self._msg_store_open(_db_path)
+        except Exception as _dbexc:
+            Domoticz.Error(f"Message store init failed (non-fatal): {_dbexc!r}")
 
         if Parameters.get("Mode4", "true") == "true":
             self._install_custom_page()
@@ -600,6 +911,16 @@ class BasePlugin:
                        ", ".join(f"{t.name}(daemon={t.daemon})" for t in alive))
 
         self._remove_custom_page()
+
+        # Close the message store connection (do NOT delete the .db file).
+        if self._msgdb is not None:
+            try:
+                with self._msgdb_lock:
+                    self._msgdb.close()
+            except Exception as _mexc:
+                Domoticz.Debug(f"Message store close: {_mexc!r}")
+            self._msgdb = None
+
         Domoticz.Status("MeshCore plugin stopped.")
 
         # Workaround: Domoticz polls threading.enumerate() after onStop and
@@ -778,6 +1099,28 @@ class BasePlugin:
                     self._last_pushed_device_map = None
                 self._ws_devices_dirty = True
                 Domoticz.Debug("onWebSocketMessage: resync devices — baseline cleared")
+
+        elif t == "inbox_query":
+            # Paginated inbox query.  Run the DB lookup, build the page, push back.
+            try:
+                scope  = str(payload.get("scope", "all"))
+                before = payload.get("before")
+                raw_lim = payload.get("limit", 50)
+                search = str(payload.get("search") or "")
+                page = self._msg_store_query(scope, before=before, limit=raw_lim, search=search)
+                page["id"] = req_id
+                self._push("inbox_page", page)
+            except Exception as exc:
+                Domoticz.Error(f"inbox_query handler failed: {exc!r}")
+                self._push("inbox_page", {
+                    "id":       req_id,
+                    "scope":    payload.get("scope", "all"),
+                    "search":   str(payload.get("search") or ""),
+                    "rows":     [],
+                    "has_more": False,
+                    "oldest_id": None,
+                    "error":    str(exc),
+                })
 
         else:
             Domoticz.Debug(f"onWebSocketMessage: unknown t={t!r}")
@@ -981,7 +1324,6 @@ class BasePlugin:
                 (OFF_SNR,      f"{node_name} SNR",       "Custom", {"Custom": "1;dB"}),
                 (OFF_LASTSEEN, f"{node_name} Last Seen", "Text",   {}),
                 (OFF_HOPS,     f"{node_name} Hops",      "Custom", {"Custom": "1;hops"}),
-                (OFF_MSGS,     f"{node_name} Messages",  "Text",   {}),
             ]
         created = False
         existing_units = (Devices[did].Units if did in Devices else {})
@@ -1111,7 +1453,6 @@ class BasePlugin:
                 "snr":       _slot(did, OFF_SNR),
                 "noise":     _slot(did, OFF_NOISE),
                 "last_seen": ls_slot,
-                "msgs":      _slot(did, OFF_MSGS),
                 "hops":      _slot(did, OFF_HOPS),
                 "uptime":    _slot(did, OFF_UPTIME),
                 "airtime":   _slot(did, OFF_AIRTIME),
@@ -1477,7 +1818,7 @@ class BasePlugin:
                       "repeater_total", "server_total"):
                 if isinstance(data.get(k), int):
                     s[k] = data[k]
-            for k in ("msg_by_sender", "adv_by_sender"):
+            for k in ("msg_by_sender", "adv_by_sender", "msg_by_channel"):
                 if isinstance(data.get(k), dict):
                     s[k] = {str(n): int(c) for n, c in data[k].items()
                             if isinstance(c, (int, float))}
@@ -1488,6 +1829,7 @@ class BasePlugin:
                      "date": str(r.get("date", "")), "channel": str(r.get("channel", ""))}
                     for r in recs
                     if isinstance(r, dict) and isinstance(r.get("hops"), int)
+                    and 0 <= int(r.get("hops", -1)) < HOPS_SENTINEL
                 ]
                 clean.sort(key=lambda r: r["hops"], reverse=True)
                 s["hops_records"] = clean[:5]
@@ -1521,10 +1863,11 @@ class BasePlugin:
         when calling this — the method acquires it internally."""
         with self._rx_log_lock:
             payload = dict(self._stats)
-            payload["msg_by_sender"] = dict(self._stats["msg_by_sender"])
-            payload["adv_by_sender"] = dict(self._stats["adv_by_sender"])
-            payload["hops_records"]  = [dict(r) for r in self._stats["hops_records"]]
-            payload["today"]         = dict(self._stats["today"])
+            payload["msg_by_sender"]  = dict(self._stats["msg_by_sender"])
+            payload["adv_by_sender"]  = dict(self._stats["adv_by_sender"])
+            payload["msg_by_channel"] = dict(self._stats["msg_by_channel"])
+            payload["hops_records"]   = [dict(r) for r in self._stats["hops_records"]]
+            payload["today"]          = dict(self._stats["today"])
             payload["written_at"]    = int(time.time())
         return payload
 
@@ -1578,7 +1921,16 @@ class BasePlugin:
             s["today"][cls] += 1
             if sender:
                 s["msg_by_sender"][sender] = s["msg_by_sender"].get(sender, 0) + 1
-            if isinstance(hops, int) and hops >= 0 and sender:
+            # Count channel messages by resolved channel name (known channels only).
+            # channel is the already-resolved chan_tag from _handle_message:
+            #   "P"        → private DM — not a channel
+            #   a name     → resolved from _channel_names (known channel)
+            #   "C<idx>"   → unresolved index fallback (unknown channel, skip)
+            if channel and channel != "P":
+                known_names = set(self._channel_names.values())
+                if channel in known_names:
+                    s["msg_by_channel"][channel] = s["msg_by_channel"].get(channel, 0) + 1
+            if isinstance(hops, int) and 0 <= hops < HOPS_SENTINEL and sender:
                 chan = self._pretty_chan(channel)
                 recs = s["hops_records"]
                 ex = next((r for r in recs if r["name"] == sender), None)
@@ -2191,6 +2543,7 @@ class BasePlugin:
                 "out_ts":     matched_rec.get("out_ts", 0),
                 "inbox_line": matched_rec.get("inbox_line"),
                 "dm_name":    matched_rec.get("dm_name"),
+                "msg_rowid":  matched_rec.get("msg_rowid"),
             }))
         synth = {
             "payload_typename": "ACK",
@@ -2303,7 +2656,7 @@ class BasePlugin:
                 # message. Inline (we already hold _rx_log_lock; calling
                 # _bump_msg_stats would re-enter the non-reentrant lock).
                 _pl = p.get("path_len", -1)
-                if isinstance(_pl, int) and _pl >= 0:
+                if isinstance(_pl, int) and 0 <= _pl < HOPS_SENTINEL:
                     _nm = h.get("name") or adv_key[:12]
                     _recs = self._stats["hops_records"]
                     _ex = next((r for r in _recs if r["name"] == _nm), None)
@@ -3496,6 +3849,7 @@ class BasePlugin:
                     "adverts_total":  0, "messages_total": 0,
                     "client_total":   0, "repeater_total": 0, "server_total": 0,
                     "msg_by_sender":  {}, "adv_by_sender":  {},
+                    "msg_by_channel": {},
                     "hops_records":   [],
                     "today": {"date": "", "messages": 0,
                               "client": 0, "repeater": 0, "server": 0},
@@ -3755,20 +4109,32 @@ class BasePlugin:
                         chan_tag = self._channel_names.get(chan_idx_int, f"C{chan_idx_str}") if chan_idx_int is not None else f"C{chan_idx_str}"
                         self._set(MESH_DID, UNIT_INBOX, 0,
                                   self._inbox_line(chan_tag, f"> {me}", d['body'], out_ts))
+                        # Persist outgoing channel message to SQLite store.
+                        self._msg_store_add(
+                            chan=chan_tag, sender=f"> {me}", body=d['body'],
+                            epoch=out_ts, direction="out",
+                        )
                     else:
                         sent_line = self._inbox_line("P", f"> {tgt}", d['body'], out_ts)
                         self._set(MESH_DID, UNIT_INBOX, 0, sent_line)
                         self._log_contact_dm(tgt, sent_line)
-                        # Back-fill the inbox_line and dm_name into the pending_ack
-                        # record so _on_ack / timeout sweep know exactly which stored
-                        # line to rewrite.  Match by (target, body) — the worker wrote
-                        # the record just before queuing send_result, so at most one
-                        # entry will match. Hold the lock only for the dict lookup.
+                        # Persist outgoing DM to SQLite store; capture rowid for ACK back-fill.
+                        _out_rowid = self._msg_store_add(
+                            chan="P", sender=f"> {tgt}", body=d['body'],
+                            epoch=out_ts, direction="out",
+                        )
+                        # Back-fill the inbox_line, dm_name, and msg_rowid into the
+                        # pending_ack record so _on_ack / timeout sweep know exactly
+                        # which stored line (and DB row) to rewrite.  Match by
+                        # (target, body) — the worker wrote the record just before
+                        # queuing send_result, so at most one entry will match.
+                        # Hold the lock only for the dict lookup.
                         with self._rx_log_lock:
                             for _rec in self._pending_acks.values():
                                 if _rec.get("target") == tgt and _rec.get("body") == d['body']:
                                     _rec["inbox_line"] = sent_line
                                     _rec["dm_name"]    = tgt
+                                    _rec["msg_rowid"]  = _out_rowid
                                     break
             else:
                 Domoticz.Error(f"Send failed to '{d['target']}': {d['result']}")
@@ -3890,7 +4256,7 @@ class BasePlugin:
                       1 if online else 0,
                       "On" if online else "Off")
 
-            if path_len >= 0:
+            if 0 <= path_len < HOPS_SENTINEL:
                 self._set(did, OFF_HOPS, 0, str(path_len))
 
             if last_activity > 0:
@@ -3979,19 +4345,12 @@ class BasePlugin:
         return f"[{meta}] {body}"
 
     def _log_contact_dm(self, node_name: str, line: str):
-        """Append a DM line to a favourite contact's persistent Messages text
-        device. The single-value Mesh Inbox loses messages in a burst; the
-        per-contact text device keeps the full conversation in the Domoticz
-        log so it survives restarts and nothing is lost."""
-        if not node_name:
-            return
-        did = self._device_id_for(node_name)
-        if did is None or did == SELF_DID:
-            return
-        units = Devices[did].Units if did in Devices else {}
-        if OFF_MSGS not in units:
-            return
-        self._set(did, OFF_MSGS, 0, line)
+        """No-op: per-contact Messages devices are retired.
+
+        DM history is now served exclusively from the SQLite message store
+        via the inbox_query / @<name> scope mechanism.  The method signature
+        is kept so call sites do not need to be touched.
+        """
 
     @staticmethod
     def _annotate_sent_line(line: str, delivered: bool) -> str:
@@ -4034,6 +4393,10 @@ class BasePlugin:
         # Rewrite per-contact DM device if the contact is a favourite
         if dm_name:
             self._log_contact_dm(dm_name, annotated)
+        # Update ACK status in the SQLite message store.
+        msg_rowid = d.get("msg_rowid")
+        if msg_rowid is not None:
+            self._msg_store_set_ack(msg_rowid, delivered)
         status = "delivered" if delivered else "no ack"
         Domoticz.Debug(f"ACK annotation applied: {status} target={d.get('target')!r}")
 
@@ -4064,6 +4427,7 @@ class BasePlugin:
                     "out_ts":     rec.get("out_ts", 0),
                     "inbox_line": rec.get("inbox_line"),
                     "dm_name":    rec.get("dm_name"),
+                    "msg_rowid":  rec.get("msg_rowid"),
                 }))
 
     def _handle_message(self, msg: dict):
@@ -4151,6 +4515,13 @@ class BasePlugin:
                   self._inbox_line(chan_tag, display_name, text_body, msg_ts,
                                    ts_bad, snr=_msg_snr, hops=_hops,
                                    rssi=_msg_rssi, path=_msg_path))
+        # Persist to SQLite message store (non-fatal).
+        self._msg_store_add(
+            chan=chan_tag, sender=display_name, body=text_body,
+            epoch=msg_ts, bad=ts_bad, snr=_msg_snr,
+            hops=_hops if isinstance(_hops, int) else None,
+            rssi=_msg_rssi, path=_msg_path, ack=None, direction="in",
+        )
 
         # Persist private (DM) messages to the sender's per-contact Messages
         # device so a favourite's conversation history is never lost.

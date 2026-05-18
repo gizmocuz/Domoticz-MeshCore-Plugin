@@ -241,13 +241,15 @@ Setup → More Options → Custom Pages → meshcore
 - **Uptime formatting** — human-readable display like "2d 5h 12m" instead of raw minutes
 - **Node map** — click the 📍 icon on any contact card / list row to open a Leaflet map side-panel centered on that node (OpenStreetMap tiles loaded from `unpkg.com`; if your browser's tracking-prevention blocks the CDN, the panel shows a fallback message with the raw coordinates)
 - **Manual node locations** — place a `meshcore_locations.json` in the plugin folder to pin nodes without GPS on the map (see below)
-- **Message inbox** — full scrollable history with timestamps, channel tags and sender names
-- **Channel & search filters** — filter messages by channel or search by sender / text
+- **Message inbox** — backed by the SQLite message store; server-side pagination (infinite scroll for older messages) with timestamps, channel tags and sender names
+- **Channel & search filters** — per-channel scope and search are resolved server-side within the selected scope (works across the full stored history, not just what's on screen)
+- **DM conversations** — pin a contact to see its full direct-message thread (served from the store; both directions, with delivery-ACK markers)
 - **Compose bar** — select a channel or direct target, type and send
 - **Reply** — hover any message and click ↩ Reply to pre-fill the compose bar with the right target and channel
 - **@mention highlighting** — `@name` tokens are highlighted in green in message text
 - **Emoji picker** — full categorised emoji picker (700+ emoji, WhatsApp-style) with search
-- **Auto-refresh** — live updates every 10 seconds
+- **Mesh topology & path lines** — map view plots contacts and (optionally) heard nodes, and draws the real multi-hop repeater paths recent messages traversed
+- **Live updates** — pushed in real time over the plugin↔frontend WebSocket channel
 
 ----------
 
@@ -324,6 +326,7 @@ Enable **Basic** or **All** debug logging in plugin settings for verbose logs in
 
 | Version | Notes |
 |---|---|
+| Unreleased | WebSocket transport for the dashboard (no more JSON-file / JSON-API polling). SQLite message store (`meshcore_messages.db`) is now the single source of truth for the inbox **and** per-contact DM conversations, with server-side pagination + search and a schema-versioned `preferences` table for future migrations. Per-contact "Messages" DM devices retired (existing ones are left for the user to remove manually). Mesh topology now shows heard nodes (when enabled) and draws real multi-hop repeater path lines. Delivery-ACK annotation on sent DMs, heard-node hit counts + prune, per-channel message stats, and assorted dashboard fixes. |
 | 0.0.1 | Initial release — telemetry, inbox, send, custom dashboard |
 
 ----------
