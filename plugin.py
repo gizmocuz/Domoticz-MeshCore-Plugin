@@ -168,7 +168,7 @@ HOPS_SENTINEL = 255
 # Set to True to append a timestamped trace of the message send/receive
 # round-trip to meshcore_debug.log in the plugin directory. Best-effort,
 # never raises into callers, size-capped. Off in production.
-MSG_FLOW_DEBUG = True
+MSG_FLOW_DEBUG = False
 _DBG_PATH = None
 _DBG_MAX_BYTES = 2 * 1024 * 1024
 
@@ -4448,19 +4448,24 @@ class BasePlugin:
             # reliable "last seen".
             prev_advert = self._node_last_advert.get(node_name, 0)
             if last_advert and last_advert != prev_advert:
-                if prev_advert == 0:
-                    # First time we see this node this session (e.g. right
-                    # after a plugin restart). The contact-list snapshot is
-                    # NOT a fresh advert that arrived "now" — it's the node's
-                    # last-known advert from before. Estimating last-seen from
-                    # the node's own advert time (bounded to not exceed now)
-                    # keeps "Last Seen" sane across restarts and avoids
-                    # flagging every contact as clock-wrong. A node with a
-                    # genuinely future (bad) clock still clamps to now, so the
-                    # node-vs-our time gap is preserved and correctly flagged.
-                    self._node_last_activity[node_name] = min(now, last_advert)
-                else:
-                    self._node_last_activity[node_name] = now
+                # "Last Seen" must always be OUR local receive time of a real
+                # reception event — never the node's advertised clock (some
+                # nodes have a wrong/stale RTC; that belongs only to the
+                # separate skew check via _node_last_advert).
+                #
+                # prev_advert == 0 is the FIRST sighting this session (e.g.
+                # just after a restart). The contact-list snapshot is not a
+                # fresh advert that arrived "now", and the node's own advert
+                # time is untrustworthy, so we cannot honestly say when we
+                # last heard it: leave Last Seen unset until a real advert
+                # change or an incoming message gives us a local timestamp.
+                #
+                # prev_advert != 0 means the node's advert time CHANGED
+                # between two of our polls → a fresh advert genuinely arrived
+                # ~now, so record our local clock. Monotonic: never regress.
+                if prev_advert != 0:
+                    self._node_last_activity[node_name] = max(
+                        self._node_last_activity.get(node_name, 0), now)
             last_activity = self._node_last_activity.get(node_name, 0)
             advert_online = last_activity > 0 and (now - last_activity) < ONLINE_THRESHOLD_S
 
@@ -4489,8 +4494,17 @@ class BasePlugin:
                 self._set(did, OFF_HOPS, 0, str(path_len))
 
             if last_activity > 0:
+                # We have a real local-clock reception time — show it plainly.
                 ts = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(last_activity))
                 self._set(did, OFF_LASTSEEN, 0, ts)
+            elif last_advert > 0:
+                # No local reception yet (first sighting after a restart), but
+                # the contact list carries the node's OWN advertised time.
+                # Surface it in parentheses so it's unambiguous this is the
+                # node's (possibly wrong) clock, not when WE heard it.
+                node_ts = time.strftime("%Y-%m-%d %H:%M:%S",
+                                        time.localtime(last_advert))
+                self._set(did, OFF_LASTSEEN, 0, f"({node_ts})")
 
             la = self._node_last_activity.get(node_name, 0)
 
