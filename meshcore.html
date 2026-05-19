@@ -3488,11 +3488,19 @@
             // rows that may bypass the server are optimistic live-prepend entries
             // (_pending/_snapshot) — those are filtered inline below.
             const visible = (_convNode || _inboxLoaded) ? _inboxHistory.filter(m => {
-                // Server-paged rows: always pass — the server already applied scope+search.
-                // Only apply client-side filters to optimistic/snapshot rows that
-                // arrived via the live-prepend path and were NOT from the server.
+                // The selected channel chip is a HARD filter in the main inbox:
+                // never show another channel's messages while a chip is active,
+                // no matter how the row entered the list (server page, snapshot
+                // reseed, reconnect requery, optimistic echo). This is a safe,
+                // idempotent guard for correctly-scoped server rows and the
+                // backstop that keeps a stray cross-channel row from leaking
+                // in. Not applied in conversation mode (a stale chip must not
+                // hide the pinned DM thread).
+                if (!_convNode && _inboxChanFilter && m.channel !== _inboxChanFilter) return false;
+                // Server-paged rows already had scope+search applied — only
+                // re-apply the search needle to client-side optimistic/snapshot
+                // rows that bypassed the server.
                 if (!m._pending && !m._settled && !m._snapshot) return true;
-                if (_inboxChanFilter && m.channel !== _inboxChanFilter) return false;
                 if (needle && !(m.sender || "").toLowerCase().includes(needle)
                     && !(m.text || "").toLowerCase().includes(needle)) return false;
                 return true;
