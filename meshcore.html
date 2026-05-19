@@ -11,17 +11,19 @@
          installed alongside this file by the plugin on startup. -->
     <style>
         :root {
-            --bg: #1e1f26;
-            --surface: #2a2b35;
-            --border: #3a3b47;
-            --accent: #4e9af1;
-            --green: #4caf7d;
-            --red: #e05555;
-            --yellow: #f0a832;
-            --heard: #b07cff;
-            --text: #e2e4ed;
-            --muted: #7c7f93;
-            --radius: 10px;
+            /* Map to Nightglass/Domoticz theme variables; fall back to dark defaults
+               so the page also works without any theme loaded. */
+            --bg:      var(--dz-bg,          #1e1f26);
+            --surface: var(--dz-surface-2,   #2a2b35);
+            --border:  var(--dz-border-b,    #3a3b47);
+            --accent:  var(--dz-accent,      #4e9af1);
+            --green:   var(--dz-success,     #4caf7d);
+            --red:     var(--dz-danger,      #e05555);
+            --yellow:  var(--dz-warning,     #f0a832);
+            --heard:   #b07cff;
+            --text:    var(--dz-text,        #e2e4ed);
+            --muted:   var(--dz-text-muted,  #7c7f93);
+            --radius:  10px;
         }
 
         * { box-sizing: border-box; margin: 0; padding: 0; }
@@ -41,7 +43,7 @@
             box-sizing: border-box;
             display: flex;
             flex-direction: column;
-            color-scheme: dark;
+            color-scheme: light dark;
         }
         /* Bound the contacts area so the inbox below stays within reach
            without a long page scroll. The cards/list scroll internally. */
@@ -459,10 +461,10 @@
             flex-shrink: 0;
         }
         .badge i { font-size: 0.85rem; }
-        .badge.online  { background: #1a3d2b; color: var(--green); }
-        .badge.offline { background: #3d1a1a; color: var(--red); }
-        .badge.unknown { background: #2e2e2e; color: var(--text); }
-        .badge.self    { background: #1a2e3d; color: var(--accent); }
+        .badge.online  { background: rgba(var(--dz-success-rgb, 76,175,125),  0.15); color: var(--green); }
+        .badge.offline { background: rgba(var(--dz-danger-rgb,  224,85,85),   0.15); color: var(--red); }
+        .badge.unknown { background: rgba(var(--dz-border-rgb,  51,53,74),    0.40); color: var(--text); }
+        .badge.self    { background: rgba(var(--dz-accent-rgb,  78,154,241),  0.15); color: var(--accent); }
 
         .node-metrics {
             /* extra bottom padding reserves room for the floating fav-star and
@@ -520,7 +522,7 @@
             font-weight: 700;
             text-transform: uppercase;
             letter-spacing: 0.05em;
-            background: #1a3d2b;
+            background: rgba(var(--dz-success-rgb, 76,175,125), 0.15);
             color: var(--green);
             border-radius: 4px;
             padding: 2px 6px;
@@ -546,11 +548,11 @@
             padding: 2px 7px;
             margin-top: 4px;
         }
-        .type-chip.type-1 { background: #1a2e3d; color: var(--accent); }
-        .type-chip.type-2 { background: #3d2a1a; color: #f0a832; }
-        .type-chip.type-3 { background: #1a3d2b; color: var(--green); }
-        .type-chip.type-4 { background: #3d1a3d; color: #d090e0; }
-        .type-chip.type-0 { background: #2e2e2e; color: var(--muted); }
+        .type-chip.type-1 { background: rgba(var(--dz-accent-rgb,   78,154,241), 0.15); color: var(--accent); }
+        .type-chip.type-2 { background: rgba(var(--dz-warning-rgb, 240,168,50),  0.15); color: var(--yellow); }
+        .type-chip.type-3 { background: rgba(var(--dz-success-rgb,  76,175,125), 0.15); color: var(--green); }
+        .type-chip.type-4 { background: rgba(176, 124, 255, 0.15); color: #d090e0; }
+        .type-chip.type-0 { background: rgba(var(--dz-border-rgb,   51,53,74),   0.40); color: var(--muted); }
 
         /* Group headings between online/offline + per-type sections */
         .contact-group-title {
@@ -712,9 +714,9 @@
         }
         .contact-row { cursor: pointer; transition: background 0.1s; }
         .contact-row:last-child { border-bottom: none; }
-        .contact-row:hover { background: rgba(255, 255, 255, 0.03); }
-        .contact-row.compose-selected { background: rgba(78, 154, 241, 0.08); }
-        .contact-row.row-selected     { background: rgba(224, 85, 85, 0.08); }
+        .contact-row:hover { background: rgba(var(--dz-overlay-rgb, 255,255,255), 0.04); }
+        .contact-row.compose-selected { background: rgba(var(--dz-accent-rgb,  78,154,241), 0.08); }
+        .contact-row.row-selected     { background: rgba(var(--dz-danger-rgb, 224,85,85),   0.08); }
         /* Custom icon-based checkbox (Domoticz host CSS sometimes hides native ones). */
         .row-check { display: flex; align-items: center; justify-content: center; }
         .row-check-box {
@@ -766,7 +768,7 @@
         /* Settings panel inside the connected-node card */
         .node-settings {
             border-top: 1px solid var(--border);
-            padding: 12px 18px 14px;
+            padding: 8px 18px 0;
         }
         .node-settings-header {
             font-size: 0.68rem;
@@ -774,8 +776,28 @@
             text-transform: uppercase;
             letter-spacing: 0.08em;
             color: var(--muted);
-            margin: 0 0 10px;
+            margin: 0;
+            padding: 6px 0;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            cursor: pointer;
+            user-select: none;
         }
+        .node-settings-header:hover { color: var(--text); }
+        .node-settings-header .ns-chevron {
+            font-size: 0.7rem;
+            transition: transform 0.2s ease;
+        }
+        .node-settings.open .node-settings-header .ns-chevron {
+            transform: rotate(180deg);
+        }
+        .node-settings-body {
+            display: none;
+            padding-bottom: 10px;
+            padding-top: 8px;
+        }
+        .node-settings.open .node-settings-body { display: block; }
         .settings-row {
             display: flex;
             align-items: center;
@@ -988,7 +1010,7 @@
         }
         .inbox-msg:last-child { border-bottom: none; }
         .inbox-msg .msg-time {
-            color: #a6a9bd;
+            color: var(--dz-text-soft, #a6a9bd);
             font-size: 0.75rem;
             white-space: nowrap;
             flex-shrink: 0;
@@ -1020,8 +1042,8 @@
         .inbox-msg .msg-time,
         .inbox-msg .msg-sender { user-select: text; -webkit-user-select: text; }
         .inbox-msg .msg-text .mention {
-            color: #4caf7d;
-            background: rgba(76,175,125,0.13);
+            color: var(--green);
+            background: rgba(var(--dz-success-rgb, 76,175,125), 0.13);
             border-radius: 4px;
             padding: 0 4px;
             font-weight: 600;
@@ -1043,15 +1065,15 @@
             color: var(--text);
             /* Outline so the pill stays defined on tinted (sent-message)
                rows where the chip bg blends into the row bg. */
-            border: 1px solid rgba(255,255,255,0.10);
+            border: 1px solid rgba(var(--dz-overlay-rgb, 255,255,255), 0.10);
             /* Fixed column so the sender lines up across rows regardless
                of channel-name length (#amersfoort vs Public vs #test). */
             min-width: 84px;
             box-sizing: border-box;
             text-align: center;
         }
-        .msg-chan.private { background: #2a3a4a; color: #7ab; }
-        .inbox-msg.sent { background: rgba(78,154,241,0.13); border-left: 3px solid var(--accent); }
+        .msg-chan.private { background: rgba(var(--dz-accent-rgb, 78,154,241), 0.12); color: var(--dz-accent-light, #7ab); }
+        .inbox-msg.sent { background: rgba(var(--dz-accent-rgb, 78,154,241), 0.13); border-left: 3px solid var(--accent); }
         .inbox-msg.sent .msg-sender { color: var(--muted); font-weight: 500; }
         /* Optimistic placeholder until the plugin confirms the send (~30s) */
         .inbox-msg.pending { opacity: 0.6; font-style: italic; }
@@ -1316,7 +1338,7 @@
         .heatmap-grid > div {
             min-height: 26px;
             border-radius: 2px;
-            background: rgba(255,255,255,0.04);
+            background: rgba(var(--dz-overlay-rgb, 255,255,255), 0.04);
             border: 1px solid var(--border);
             position: relative;
             font-size: 0.62rem;
@@ -1378,8 +1400,8 @@
             cursor: pointer;
             font-size: 0.75rem;
         }
-        .chan-slot-btn.add:hover    { color: #26c47c; border-color: #26c47c; }
-        .chan-slot-btn.clear:hover  { color: #e63946; border-color: #e63946; }
+        .chan-slot-btn.add:hover    { color: var(--green); border-color: var(--green); }
+        .chan-slot-btn.clear:hover  { color: var(--red); border-color: var(--red); }
         .chan-row .chash { font-family: ui-monospace, monospace; color: var(--accent); }
         .chan-row .name  { color: var(--text); opacity: 0.7; font-style: italic; }
         .chan-row .cnt   { text-align: right; font-variant-numeric: tabular-nums; }
@@ -1427,8 +1449,8 @@
             border-radius: 5px;
             cursor: pointer;
         }
-        .heard-act.add:hover  { color: #26c47c; border-color: #26c47c; }
-        .heard-act.del:hover  { color: #e63946; border-color: #e63946; }
+        .heard-act.add:hover  { color: var(--green); border-color: var(--green); }
+        .heard-act.del:hover  { color: var(--red); border-color: var(--red); }
         .heard-act.gps:hover  { color: var(--accent); border-color: var(--accent); }
         #heard-map, #contact-map {
             height: 240px;
@@ -1447,7 +1469,7 @@
             grid-template-columns: 1fr;
             gap: 2px;
             padding: 6px 8px;
-            background: rgba(255,255,255,0.025);
+            background: rgba(var(--dz-overlay-rgb, 255,255,255), 0.025);
             border: 1px solid var(--border);
             border-radius: 5px;
         }
@@ -1573,7 +1595,7 @@
         .self-btn:hover { color: var(--accent); border-color: var(--accent); }
         .self-btn.primary { background: var(--accent); color: var(--bg); border-color: var(--accent); }
         .self-btn.primary:hover { opacity: 0.85; color: var(--bg); }
-        .self-btn.danger:hover { color: #e63946; border-color: #e63946; }
+        .self-btn.danger:hover { color: var(--red); border-color: var(--red); }
         .self-btn:disabled { opacity: 0.4; cursor: not-allowed; pointer-events: none; }
         /* Highlight inputs that a Save / Apply button will read or overwrite. */
         .preset-highlight {
@@ -1589,9 +1611,9 @@
             display: inline-flex;
             align-items: center;
             gap: 3px;
-            background: rgba(38,196,124,0.14);
-            color: #6cf2a8;
-            border: 1px solid rgba(38,196,124,0.35);
+            background: rgba(var(--dz-success-rgb, 76,175,125), 0.14);
+            color: var(--dz-success-light, #6cf2a8);
+            border: 1px solid rgba(var(--dz-success-rgb, 76,175,125), 0.35);
             border-radius: 8px;
             padding: 0 5px;
             font-size: 0.6rem;
@@ -1776,6 +1798,23 @@
         .signal-bars .bar.active.excellent { background: var(--green); }
         .signal-bars .bar.active.good      { background: var(--yellow); }
         .signal-bars .bar.active.poor      { background: var(--red); }
+
+        /* Light-mode overrides — applied when _bridgeDzTheme() sets body.dz-light
+           or when the parent theme already injects that class.  These mirror the
+           Nightglass body.dz-light palette and serve as a self-contained fallback
+           if the JS bridge cannot read the parent's computed --dz-* variables. */
+        body.dz-light {
+            --bg:      #f0f2f5;
+            --surface: #f5f6fa;
+            --border:  #c4c7d0;
+            --accent:  #2a7de1;
+            --green:   #2e8c58;
+            --red:     #d63b3b;
+            --yellow:  #c07818;
+            --text:    #1a1c24;
+            --muted:   #6b6e7f;
+            color-scheme: light;
+        }
     </style>
 </head>
 <body>
@@ -1881,6 +1920,47 @@
     </div>
 
     <script>
+    // ── Theme bridge ────────────────────────────────────────────────────────
+    // This page runs in a Domoticz iframe.  The host theme CSS (Nightglass or
+    // any other --dz-* theme) is only loaded in the parent document, not here.
+    // We copy every --dz-* variable we use from the parent's computed style so
+    // our local CSS variables (which reference --dz-* with dark fallbacks) pick
+    // up the correct theme colours in both dark and light mode.
+    (function _bridgeDzTheme() {
+        const DZ_VARS = [
+            '--dz-bg', '--dz-surface-2', '--dz-border-b',
+            '--dz-accent', '--dz-accent-light',
+            '--dz-success', '--dz-success-light', '--dz-danger', '--dz-warning',
+            '--dz-text', '--dz-text-soft', '--dz-text-muted',
+            '--dz-accent-rgb', '--dz-success-rgb', '--dz-danger-rgb',
+            '--dz-warning-rgb', '--dz-border-rgb', '--dz-overlay-rgb',
+        ];
+        function _apply() {
+            try {
+                if (window.parent === window) return; // not in an iframe
+                const parentBody = window.parent.document.body;
+                const cs = window.parent.getComputedStyle(parentBody);
+                const root = document.documentElement;
+                DZ_VARS.forEach(v => {
+                    const val = cs.getPropertyValue(v).trim();
+                    if (val) root.style.setProperty(v, val);
+                });
+                // Mirror dz-light body class so body.dz-light {} overrides work
+                document.body.classList.toggle(
+                    'dz-light', parentBody.classList.contains('dz-light')
+                );
+            } catch (_) { /* cross-origin or no parent — keep dark fallbacks */ }
+        }
+        _apply();
+        // Re-apply when the parent body class changes (theme switch at runtime)
+        try {
+            new MutationObserver(_apply).observe(
+                window.parent.document.body,
+                { attributes: true, attributeFilter: ['class', 'style'] }
+            );
+        } catch (_) {}
+    })();
+
     // Inject Leaflet dynamically — Domoticz custom-template loading does not
     // execute <script src> tags reliably across browsers, so we create the
     // tag at runtime from this inline script (which is always executed).
@@ -2770,9 +2850,11 @@
                 </div>
             </div>`;
             return `<div class="node-settings">
-                <div class="node-settings-header">Node Settings</div>
+                <div class="node-settings-header">Node Settings<i class="fa-solid fa-chevron-down ns-chevron"></i></div>
+                <div class="node-settings-body">
                 ${rows}
                 ${scopeRow}
+                </div>
             </div>`;
         }
 
@@ -2808,6 +2890,11 @@
             if (!root || root._settingsBound) return;
             root._settingsBound = true;
             root.addEventListener("click", (ev) => {
+                const hdr = ev.target.closest(".node-settings-header");
+                if (hdr) {
+                    hdr.closest(".node-settings").classList.toggle("open");
+                    return;
+                }
                 const btn = ev.target.closest(".settings-btn");
                 if (btn) {
                     ev.preventDefault();
@@ -3685,7 +3772,10 @@
 
         // ── Contacts filter / sort / view state ──────────────────────────────────────
 
-        let _viewMode = "cards";      // "cards" or "list"
+        const LS_VIEW_MODE = "meshcore.viewMode";
+        let _viewMode = (() => {
+            try { const v = localStorage.getItem(LS_VIEW_MODE); return v === "list" ? "list" : "cards"; } catch (_) { return "cards"; }
+        })();
         const LS_INCLUDE_HEARD = "meshcore.includeHeard";
         let _includeHeard = (() => {
             try { return localStorage.getItem(LS_INCLUDE_HEARD) === "1"; } catch (_) { return false; }
@@ -4182,11 +4272,24 @@
             }
             if (btnCards && !btnCards._bound) {
                 btnCards._bound = true;
-                btnCards.addEventListener("click", () => { _viewMode = "cards"; btnCards.classList.add("active"); btnList.classList.remove("active"); _rerenderContacts(); });
+                // Apply persisted state to buttons on first bind
+                btnCards.classList.toggle("active", _viewMode === "cards");
+                btnList.classList.toggle("active",  _viewMode === "list");
+                btnCards.addEventListener("click", () => {
+                    _viewMode = "cards";
+                    try { localStorage.setItem(LS_VIEW_MODE, "cards"); } catch (_) {}
+                    btnCards.classList.add("active"); btnList.classList.remove("active");
+                    _rerenderContacts();
+                });
             }
             if (btnList && !btnList._bound) {
                 btnList._bound = true;
-                btnList.addEventListener("click", () => { _viewMode = "list"; btnList.classList.add("active"); btnCards.classList.remove("active"); _rerenderContacts(); });
+                btnList.addEventListener("click", () => {
+                    _viewMode = "list";
+                    try { localStorage.setItem(LS_VIEW_MODE, "list"); } catch (_) {}
+                    btnList.classList.add("active"); btnCards.classList.remove("active");
+                    _rerenderContacts();
+                });
             }
             for (const t of [1, 2, 3]) {
                 const b = document.getElementById(`view-type-${t}`);
