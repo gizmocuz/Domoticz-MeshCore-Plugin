@@ -29,6 +29,7 @@
                 <option label="No"  value="false"/>
             </options>
         </param>
+        <param field="Mode3" label="Command Bridge Channel" width="150px"/>
         <param field="Mode6"   label="Debug Level" width="150px">
             <options>
                 <option label="None"  value="0" default="true"/>
@@ -79,6 +80,9 @@ UNIT_INBOX      = 1
 UNIT_SEND       = 2   # Deprecated send device (superseded by WebSocket channel); kept for stale-cleanup only
 UNIT_MSGS_RECV  = 3   # Custom counter: messages received today
 UNIT_MSGS_SENT_ = 4   # Custom counter: messages sent today
+UNIT_DZV_IN     = 5   # Text: inbound command payload (JSON, seq-stamped) for dzVents bridge
+UNIT_DZV_REPLY  = 6   # Text: outbound reply payload written by dzVents
+UNIT_DZV_SEND   = 7   # Switch (Push On): trigger written by dzVents to dispatch reply
 
 # MeshCore firmware exposes up to 40 channel slots. Domoticz devices are NOT
 # created per slot — they live entirely in the dashboard JSON map.
@@ -425,6 +429,50 @@ class BasePlugin:
         self._msgdb_lock = threading.Lock()
         # Monotonic insert counter used for pruning; reset on each onStart.
         self._msgdb_insert_count: int = 0
+        # dzVents command bridge state.
+        # _dzv_enabled: derived in onStart — True iff a non-empty Command Bridge
+        #   Channel (Mode3) is configured; no separate toggle.
+        # _dzv_channel: channel name to listen on (from Mode3); empty = disabled.
+        # _cmd_origins: rid -> {kind, chan, ts} for pending channel replies.
+        # _dzv_req_id: monotonic counter for correlation ids.
+        # _dzv_in_seq: monotonic write counter so UNIT_DZV_IN always changes.
+        self._dzv_enabled: bool = False
+        self._dzv_channel: str = ""
+        self._cmd_origins: dict = {}
+        self._dzv_req_id: int = 0
+        self._dzv_in_seq: int = 0
+
+    # ── dzVents command bridge helpers ────────────────────────────────────────
+
+    def _dzv_next_id(self) -> int:
+        """Return the next correlation id, wrapping at 1_000_000."""
+        self._dzv_req_id = (self._dzv_req_id + 1) % 1_000_000
+        return self._dzv_req_id
+
+    def _dzv_prune_origins(self):
+        """Remove stale entries from _cmd_origins (age >300s; cap at 200)."""
+        cutoff = time.time() - 300
+        stale = [k for k, v in self._cmd_origins.items() if v.get("ts", 0) < cutoff]
+        for k in stale:
+            del self._cmd_origins[k]
+        if len(self._cmd_origins) > 200:
+            # Evict the oldest entries by timestamp.
+            by_age = sorted(self._cmd_origins.items(), key=lambda kv: kv[1].get("ts", 0))
+            for k, _ in by_age[: len(self._cmd_origins) - 200]:
+                del self._cmd_origins[k]
+
+    def _dzv_channel_match(self, chan_tag: str) -> bool:
+        """Return True iff the bridge is enabled, a channel is configured, and
+        chan_tag matches the configured channel after normalisation.
+
+        Normalisation: strip a single leading '#', then .strip().lower() both
+        sides.  So '#Alerts', 'alerts', and 'Alerts' all match a stored 'alerts'.
+        """
+        if not self._dzv_enabled or not self._dzv_channel:
+            return False
+        def _norm(s: str) -> str:
+            return s.lstrip("#").strip().lower()
+        return _norm(chan_tag) == _norm(self._dzv_channel)
 
     # ── SQLite message store ──────────────────────────────────────────────────
 
@@ -916,6 +964,8 @@ class BasePlugin:
             Domoticz.Error("Serial transport selected but no serial port chosen.")
             return
 
+        self._dzv_channel = (Parameters.get("Mode3") or "").strip()
+        self._dzv_enabled = bool(self._dzv_channel)
         self._create_base_devices()
         # One-time cleanup: delete the legacy "Mesh Send" device (UNIT_SEND=2) if it
         # still exists from an older install. Commands are now sent via the WebSocket
@@ -1354,6 +1404,16 @@ class BasePlugin:
         if not _have(UNIT_MSGS_SENT_):
             Domoticz.Unit(Name="Mesh Msgs Sent", DeviceID=MESH_DID, Unit=UNIT_MSGS_SENT_,
                           TypeName="Custom", Options={"Custom": "1;msgs"}).Create()
+        if self._dzv_enabled:
+            if not _have(UNIT_DZV_IN):
+                Domoticz.Unit(Name="MeshCore Command In", DeviceID=MESH_DID, Unit=UNIT_DZV_IN,
+                              TypeName="Text").Create()
+            if not _have(UNIT_DZV_REPLY):
+                Domoticz.Unit(Name="MeshCore Reply", DeviceID=MESH_DID, Unit=UNIT_DZV_REPLY,
+                              TypeName="Text").Create()
+            if not _have(UNIT_DZV_SEND):
+                Domoticz.Unit(Name="MeshCore Send", DeviceID=MESH_DID, Unit=UNIT_DZV_SEND,
+                              TypeName="Switch", Switchtype=9).Create()
 
     def _favorites_path(self) -> str:
         return os.path.join(os.path.dirname(os.path.abspath(__file__)), "meshcore_favorites.json")
@@ -4829,6 +4889,34 @@ class BasePlugin:
                                  ts_bad, snr=_msg_snr, hops=_hops,
                                  rssi=_msg_rssi, path=_msg_path))
 
+        # dzVents command bridge: expose "!" commands received on the configured channel.
+        if (self._dzv_enabled
+                and self._dzv_channel
+                and self._dzv_channel_match(chan_tag)
+                and text_body.strip().startswith("!")):
+            self._dzv_prune_origins()
+            rid = self._dzv_next_id()
+            pk_prefix = msg.get("pubkey_prefix", "")[:12]
+            self._cmd_origins[rid] = {
+                "kind": "chan",
+                "chan": self._dzv_channel,
+                "ts": time.time(),
+            }
+            self._dzv_in_seq += 1
+            _snr_val = msg.get("SNR") if msg.get("SNR") is not None else msg.get("snr")
+            payload = json.dumps({
+                "id": rid,
+                "seq": self._dzv_in_seq,
+                "cmd": text_body.strip(),
+                "sender": node_name or display_name,
+                "pubkey": pk_prefix,
+                "channel": self._dzv_channel,
+                "snr": _snr_val,
+                "ts": int(time.time()),
+            })
+            self._set(MESH_DID, UNIT_DZV_IN, 0, payload)
+            Domoticz.Debug(f"dzVents bridge: rid={rid} cmd={text_body.strip()[:60]!r} sender={(node_name or display_name)!r} chan={self._dzv_channel!r}")
+
         # Update per-node devices for any known contact
         if node_name:
             # CONTACT_MSG_RECV carries the sender's pubkey prefix — register
@@ -4945,12 +5033,100 @@ class BasePlugin:
         Domoticz.Debug(f"Self stats updated: bat={bat_mv}mV uptime={uptime_s}s rssi={rssi} snr={stats.get('last_snr')}")
         self._write_device_map()
 
+    def onCommand(self, DeviceID, Unit, Command, Level, Color):
+        """dzVents command bridge: triggered when dzVents turns on UNIT_DZV_SEND."""
+        try:
+            if not self._dzv_enabled:
+                return
+            if DeviceID != MESH_DID or Unit != UNIT_DZV_SEND:
+                return
+            if str(Command).strip() != "On":
+                return
+
+            # Read the reply payload from UNIT_DZV_REPLY.
+            try:
+                reply_svalue = Devices[MESH_DID].Units[UNIT_DZV_REPLY].sValue
+            except (KeyError, AttributeError):
+                Domoticz.Error("dzVents bridge: UNIT_DZV_REPLY device not found")
+                self._set(MESH_DID, UNIT_DZV_SEND, 0, "Off")
+                return
+
+            try:
+                reply = json.loads(reply_svalue)
+            except (ValueError, TypeError) as exc:
+                Domoticz.Error(f"dzVents bridge: UNIT_DZV_REPLY JSON parse error: {exc!r} value={reply_svalue!r}")
+                self._set(MESH_DID, UNIT_DZV_SEND, 0, "Off")
+                return
+
+            body = reply.get("text", "").strip()
+            if not body:
+                Domoticz.Error("dzVents bridge: reply JSON has no 'text' field")
+                self._set(MESH_DID, UNIT_DZV_SEND, 0, "Off")
+                return
+
+            # Resolve the send target.
+            sendstr = None
+            if "to" in reply:
+                # Explicit override: dzVents specified the target directly.
+                to = str(reply["to"]).strip()
+                if not to:
+                    Domoticz.Error("dzVents bridge: reply 'to' override is empty")
+                    self._set(MESH_DID, UNIT_DZV_SEND, 0, "Off")
+                    return
+                sendstr = f"{to}: {body}"
+            else:
+                rid = reply.get("id")
+                if rid is None:
+                    Domoticz.Error("dzVents bridge: reply JSON has no 'id' and no 'to'")
+                    self._set(MESH_DID, UNIT_DZV_SEND, 0, "Off")
+                    return
+                origin = self._cmd_origins.get(rid)
+                if origin is None:
+                    Domoticz.Error(f"dzVents bridge: unknown or expired origin id={rid!r}")
+                    self._set(MESH_DID, UNIT_DZV_SEND, 0, "Off")
+                    return
+                kind = origin.get("kind")
+                if kind == "P":
+                    name = origin.get("name", "")
+                    if not name:
+                        Domoticz.Error(f"dzVents bridge: origin id={rid!r} has no contact name")
+                        self._set(MESH_DID, UNIT_DZV_SEND, 0, "Off")
+                        return
+                    sendstr = f"{name}: {body}"
+                elif kind == "chan":
+                    chan = origin.get("chan", "")
+                    sendstr = f"#{chan}: {body}"
+                else:
+                    Domoticz.Error(f"dzVents bridge: unrecognised origin kind={kind!r} for id={rid!r}")
+                    self._set(MESH_DID, UNIT_DZV_SEND, 0, "Off")
+                    return
+                self._cmd_origins.pop(rid, None)
+
+            loop = self._worker_loop
+            if loop is None:
+                Domoticz.Error("dzVents bridge: worker not running, cannot send reply")
+                self._set(MESH_DID, UNIT_DZV_SEND, 0, "Off")
+                return
+
+            Domoticz.Debug(f"dzVents bridge: dispatching reply send={sendstr!r}")
+            try:
+                asyncio.run_coroutine_threadsafe(
+                    self._send_message_for_text(sendstr, None), loop
+                )
+            except Exception as exc:
+                Domoticz.Error(f"dzVents bridge: dispatch failed: {exc!r}")
+
+            self._set(MESH_DID, UNIT_DZV_SEND, 0, "Off")
+        except Exception as exc:
+            Domoticz.Error(f"dzVents bridge onCommand error: {exc!r}")
+
 
 # ── Domoticz plugin entry points ─────────────────────────────────────────────
 
 _plugin = BasePlugin()
 
-def onStart():                        _plugin.onStart()
-def onStop():                         _plugin.onStop()
-def onHeartbeat():                    _plugin.onHeartbeat()
-def onWebSocketMessage(Data):         _plugin.onWebSocketMessage(Data)
+def onStart():                                                   _plugin.onStart()
+def onStop():                                                    _plugin.onStop()
+def onHeartbeat():                                               _plugin.onHeartbeat()
+def onWebSocketMessage(Data):                                    _plugin.onWebSocketMessage(Data)
+def onCommand(DeviceID, Unit, Command, Level, Color):            _plugin.onCommand(DeviceID, Unit, Command, Level, Color)
