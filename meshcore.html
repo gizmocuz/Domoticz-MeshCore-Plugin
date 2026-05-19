@@ -768,7 +768,7 @@
         /* Settings panel inside the connected-node card */
         .node-settings {
             border-top: 1px solid var(--border);
-            padding: 12px 18px 14px;
+            padding: 8px 18px 0;
         }
         .node-settings-header {
             font-size: 0.68rem;
@@ -776,8 +776,28 @@
             text-transform: uppercase;
             letter-spacing: 0.08em;
             color: var(--muted);
-            margin: 0 0 10px;
+            margin: 0;
+            padding: 6px 0;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            cursor: pointer;
+            user-select: none;
         }
+        .node-settings-header:hover { color: var(--text); }
+        .node-settings-header .ns-chevron {
+            font-size: 0.7rem;
+            transition: transform 0.2s ease;
+        }
+        .node-settings.open .node-settings-header .ns-chevron {
+            transform: rotate(180deg);
+        }
+        .node-settings-body {
+            display: none;
+            padding-bottom: 10px;
+            padding-top: 8px;
+        }
+        .node-settings.open .node-settings-body { display: block; }
         .settings-row {
             display: flex;
             align-items: center;
@@ -2830,9 +2850,11 @@
                 </div>
             </div>`;
             return `<div class="node-settings">
-                <div class="node-settings-header">Node Settings</div>
+                <div class="node-settings-header">Node Settings<i class="fa-solid fa-chevron-down ns-chevron"></i></div>
+                <div class="node-settings-body">
                 ${rows}
                 ${scopeRow}
+                </div>
             </div>`;
         }
 
@@ -2868,6 +2890,11 @@
             if (!root || root._settingsBound) return;
             root._settingsBound = true;
             root.addEventListener("click", (ev) => {
+                const hdr = ev.target.closest(".node-settings-header");
+                if (hdr) {
+                    hdr.closest(".node-settings").classList.toggle("open");
+                    return;
+                }
                 const btn = ev.target.closest(".settings-btn");
                 if (btn) {
                     ev.preventDefault();
