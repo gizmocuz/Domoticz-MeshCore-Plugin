@@ -165,6 +165,34 @@ SETTINGS_GRACE_S = 45
 # record or display hop counts so it never appears in hops_records or UI.
 HOPS_SENTINEL = 255
 
+# Set to True to append a timestamped trace of the message send/receive
+# round-trip to meshcore_debug.log in the plugin directory. Best-effort,
+# never raises into callers, size-capped. Off in production.
+MSG_FLOW_DEBUG = True
+_DBG_PATH = None
+_DBG_MAX_BYTES = 2 * 1024 * 1024
+
+
+def _dbg(msg: str) -> None:
+    """Append a timestamped line to meshcore_debug.log. Never raises."""
+    if not MSG_FLOW_DEBUG:
+        return
+    try:
+        global _DBG_PATH
+        if _DBG_PATH is None:
+            _DBG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                     "meshcore_debug.log")
+        try:
+            if os.path.getsize(_DBG_PATH) > _DBG_MAX_BYTES:
+                os.replace(_DBG_PATH, _DBG_PATH + ".1")
+        except OSError:
+            pass
+        ts = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
+        with open(_DBG_PATH, "a", encoding="utf-8") as fh:
+            fh.write("[" + ts + "] " + str(msg) + "\n")
+    except Exception:
+        pass
+
 
 def _bat_pct(mv: int) -> int:
     return max(0, min(100, int((mv - BAT_VMIN_MV) / (BAT_VMAX_MV - BAT_VMIN_MV) * 100)))
@@ -556,7 +584,7 @@ class BasePlugin:
                     " (chan, sender, epoch, bad, body, hops, snr, rssi, path, ack, direction, recv_ts, peer_key)"
                     " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
                     (chan, sender, epoch_text, bad_int, body,
-                     int(hops) if isinstance(hops, int) else None,
+                     int(hops) if (isinstance(hops, int) and 0 <= hops < HOPS_SENTINEL) else None,
                      float(snr) if snr is not None else None,
                      int(rssi) if rssi is not None else None,
                      path or None, ack, direction, recv_ts_text, norm_pk),
@@ -657,8 +685,26 @@ class BasePlugin:
                     f"▶ {dm_name}",
                 ])
             elif scope != "all":
-                clauses.append("chan=?")
-                params.append(scope)
+                # Channel scope. A channel message is stored under the
+                # resolved channel NAME (e.g. "#test") when the name was
+                # known at receive time, or under the "C<idx>" fallback when
+                # it was not. The frontend sends whichever it has, so match
+                # BOTH forms — otherwise a chip filter shows nothing while
+                # "All" shows the same messages.
+                variants = {scope}
+                m = re.match(r"^C(\d+)$", scope)
+                if m:
+                    nm = self._channel_names.get(int(m.group(1)))
+                    if nm:
+                        variants.add(nm)
+                else:
+                    for _idx, _nm in self._channel_names.items():
+                        if _nm == scope:
+                            variants.add(f"C{_idx}")
+                vs = sorted(variants)
+                clauses.append("chan IN (%s)" % ",".join("?" for _ in vs))
+                params.extend(vs)
+                _dbg(f"_msg_store_query channel scope={scope!r} -> variants={vs}")
 
             if search_str:
                 esc = _like_escape(search_str)
@@ -1050,6 +1096,7 @@ class BasePlugin:
                 self._push("heard", {"heard": self._build_heard_payload()})
             except Exception as _hexc:
                 Domoticz.Debug(f"_broadcast_snapshot({reason}): deferred heard push failed: {_hexc}")
+            _dbg(f"_broadcast_snapshot({reason}): snapshot pushed")
             Domoticz.Debug(f"_broadcast_snapshot({reason}): snapshot pushed")
         except Exception as exc:
             Domoticz.Debug(f"_broadcast_snapshot({reason}): snapshot build/push failed: {exc!r}")
@@ -1081,8 +1128,11 @@ class BasePlugin:
             # emits non-string dict keys unquoted (invalid JSON) and renders
             # None as the literal string "None"; json.dumps produces correct
             # JSON (quoted keys, null) and bypasses that converter entirely.
+            if t in ("cmd_result", "inbox_page", "snapshot"):
+                _dbg(f"_push frame t={t!r} id={payload.get('id')!r}")
             Domoticz.WebSocketSend(json.dumps(msg, ensure_ascii=False, default=str))
         except Exception as exc:
+            _dbg(f"_push: WebSocketSend raised {exc!r} (t={t!r})")
             Domoticz.Debug(f"_push: WebSocketSend raised {exc!r}; ignoring.")
 
     def onWebSocketMessage(self, Data):
@@ -1106,6 +1156,9 @@ class BasePlugin:
         # resolve the exact promise that triggered the command rather than
         # relying on FIFO shift().
         req_id = payload.get("id")
+        if t in ("cmd", "inbox_query", "hello", "resync"):
+            _dbg(f"onWebSocketMessage IN: t={t!r} id={req_id!r} "
+                 f"cmd={payload.get('cmd')!r} scope={payload.get('scope')!r}")
         Domoticz.Debug(f"onWebSocketMessage: t={t!r} id={req_id!r}")
 
         if t == "hello":
@@ -1150,6 +1203,7 @@ class BasePlugin:
                     "id": req_id,
                 })
                 return
+            _dbg(f"cmd dispatched to worker: cmd={cmd!r} id={req_id!r}")
             Domoticz.Debug(f"WebSocket cmd: {cmd}")
             try:
                 asyncio.run_coroutine_threadsafe(
@@ -1192,10 +1246,16 @@ class BasePlugin:
                 before = payload.get("before")
                 raw_lim = payload.get("limit", 50)
                 search = str(payload.get("search") or "")
+                _dbg(f"inbox_query: scope={scope!r} before={before!r} "
+                     f"limit={raw_lim!r} search={search!r} id={req_id!r}")
                 page = self._msg_store_query(scope, before=before, limit=raw_lim, search=search)
+                _dbg(f"inbox_page: scope={scope!r} rows={len(page.get('rows',[]))} "
+                     f"has_more={page.get('has_more')} oldest_id={page.get('oldest_id')} "
+                     f"id={req_id!r}")
                 page["id"] = req_id
                 self._push("inbox_page", page)
             except Exception as exc:
+                _dbg(f"inbox_query handler EXC: {exc!r}")
                 Domoticz.Error(f"inbox_query handler failed: {exc!r}")
                 self._push("inbox_page", {
                     "id":       req_id,
@@ -2619,9 +2679,27 @@ class BasePlugin:
         t = time.time()
         ack_code = p.get("code", "")   # 8-char hex string from the ACK frame
         matched_rec = None
+        deferred = False
         with self._rx_log_lock:
-            if ack_code and ack_code in self._pending_acks:
-                matched_rec = self._pending_acks.pop(ack_code)
+            rec = self._pending_acks.get(ack_code) if ack_code else None
+            if rec is not None:
+                if rec.get("inbox_line") or rec.get("msg_rowid") is not None:
+                    # send_result already reconciled this record (we know the
+                    # stored row / inbox line) — safe to consume and annotate.
+                    matched_rec = self._pending_acks.pop(ack_code)
+                else:
+                    # The ACK beat the send_result drain (fast multi-hop reply,
+                    # e.g. a repeater answering in ~1 s while send_result is
+                    # still queued for the next heartbeat). Don't discard the
+                    # correlation: flag it delivered and keep it so the
+                    # back-fill path emits the ack_result the moment it learns
+                    # the row id — otherwise a delivered message never shows
+                    # the "delivered" tick.
+                    rec["delivered"] = True
+                    rec["acked_at"] = t
+                    deferred = True
+        _dbg(f"_on_ack: code={ack_code!r} matched={matched_rec is not None} "
+             f"deferred={deferred} pending_codes={list(self._pending_acks.keys())}")
         if matched_rec:
             Domoticz.Debug(f"ACK matched: code={ack_code} target={matched_rec.get('target')!r}")
             self._queue.put(("ack_result", {
@@ -4033,9 +4111,12 @@ class BasePlugin:
         # exactly without timing guesswork (the code is a 4-byte hash of the
         # message content that the firmware embeds in the ACK packet).
         try:
+            _dbg(f"worker send_msg -> target={target!r} body={body[:60]!r}")
             result = await asyncio.wait_for(
                 mc.commands.send_msg(contact, body), timeout=15.0
             )
+            _dbg(f"worker send_msg result: type={getattr(result,'type',None)!r} "
+                 f"target={target!r}")
             tx_busy = (
                 result is not None
                 and result.type == EventType.ERROR
@@ -4056,6 +4137,11 @@ class BasePlugin:
                             "body":     body,
                             "out_ts":   out_ts,
                         }
+                    _dbg(f"worker registered pending_ack code={ack_code} "
+                         f"target={target!r}")
+                else:
+                    _dbg(f"worker MSG_SENT but no usable expected_ack "
+                         f"(exp_ack={exp_ack!r}) target={target!r}")
             self._queue.put(("send_result", {"ok": ok, "target": target, "body": body,
                                              "result": "TX busy - try again" if tx_busy else str(result),
                 "id": req_id,
@@ -4074,11 +4160,23 @@ class BasePlugin:
             self._handle_message(item[1])
         elif kind == "advert":
             # Ambient advertisement — a hint that a node is alive even before
-            # its first message. No Domoticz device is updated here; the next
-            # contacts refresh handles status/last_advert. Advert lifetime
-            # stats are tallied from the RX_LOG ADVERT frame (the canonical,
-            # always-emitted source) — counting here too would double-count.
-            pass
+            # its first message. Lifetime advert stats are tallied from the
+            # RX_LOG ADVERT frame (the canonical source) — not counted here.
+            #
+            # If the advert is from a node we already track as a contact,
+            # bump its activity NOW so "Last Heard" reflects over-the-air
+            # adverts immediately instead of waiting for the next contacts
+            # poll. (Non-contact adverts are handled by the heard-node store.)
+            ap = item[1] or {}
+            adv_name = (ap.get("adv_name") or ap.get("name") or "").strip()
+            if adv_name and adv_name in self._node_pubkey:
+                now_ts = int(time.time())
+                self._node_last_activity[adv_name] = now_ts
+                self._node_last_advert[adv_name]   = now_ts
+                did = self._device_id_for(adv_name)
+                if did is not None:
+                    self._set(did, OFF_STATUS, 1, "On")
+                self._write_device_map()
         elif kind == "contacts":
             self._handle_contacts(item[1])
             # First contacts batch processed — bump heartbeat back to a
@@ -4175,6 +4273,9 @@ class BasePlugin:
             # !favorite, !set, ...) shouldn't appear in the inbox or count as
             # a sent mesh message.
             is_internal = isinstance(d.get("target"), str) and d["target"].startswith("!")
+            _dbg(f"send_result: ok={d.get('ok')} target={d.get('target')!r} "
+                 f"body={d.get('body','')!r} result={d.get('result','')!r} "
+                 f"id={d.get('id')!r} internal={is_internal}")
             if d["ok"]:
                 if is_internal:
                     # The verb handler already logged its own success message;
@@ -4199,8 +4300,9 @@ class BasePlugin:
                         self._set(MESH_DID, UNIT_INBOX, 0,
                                   self._inbox_line(chan_tag, f"> {me}", d['body'], out_ts))
                         # Persist outgoing channel message to SQLite store.
+                        # direction="out" carries the in/out distinction; sender is the actual author.
                         self._msg_store_add(
-                            chan=chan_tag, sender=f"> {me}", body=d['body'],
+                            chan=chan_tag, sender=me, body=d['body'],
                             epoch=out_ts, direction="out", peer_key=None,
                         )
                     else:
@@ -4209,30 +4311,58 @@ class BasePlugin:
                         self._log_contact_dm(tgt, sent_line)
                         # Persist outgoing DM to SQLite store; capture rowid for ACK back-fill.
                         # Resolve the peer's pubkey for the stable conversation key.
+                        # direction="out" carries the in/out distinction; sender is the actual author (self).
                         _tgt_did = self._device_id_for(tgt)
                         _tgt_pk = (
                             _tgt_did
                             if (_tgt_did and _tgt_did not in ("self", None) and len(_tgt_did) == 12)
-                            else self._node_did.get(tgt, "")
+                            else self._node_did.get(tgt)
+                            or self._node_pubkey.get(tgt, "")
                         )
                         _out_rowid = self._msg_store_add(
-                            chan="P", sender=f"> {tgt}", body=d['body'],
+                            chan="P", sender=me, body=d['body'],
                             epoch=out_ts, direction="out",
                             peer_key=self._norm_peer_key(_tgt_pk),
                         )
+                        _dbg(f"send_result DM stored: tgt={tgt!r} "
+                             f"resolved_pk={self._norm_peer_key(_tgt_pk)!r} "
+                             f"rowid={_out_rowid} line={sent_line!r}")
                         # Back-fill the inbox_line, dm_name, and msg_rowid into the
                         # pending_ack record so _on_ack / timeout sweep know exactly
                         # which stored line (and DB row) to rewrite.  Match by
                         # (target, body) — the worker wrote the record just before
                         # queuing send_result, so at most one entry will match.
                         # Hold the lock only for the dict lookup.
+                        _early_ack = None
                         with self._rx_log_lock:
-                            for _rec in self._pending_acks.values():
+                            for _code, _rec in self._pending_acks.items():
                                 if _rec.get("target") == tgt and _rec.get("body") == d['body']:
                                     _rec["inbox_line"] = sent_line
                                     _rec["dm_name"]    = tgt
                                     _rec["msg_rowid"]  = _out_rowid
+                                    _dbg(f"send_result: back-filled pending_ack "
+                                         f"for tgt={tgt!r} rowid={_out_rowid}")
+                                    if _rec.get("delivered"):
+                                        # The ACK already arrived before this
+                                        # reconcile (fast reply). Consume the
+                                        # record now and emit the delivered
+                                        # result so the tick shows immediately
+                                        # instead of waiting for a timeout.
+                                        _early_ack = self._pending_acks.pop(_code)
                                     break
+                        if _early_ack is not None:
+                            _dbg(f"send_result: emitting deferred ACK for tgt={tgt!r} "
+                                 f"rowid={_out_rowid}")
+                            self._queue.put(("ack_result", {
+                                "ack_code":   None,
+                                "delivered":  True,
+                                "target":     _early_ack.get("target", ""),
+                                "body":       _early_ack.get("body", ""),
+                                "out_ts":     _early_ack.get("out_ts", 0),
+                                "inbox_line": _early_ack.get("inbox_line"),
+                                "dm_name":    _early_ack.get("dm_name"),
+                                "msg_rowid":  _early_ack.get("msg_rowid"),
+                            }))
             else:
                 Domoticz.Error(f"Send failed to '{d['target']}': {d['result']}")
             # Push result to any connected WebSocket client.  Wrapped so a
@@ -4240,6 +4370,8 @@ class BasePlugin:
             # (_push already swallows exceptions internally, but being explicit
             # here makes the intent clear and guards against future refactors).
             try:
+                _dbg(f"push cmd_result: ok={d['ok']} target={d.get('target','')!r} "
+                     f"id={d.get('id')!r}")
                 self._push("cmd_result", {
                     "ok":     d["ok"],
                     "target": d.get("target", ""),
@@ -4480,6 +4612,9 @@ class BasePlugin:
         inbox_line = d.get("inbox_line")
         dm_name    = d.get("dm_name")
         delivered  = bool(d.get("delivered"))
+        _dbg(f"_handle_ack_result: delivered={delivered} target={d.get('target')!r} "
+             f"dm_name={dm_name!r} rowid={d.get('msg_rowid')} "
+             f"has_inbox_line={bool(inbox_line)}")
         if not inbox_line:
             return
         annotated = self._annotate_sent_line(inbox_line, delivered)
@@ -4513,12 +4648,19 @@ class BasePlugin:
                 del self._pending_acks[code]
         for _code, rec in expired:
             if rec.get("inbox_line"):
+                # A record can carry delivered=True if the ACK arrived before
+                # send_result reconciled it but, for some reason, the
+                # back-fill path never emitted it (defensive — normally the
+                # back-fill consumes it immediately). Honour that here so a
+                # delivered message is never wrongly annotated "(no ack)".
+                _delivered = bool(rec.get("delivered"))
                 Domoticz.Debug(
-                    f"DM ACK timeout: no ack for target={rec.get('target')!r} "
+                    f"DM ACK {'delivered (deferred)' if _delivered else 'timeout: no ack'} "
+                    f"for target={rec.get('target')!r} "
                     f"body={rec.get('body','')[:40]!r}"
                 )
                 self._queue.put(("ack_result", {
-                    "delivered":  False,
+                    "delivered":  _delivered,
                     "target":     rec.get("target", ""),
                     "body":       rec.get("body", ""),
                     "out_ts":     rec.get("out_ts", 0),
@@ -4612,11 +4754,22 @@ class BasePlugin:
                   self._inbox_line(chan_tag, display_name, text_body, msg_ts,
                                    ts_bad, snr=_msg_snr, hops=_hops,
                                    rssi=_msg_rssi, path=_msg_path))
+        _dbg(f"incoming msg: chan={chan_tag!r} sender={display_name!r} "
+             f"node={node_name!r} prefix={prefix!r} "
+             f"peer_key={self._norm_peer_key(prefix)!r} ts={msg_ts} "
+             f"body={text_body[:60]!r}")
         # Persist to SQLite message store (non-fatal).
+        # Store hops only when it's a real count: exclude sentinel (255) and negatives.
         self._msg_store_add(
             chan=chan_tag, sender=display_name, body=text_body,
             epoch=msg_ts, bad=ts_bad, snr=_msg_snr,
-            hops=_hops if isinstance(_hops, int) else None,
+            # path_len == HOPS_SENTINEL (255) means the firmware reported no
+            # path info; a message that reached us directly is 0 hops, which
+            # is more meaningful than "unknown". Real counts pass through;
+            # anything else invalid -> None.
+            hops=(0 if (isinstance(_hops, int) and _hops == HOPS_SENTINEL)
+                  else _hops if (isinstance(_hops, int) and 0 <= _hops < HOPS_SENTINEL)
+                  else None),
             rssi=_msg_rssi, path=_msg_path, ack=None, direction="in",
             peer_key=self._norm_peer_key(prefix),
         )

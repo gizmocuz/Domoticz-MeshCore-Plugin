@@ -17,3 +17,5 @@ meshcore_rx_log.json
 meshcore_messages.db
 meshcore_messages.db-wal
 meshcore_messages.db-shm
+meshcore_debug.log
+meshcore_debug.log.1

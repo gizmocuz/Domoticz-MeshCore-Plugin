@@ -1164,5 +1164,145 @@ class TestMsgStoreKeyBasedDMScope(unittest.TestCase):
             self.assertEqual(row["chan"], "P")
 
 
+# ── 15. New producer data shape (Fix 1 + Fix 2) ──────────────────────────────
+
+class TestMsgStoreNewProducerShape(unittest.TestCase):
+    """Verify the corrected producer data shape:
+    - Outgoing rows: direction='out', sender=<self_name>, peer_key=<peer_key>.
+    - No "> " prefix on sender for either direction.
+    - @k:<key> returns both incoming and outgoing rows in the same thread.
+    - direction column ('dir' in query result) distinguishes the two rows.
+    - @<name> fallback still works for incoming rows (sender=contact_name).
+    """
+
+    PEER_KEY = "aabbccddeeff"
+    SELF_NAME = "MyNode"
+    CONTACT = "Alice"
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.bp = _make_store(self.tmp)
+        # Incoming DM from Alice — new shape: sender=contact name, no "> " prefix.
+        self.bp._msg_store_add(
+            "P", self.CONTACT, "hello from alice",
+            1_700_000_000, direction="in", peer_key=self.PEER_KEY,
+        )
+        # Outgoing DM to Alice — new shape: sender=self_name, direction="out", peer_key=peer.
+        self.bp._msg_store_add(
+            "P", self.SELF_NAME, "reply from me",
+            1_700_000_001, direction="out", peer_key=self.PEER_KEY,
+        )
+        # Unrelated channel message.
+        self.bp._msg_store_add("General", self.SELF_NAME, "channel broadcast", 1_700_000_002)
+
+    def tearDown(self):
+        _close_store(self.bp)
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_key_scope_returns_both_directions(self):
+        """@k:<peer> must return both the incoming and outgoing rows for the thread."""
+        page = self.bp._msg_store_query(f"@k:{self.PEER_KEY}", limit=50)
+        self.assertEqual(len(page["rows"]), 2,
+                         f"Expected 2 rows, got: {[r['sender'] for r in page['rows']]}")
+        dirs = {r["dir"] for r in page["rows"]}
+        self.assertIn("in", dirs)
+        self.assertIn("out", dirs)
+
+    def test_outgoing_sender_is_self_not_contact(self):
+        """Outgoing row must have sender=self_name, not '>self' or '>contact'."""
+        page = self.bp._msg_store_query(f"@k:{self.PEER_KEY}", limit=50)
+        out_rows = [r for r in page["rows"] if r["dir"] == "out"]
+        self.assertEqual(len(out_rows), 1)
+        self.assertEqual(out_rows[0]["sender"], self.SELF_NAME)
+        self.assertFalse(out_rows[0]["sender"].startswith("> "),
+                         "sender must NOT have '> ' prefix — use direction column instead")
+
+    def test_incoming_sender_is_contact_not_prefixed(self):
+        """Incoming row must have sender=contact_name with no '> ' prefix."""
+        page = self.bp._msg_store_query(f"@k:{self.PEER_KEY}", limit=50)
+        in_rows = [r for r in page["rows"] if r["dir"] == "in"]
+        self.assertEqual(len(in_rows), 1)
+        self.assertEqual(in_rows[0]["sender"], self.CONTACT)
+        self.assertFalse(in_rows[0]["sender"].startswith("> "),
+                         "incoming sender must not have '> ' prefix")
+
+    def test_name_fallback_returns_incoming_by_sender(self):
+        """@<contact_name> fallback must find incoming rows where sender=contact_name."""
+        page = self.bp._msg_store_query(f"@{self.CONTACT}", limit=50)
+        # At least the incoming row with sender=Alice should appear.
+        self.assertGreaterEqual(len(page["rows"]), 1)
+        senders = {r["sender"] for r in page["rows"]}
+        self.assertIn(self.CONTACT, senders)
+
+    def test_no_prefixed_sender_in_thread(self):
+        """Neither '> Alice' nor '> MyNode' style senders must appear in the thread."""
+        page = self.bp._msg_store_query(f"@k:{self.PEER_KEY}", limit=50)
+        for row in page["rows"]:
+            self.assertFalse(row["sender"].startswith("> "),
+                             f"Row has legacy '> ' sender prefix: {row['sender']!r}")
+
+    def test_channel_outgoing_has_no_peer_key(self):
+        """Outgoing channel messages must have peer_key=None."""
+        page = self.bp._msg_store_query("General", limit=50)
+        chan_rows = [r for r in page["rows"] if r["chan"] == "General"]
+        self.assertEqual(len(chan_rows), 1)
+        self.assertIsNone(chan_rows[0]["peer_key"])
+
+
+# ── 16. Hops sentinel guard (Fix 3) ──────────────────────────────────────────
+
+class TestMsgStoreHopsSentinel(unittest.TestCase):
+    """Verify that HOPS_SENTINEL (255) and invalid hop counts are stored as NULL."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.bp = _make_store(self.tmp)
+
+    def tearDown(self):
+        _close_store(self.bp)
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_valid_hop_count_preserved(self):
+        """A valid hop count (e.g. 3) must be stored and returned as-is."""
+        self.bp._msg_store_add("P", "Alice", "msg with hops", 1_700_000_000, hops=3)
+        page = self.bp._msg_store_query("all")
+        self.assertEqual(len(page["rows"]), 1)
+        self.assertEqual(page["rows"][0]["hops"], 3)
+
+    def test_zero_hop_count_preserved(self):
+        """Zero is a valid hop count (direct) and must be stored as 0, not NULL."""
+        self.bp._msg_store_add("P", "Alice", "direct msg", 1_700_000_000, hops=0)
+        page = self.bp._msg_store_query("all")
+        self.assertEqual(page["rows"][0]["hops"], 0)
+
+    def test_sentinel_255_stored_as_null(self):
+        """hops=255 (HOPS_SENTINEL) must be stored as NULL, returned as None."""
+        import plugin
+        self.assertEqual(plugin.HOPS_SENTINEL, 255)
+        self.bp._msg_store_add("P", "Alice", "unknown hops", 1_700_000_000, hops=255)
+        page = self.bp._msg_store_query("all")
+        self.assertIsNone(page["rows"][0]["hops"],
+                          "hops=255 (HOPS_SENTINEL) must be stored/returned as None")
+
+    def test_negative_hops_stored_as_null(self):
+        """Negative hop count must be stored as NULL, returned as None."""
+        self.bp._msg_store_add("P", "Alice", "neg hops", 1_700_000_000, hops=-1)
+        page = self.bp._msg_store_query("all")
+        self.assertIsNone(page["rows"][0]["hops"],
+                          "negative hops must be stored/returned as None")
+
+    def test_none_hops_stored_as_null(self):
+        """hops=None (no path_len in message) must be stored and returned as None."""
+        self.bp._msg_store_add("P", "Alice", "no hops", 1_700_000_000, hops=None)
+        page = self.bp._msg_store_query("all")
+        self.assertIsNone(page["rows"][0]["hops"])
+
+    def test_hops_254_is_valid(self):
+        """254 is below HOPS_SENTINEL and is a valid (if large) hop count."""
+        self.bp._msg_store_add("P", "Alice", "254 hops", 1_700_000_000, hops=254)
+        page = self.bp._msg_store_query("all")
+        self.assertEqual(page["rows"][0]["hops"], 254)
+
+
 if __name__ == "__main__":
     unittest.main()

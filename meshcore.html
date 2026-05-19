@@ -33,7 +33,14 @@
             background: var(--bg);
             color: var(--text);
             padding: 20px;
+            /* Fill at least the viewport and lay children out as a column so
+               the inbox can be pushed to the bottom (margin-top:auto) instead
+               of leaving dead space below it. No height/overflow lock — the
+               page still scrolls if content is taller than the viewport. */
             min-height: 100vh;
+            box-sizing: border-box;
+            display: flex;
+            flex-direction: column;
             color-scheme: dark;
         }
         /* Bound the contacts area so the inbox below stays within reach
@@ -873,6 +880,9 @@
            very bottom. The list itself is internally scrollable and the
            drag bar resizes its height. */
         #inbox-history-section {
+            /* margin-top is set by _dockInbox() (JS): CSS 100vh/auto have no
+               effect in the Domoticz-embedded document, so the section is
+               pushed down to the bottom of the viewport by measurement. */
             margin-top: 16px;
             border-top: 1px solid var(--border);
             padding-top: 10px;
@@ -2228,56 +2238,16 @@
                 const val = _deviceMap.inbox_value;
                 if (val !== _inboxLastWsValue) {
                     _inboxLastWsValue = val;
-                    if (_convNode) {
-                        // Conversation is pinned: re-query the newest page of
-                        // the @contact thread so the just-arrived DM appears.
-                        // This resets paging to the top — acceptable because
-                        // new messages arrive at the top (newest-first).
-                        _convQueryNewest();
-                        return;
-                    }
-                    const p = _parseInboxData(val);
-                    const container = document.getElementById("inbox-history");
-                    if (container && p.text) {
-                        // Drop any pending placeholder for this message (outgoing echo).
-                        if (p.sender && (p.sender.startsWith("> ") || p.sender.startsWith("▶"))) {
-                            const pIdx = _inboxHistory.findIndex(m =>
-                                (m._pending || m._settled) && m.channel === p.channel && m.text === p.text);
-                            if (pIdx >= 0) _inboxHistory.splice(pIdx, 1);
-                        }
-                        // Scope filter: skip if the active channel chip doesn't match
-                        // (the server will include it in the next paged result).
-                        if (_inboxChanFilter && p.channel !== _inboxChanFilter) return;
-                        // Search filter: skip if an active search term doesn't match.
-                        const needle = (_inboxSearch || "").trim().toLowerCase();
-                        if (needle) {
-                            const matchesSender = (p.sender || "").toLowerCase().includes(needle);
-                            const matchesText   = (p.text   || "").toLowerCase().includes(needle);
-                            if (!matchesSender && !matchesText) return;
-                        }
-                        // Dedupe: scan the top rows (up to 5) for an identical paged row
-                        // that the server will also return — avoids a brief double-entry
-                        // that disappears on the next _onInboxPage replace.
-                        const checkRows = Math.min(_inboxHistory.length, 5);
-                        const alreadyPresent = (() => {
-                            for (let i = 0; i < checkRows; i++) {
-                                const m = _inboxHistory[i];
-                                if (m.text === p.text && m.sender === p.sender
-                                    && m.channel === p.channel) return true;
-                            }
-                            return false;
-                        })();
-                        if (!alreadyPresent) {
-                            _inboxHistory.unshift({
-                                time: p.ts ? _fmtEpoch(p.ts) : "",
-                                channel: p.channel, sender: p.sender, text: p.text,
-                                tsWrong: p.tsWrong, snr: p.snr, hops: p.hops,
-                                rssi: p.rssi, path: p.path,
-                            });
-                            if (_inboxHistory.length > 200) _inboxHistory.pop();
-                            _renderInbox(container);
-                        }
-                    }
+                    // The Mesh Inbox is a single-valued *trigger* device. Any
+                    // change — a new incoming message, our own send echo, or an
+                    // ACK (no-ack) annotation — just means "the message store
+                    // changed". Re-query the current scope from SQLite (the
+                    // single source of truth) instead of parsing the lossy
+                    // single value here: that keeps timestamps, direction and
+                    // ACK state correct and avoids the transient malformed /
+                    // duplicate rows the old client-side parse produced.
+                    // Debounced so a burst coalesces into one query.
+                    _scheduleInboxRefresh();
                 }
             }
         }
@@ -3133,7 +3103,31 @@
                 ack:      row.ack === 1 ? true : row.ack === 0 ? false : null,
                 // Outgoing flag: drive sent-row styling independently of sender prefix.
                 _out:     row.dir === "out",
+                // Stable peer identity for DM rows (12-hex pubkey prefix) —
+                // used to label outgoing DMs with the recipient's name.
+                peer_key: row.peer_key || null,
             };
+        }
+
+        // Resolve a 12-hex pubkey prefix to a friendly node name using the
+        // device map (then heard nodes). Returns "" if unknown.
+        function _nameForPubkey(pk) {
+            const want = _normPk(pk);
+            if (!want) return "";
+            const nodes = (_deviceMap && _deviceMap.nodes) || {};
+            for (const nm in nodes) {
+                const np = nodes[nm] && nodes[nm].pubkey;
+                if (np && _normPk(np) === want) return nm;
+            }
+            const si = _deviceMap && _deviceMap.self_info;
+            if (si && si.public_key && _normPk(si.public_key) === want
+                && _deviceMap.self) return _deviceMap.self;
+            const hn = (_heard && _heard.nodes) || {};
+            for (const k in hn) {
+                if (hn[k] && hn[k].pubkey && _normPk(hn[k].pubkey) === want
+                    && hn[k].name) return hn[k].name;
+            }
+            return "";
         }
 
         // Dispatch for incoming inbox_page frames.
@@ -3157,10 +3151,13 @@
 
             for (const row of rows) {
                 const mapped = _mapInboxPageRow(row);
-                // Dedup: if a pending/settled echo matches this real row by
-                // sender + text, drop the placeholder in favour of the real row.
+                // Dedup: a pending/settled placeholder is always an outgoing
+                // echo. The stored row's sender is the self node (direction
+                // carries in/out), while the placeholder's sender is "> target"
+                // — so match on the outgoing flag + channel + text, NOT sender.
                 const dupIdx = _inboxHistory.findIndex(m =>
-                    (m._pending || m._settled) && m.text === mapped.text && m.sender === mapped.sender);
+                    (m._pending || m._settled) && mapped._out
+                    && m.text === mapped.text && m.channel === mapped.channel);
                 if (dupIdx >= 0) _inboxHistory.splice(dupIdx, 1);
                 _inboxHistory.push(mapped);
             }
@@ -3278,6 +3275,19 @@
                 try { return (document.getElementById("inbox-search") || {}).value || ""; } catch (_) { return ""; }
             })();
             _inboxReqId = _sendInboxQuery(_mainInboxScope(), null, search.trim() || null);
+        }
+
+        // Debounced re-query of the newest page for whichever view is active
+        // (pinned DM conversation or the main inbox). Driven by inbox_value
+        // change notifications so the list always reflects the SQLite store.
+        let _inboxRefreshTimer = 0;
+        function _scheduleInboxRefresh() {
+            if (_inboxRefreshTimer) return;
+            _inboxRefreshTimer = setTimeout(() => {
+                _inboxRefreshTimer = 0;
+                if (_inboxLoadingMore) return;   // don't disturb an older-page fetch
+                if (_convNode) _convQueryNewest(); else _mainQueryNewest();
+            }, 120);
         }
 
         // Request the next older page for the main inbox (appended below current rows).
@@ -3407,9 +3417,24 @@
                 return;
             }
 
-            const html = visible.map(({ time, channel, sender, text, _pending, tsWrong, snr, hops, rssi, path, ack, _out }) => {
+            const html = visible.map(({ time, channel, sender, text, _pending, tsWrong, snr, hops, rssi, path, ack, _out, peer_key }) => {
                 // Outgoing marker: "> "/"▶" prefix (live/legacy) OR _out flag from inbox_page row.
                 const isSent = !!_out || !!(sender && (sender.startsWith("> ") || sender.startsWith("▶")));
+                // For an outgoing DM, show "me → recipient" instead of just
+                // the bare self name (or the raw "> name" placeholder), so it
+                // is clear who the message was sent TO.
+                let senderLabel = sender;
+                if (isSent && channel === "Private") {
+                    const selfName = (_deviceMap && _deviceMap.self) || "Me";
+                    let rcpt = "";
+                    if (sender && (sender.startsWith("> ") || sender.startsWith("▶ "))) {
+                        rcpt = sender.replace(/^(> |▶ ?)/, "").trim();
+                    } else if (sender && sender.startsWith("▶")) {
+                        rcpt = sender.slice(1).trim();
+                    }
+                    if (!rcpt || rcpt === selfName) rcpt = _nameForPubkey(peer_key) || rcpt;
+                    senderLabel = rcpt ? `${selfName} → ${rcpt}` : selfName;
+                }
                 const isPending = !!_pending;
                 const chanHtml = channel
                     ? `<span class="msg-chan${channel === "Private" ? " private" : ""}">${escHtml(channel)}</span>`
@@ -3464,7 +3489,7 @@
           <span class="${timeCls}"${timeAttr}>${timeLabel}${tsWrongIcon}</span>
           ${infoBtn}
           ${chanHtml}
-          ${sender ? `<span class="msg-sender">${escHtml(sender)}</span>` : ""}
+          ${senderLabel ? `<span class="msg-sender">${escHtml(senderLabel)}</span>` : ""}
           <span class="msg-text">${_renderMsgText(text)}</span>
           ${ackHtml}
           ${dmBtn}
@@ -6155,29 +6180,29 @@ Larger = more reliable routing but smaller mesh diameter.">Path hash size</label
                 const _ps = document.getElementById("inbox-page-size");
                 if (_ps) _ps.value = _inboxPageSizeRaw;
 
-                // ── Resizable inbox / contacts split ──
-                // The drag bar above the inbox moves the boundary between the
-                // contacts area and the message inbox: dragging UP grows the
-                // inbox and shrinks the contacts list by the SAME amount, so
-                // their combined height is constant and the inbox's bottom
-                // edge stays put (above the footer) — only its top moves.
-                // Both heights are persisted in localStorage.
+                // ── Resizable inbox + auto-fill contacts ──
+                // The inbox section is pinned to the bottom of the viewport
+                // (clear of the Domoticz host footer). The contacts area then
+                // auto-fills ALL the space between its top and the inbox so
+                // there is never a dead gap. The drag bar changes only the
+                // inbox height; the contacts area is recomputed to fit, so
+                // dragging up grows the inbox as far as the contacts minimum
+                // allows. Only the inbox height is persisted.
                 (() => {
                     const box  = document.getElementById("inbox-history");
                     const grip = document.getElementById("inbox-resizer");
+                    const sec  = document.getElementById("inbox-history-section");
                     const cg   = document.getElementById("contacts-grid");
                     const cl   = document.getElementById("contacts-list");
-                    if (!box || !grip) return;
-                    const LS_H  = "meshcore.inboxHeight";
-                    const LS_C  = "meshcore.contactsHeight";
-                    const _minInbox = 120;
-                    // The contacts area floor is roughly the "Connected Node"
-                    // card height, minus a 40px slack so the boundary can use
-                    // the empty space just below that card instead of stopping
-                    // short of it.
-                    const _selfSec = document.getElementById("self-section");
-                    const _minContacts = () =>
-                        Math.max(120, ((_selfSec && _selfSec.offsetHeight) || 160) - 50);
+                    if (!box || !grip || !sec) return;
+                    const LS_H = "meshcore.inboxHeight";
+                    const _minInbox    = 120;
+                    const _minContacts = 140;   // contacts can shrink to a
+                                                // small internally-scrolling
+                                                // strip so the inbox can grow
+                                                // tall (up to ~Observer card).
+                    const FOOTER_GAP   = 58;    // keep clear of host footer
+                    const INNER_GAP    = 16;    // breathing room above inbox
 
                     // The contacts container currently on screen (grid or list).
                     const _activeC = () => {
@@ -6189,10 +6214,8 @@ Larger = more reliable routing but smaller mesh diameter.">Path hash size</label
                         box.style.height = Math.max(_minInbox, Math.round(h)) + "px";
                         box.style.maxHeight = "none";
                     };
-                    // Apply a contacts height to BOTH containers so toggling the
-                    // card/list view keeps the chosen split.
                     const _setContacts = (h) => {
-                        const v = Math.max(_minContacts(), Math.round(h)) + "px";
+                        const v = Math.max(_minContacts, Math.round(h)) + "px";
                         [cg, cl].forEach(el => {
                             if (!el) return;
                             el.style.height = v;
@@ -6201,44 +6224,97 @@ Larger = more reliable routing but smaller mesh diameter.">Path hash size</label
                     };
 
                     const savedH = parseInt(localStorage.getItem(LS_H) || "0", 10);
-                    const savedC = parseInt(localStorage.getItem(LS_C) || "0", 10);
-                    if (savedH >= _minInbox)       _setInbox(savedH);
-                    if (savedC >= _minContacts())  _setContacts(savedC);
+                    if (savedH >= _minInbox) _setInbox(savedH);
 
-                    let dragging = false, startY = 0, startInbox = 0, startContacts = 0;
-                    grip.addEventListener("mousedown", (e) => {
+                    // Single layout pass: size contacts to fill the space, then
+                    // pin the inbox section bottom just above the host footer.
+                    const _layout = () => {
                         const cEl = _activeC();
                         if (!cEl) return;
+                        // Inbox section height is independent of contacts (it
+                        // is its own column-sibling: header + compose + box).
+                        sec.style.marginTop = "0px";
+                        const secH = sec.offsetHeight;
+                        // Target where the section's TOP should land so its
+                        // bottom clears the footer.
+                        const targetTop = window.innerHeight - FOOTER_GAP - secH;
+                        // Contacts container top is fixed (content above it
+                        // does not depend on its own height), so fill from
+                        // there down to the inbox.
+                        const cTop = cEl.getBoundingClientRect().top;
+                        _setContacts(Math.max(_minContacts, targetTop - cTop - INNER_GAP));
+                        // Re-measure with contacts now sized, then push the
+                        // section down so its bottom sits above the footer.
+                        sec.style.marginTop = "0px";
+                        const natTop = sec.getBoundingClientRect().top;
+                        const push = Math.max(8, Math.round(
+                            window.innerHeight - FOOTER_GAP - sec.offsetHeight - natTop));
+                        sec.style.marginTop = push + "px";
+                    };
+
+                    // Largest inbox height that still leaves the layout valid.
+                    // The inbox section sits BELOW #main-layout, whose height
+                    // is max(self-section, contacts-section). Shrinking the
+                    // contacts grid below the self-section height no longer
+                    // moves the section up — it just adds blank space (and a
+                    // page scrollbar). So the real floor for the section top
+                    // is the LOWER of the self-section bottom and the minimum
+                    // contacts extent, not the contacts minimum alone.
+                    const _selfSec = document.getElementById("self-section");
+                    const _maxInbox = () => {
+                        const cEl = _activeC();
+                        if (!cEl) return _minInbox;
+                        const chrome = sec.offsetHeight - box.getBoundingClientRect().height;
+                        const cTop   = cEl.getBoundingClientRect().top;
+                        const ssBot  = _selfSec
+                            ? _selfSec.getBoundingClientRect().bottom : 0;
+                        const floorTop = Math.max(ssBot, cTop + _minContacts) + INNER_GAP;
+                        return Math.max(_minInbox,
+                            window.innerHeight - FOOTER_GAP - floorTop - chrome);
+                    };
+
+                    let dragging = false, startY = 0, startInbox = 0;
+                    grip.addEventListener("mousedown", (e) => {
                         dragging = true;
                         startY = e.clientY;
-                        startInbox    = box.getBoundingClientRect().height;
-                        startContacts = cEl.getBoundingClientRect().height;
+                        startInbox = box.getBoundingClientRect().height;
                         document.body.classList.add("inbox-resizing");
                         e.preventDefault();
                     });
                     document.addEventListener("mousemove", (e) => {
                         if (!dragging) return;
-                        // Dragging UP (clientY decreases) grows the inbox.
-                        const d = startY - e.clientY;
-                        // Keep the sum constant: clamp so neither side goes
-                        // below its minimum. Within range the inbox bottom
-                        // stays fixed and only the boundary (its top) moves.
-                        const maxInbox = startInbox + (startContacts - _minContacts());
-                        const newInbox = Math.max(_minInbox, Math.min(maxInbox, startInbox + d));
-                        const delta    = newInbox - startInbox;
+                        const d = startY - e.clientY;             // up => grow
+                        const newInbox = Math.max(_minInbox,
+                            Math.min(_maxInbox(), startInbox + d));
                         _setInbox(newInbox);
-                        _setContacts(startContacts - delta);
+                        _layout();
                     });
                     document.addEventListener("mouseup", () => {
                         if (!dragging) return;
                         dragging = false;
                         document.body.classList.remove("inbox-resizing");
                         try {
-                            localStorage.setItem(LS_H, parseInt(box.style.height, 10) || _minInbox);
-                            const cEl = _activeC();
-                            if (cEl) localStorage.setItem(LS_C, parseInt(cEl.style.height, 10) || _minContacts());
+                            localStorage.setItem(LS_H,
+                                parseInt(box.style.height, 10) || _minInbox);
                         } catch (_) {}
+                        _layout();
                     });
+
+                    window._scheduleDock = (() => {
+                        let raf = 0;
+                        return () => {
+                            if (raf) return;
+                            raf = requestAnimationFrame(() => { raf = 0; _layout(); });
+                        };
+                    })();
+                    window.addEventListener("resize", window._scheduleDock);
+                    if (window.ResizeObserver) {
+                        const _ro = new ResizeObserver(window._scheduleDock);
+                        const _ml = document.getElementById("main-layout");
+                        _ro.observe(sec);
+                        if (_ml) _ro.observe(_ml);
+                    }
+                    window._scheduleDock();
                 })();
 
                 // Infinite-scroll: load older pages when the user scrolls to
@@ -6419,16 +6495,31 @@ Larger = more reliable routing but smaller mesh diameter.">Path hash size</label
             btn.disabled = true;
             _setComposeStatus(status, "", "⏳");
 
+            // Optimistic inbox echo immediately — the user sees their message
+            // as "sending…" the instant they press Send, before the WS
+            // round-trip completes (previously this only appeared after the
+            // cmd ack, ~1 s of an hourglass with nothing in the list).
+            const echoId = _addPendingInboxEcho(target, body);
+
             try {
                 await _pluginWS.sendCmdAndWait(sendValue);
                 input.value = "";
                 _updateCharCounter(0);
                 _clearReply();
                 _setComposeStatus(status, "ok", "✓ Sent");
-                // Optimistic inbox echo so the user doesn't wait for the next
-                // plugin heartbeat (~30s) to see their own message appear.
-                _addPendingInboxEcho(target, body);
+                // The plugin has now stored the outgoing row in the SQLite
+                // message store (cmd_result is pushed right after the insert).
+                // Re-query the current scope so the placeholder reconciles
+                // into the real stored row — which renders as a proper sent
+                // line and later picks up the delivery ✓ once the ACK lands.
+                // The single-valued inbox_value devices_delta is unreliable
+                // here: a fast reply can overwrite our own outgoing echo
+                // before the frontend ever sees it, leaving the placeholder
+                // stuck on "sending…".
+                if (_convNode) _convQueryNewest(); else _mainQueryNewest();
             } catch (e) {
+                // Send failed — drop the optimistic placeholder.
+                _removePendingInboxEcho(echoId);
                 _setComposeStatus(status, "err", e.message);
             } finally {
                 btn.disabled = false;
@@ -6524,6 +6615,19 @@ Larger = more reliable routing but smaller mesh diameter.">Path hash size</label
                     if (container) _renderInbox(container);
                 }
             }, 90000);
+            return id;
+        }
+
+        // Drop an optimistic placeholder by id (used when the send fails so
+        // the user isn't left staring at a phantom "sending…" line).
+        function _removePendingInboxEcho(id) {
+            if (!id) return;
+            const idx = _inboxHistory.findIndex(m => m._pending === id || m._settled === id);
+            if (idx < 0) return;
+            _inboxHistory.splice(idx, 1);
+            _lastRenderedInboxHtml = "";
+            const container = document.getElementById("inbox-history");
+            if (container) _renderInbox(container);
         }
 
         // ── Emoji picker ──────────────────────────────────────────────────────────
