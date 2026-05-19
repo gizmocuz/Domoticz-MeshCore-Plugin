@@ -425,7 +425,7 @@ class BasePlugin:
     # Prune at most once every N inserts (cheap amortised cost).
     _MSG_STORE_PRUNE_EVERY = 200
     # Current schema version stored in the preferences table.
-    MSG_DB_SCHEMA_VERSION = 1
+    MSG_DB_SCHEMA_VERSION = 2
 
     def _msg_store_open(self, db_path: str):
         """Open (or create) the SQLite message store at *db_path*.
@@ -527,6 +527,17 @@ class BasePlugin:
                 ver += 1
                 if ver == 1:
                     pass  # baseline — tables already created in _msg_store_open
+                elif ver == 2:
+                    # Add peer_key column — may be missing on DBs created before
+                    # the column was introduced (ALTER TABLE is a no-op if it
+                    # already exists, so fresh installs are safe too).
+                    try:
+                        self._msgdb.execute(
+                            "ALTER TABLE messages ADD COLUMN peer_key TEXT"
+                        )
+                        self._msgdb.commit()
+                    except Exception:
+                        pass  # column already present — safe to ignore
 
             self._pref_set("db_version", str(self.MSG_DB_SCHEMA_VERSION))
 
