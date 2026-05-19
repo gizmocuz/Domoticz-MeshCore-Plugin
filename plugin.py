@@ -42,6 +42,7 @@
 
 import DomoticzEx as Domoticz
 import asyncio
+import calendar
 import collections
 import copy
 import gc
@@ -163,6 +164,34 @@ SETTINGS_GRACE_S = 45
 # This is a sentinel value, NOT a real hop count.  Exclude it everywhere we
 # record or display hop counts so it never appears in hops_records or UI.
 HOPS_SENTINEL = 255
+
+# Set to True to append a timestamped trace of the message send/receive
+# round-trip to meshcore_debug.log in the plugin directory. Best-effort,
+# never raises into callers, size-capped. Off in production.
+MSG_FLOW_DEBUG = False
+_DBG_PATH = None
+_DBG_MAX_BYTES = 2 * 1024 * 1024
+
+
+def _dbg(msg: str) -> None:
+    """Append a timestamped line to meshcore_debug.log. Never raises."""
+    if not MSG_FLOW_DEBUG:
+        return
+    try:
+        global _DBG_PATH
+        if _DBG_PATH is None:
+            _DBG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                     "meshcore_debug.log")
+        try:
+            if os.path.getsize(_DBG_PATH) > _DBG_MAX_BYTES:
+                os.replace(_DBG_PATH, _DBG_PATH + ".1")
+        except OSError:
+            pass
+        ts = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
+        with open(_DBG_PATH, "a", encoding="utf-8") as fh:
+            fh.write("[" + ts + "] " + str(msg) + "\n")
+    except Exception:
+        pass
 
 
 def _bat_pct(mv: int) -> int:
@@ -412,7 +441,7 @@ class BasePlugin:
                     id        INTEGER PRIMARY KEY AUTOINCREMENT,
                     chan      TEXT    NOT NULL,
                     sender    TEXT    NOT NULL,
-                    epoch     INTEGER NOT NULL,
+                    epoch     TEXT    NOT NULL,
                     bad       INTEGER NOT NULL DEFAULT 0,
                     body      TEXT    NOT NULL,
                     hops      INTEGER,
@@ -421,7 +450,8 @@ class BasePlugin:
                     path      TEXT,
                     ack       INTEGER,
                     direction TEXT    NOT NULL DEFAULT 'in',
-                    recv_ts   INTEGER NOT NULL
+                    recv_ts   TEXT    NOT NULL,
+                    peer_key  TEXT
                 )
             """)
             con.execute("CREATE INDEX IF NOT EXISTS idx_messages_chan_id ON messages(chan, id)")
@@ -435,6 +465,13 @@ class BasePlugin:
             self._msgdb = con
             self._msgdb_insert_count = 0
             self._msg_store_migrate()
+            # Create indexes after migration so they are always present regardless
+            # of which path (fresh DB vs. future migration) created the table.
+            con.execute(
+                "CREATE INDEX IF NOT EXISTS idx_messages_peerkey"
+                " ON messages(peer_key, id)"
+            )
+            con.commit()
             Domoticz.Debug("Message store opened: " + db_path)
         except Exception as exc:
             Domoticz.Error(f"Message store open failed (non-fatal): {exc!r}")
@@ -475,10 +512,8 @@ class BasePlugin:
 
         Migration ladder — add one ``elif ver == N:`` block per future version:
 
-            ver == 1  — baseline; preferences table already created by _msg_store_open,
-                        nothing to ALTER.
-            ver == 2  — (future) example: ALTER TABLE messages ADD COLUMN foo TEXT
-            ...
+            ver == 1  — baseline; all columns (including peer_key) already in the
+                        CREATE TABLE statement in _msg_store_open; nothing to ALTER.
 
         The loop is always exercised: even for a fresh DB it runs once (0→1),
         confirming the ladder structure is live code, not a dead stub.
@@ -492,15 +527,12 @@ class BasePlugin:
                 ver += 1
                 if ver == 1:
                     pass  # baseline — tables already created in _msg_store_open
-                # elif ver == 2:
-                #     self._msgdb.execute("ALTER TABLE messages ADD COLUMN foo TEXT")
-                #     self._msgdb.commit()
 
             self._pref_set("db_version", str(self.MSG_DB_SCHEMA_VERSION))
 
             if from_ver < self.MSG_DB_SCHEMA_VERSION:
                 Domoticz.Debug(
-                    f"Message store migrated schema v{from_ver} → v{self.MSG_DB_SCHEMA_VERSION}"
+                    f"Message store migrated schema v{from_ver} -> v{self.MSG_DB_SCHEMA_VERSION}"
                 )
             else:
                 Domoticz.Debug(
@@ -509,10 +541,26 @@ class BasePlugin:
         except Exception as exc:
             Domoticz.Error(f"Message store migration failed (non-fatal): {exc!r}")
 
+    @staticmethod
+    def _norm_peer_key(pk) -> "str | None":
+        """Normalise a pubkey prefix to a stable 12-char lowercase hex string.
+
+        Rules:
+        - Strip any non-hex characters ([^0-9a-fA-F]).
+        - Lowercase.
+        - Truncate to the first 12 characters.
+        - Return None if the result is empty.
+        """
+        if not pk:
+            return None
+        cleaned = "".join(c for c in str(pk).lower() if c in "0123456789abcdef")
+        return cleaned[:12] or None
+
     def _msg_store_add(self, chan: str, sender: str, body: str, epoch: int,
                        bad: bool = False, snr=None, hops=None, rssi=None,
                        path: str = None, ack=None,
-                       direction: str = "in") -> "int | None":
+                       direction: str = "in",
+                       peer_key: str = None) -> "int | None":
         """Insert one message row and return its rowid (or None on error).
 
         Never raises — any sqlite error is caught, logged, and None is returned
@@ -520,19 +568,26 @@ class BasePlugin:
         """
         if self._msgdb is None:
             return None
-        recv_ts = int(time.time())
+        # Timestamps stored as UTC datetime TEXT ('%Y-%m-%d %H:%M:%S') so the DB
+        # is human-readable when opened directly.  Callers pass epoch as int seconds.
+        try:
+            epoch_text = time.strftime('%Y-%m-%d %H:%M:%S', time.gmtime(int(epoch)))
+        except (TypeError, ValueError, OSError):
+            epoch_text = time.strftime('%Y-%m-%d %H:%M:%S', time.gmtime())
+        recv_ts_text = time.strftime('%Y-%m-%d %H:%M:%S', time.gmtime())
         bad_int = 1 if bad else 0
+        norm_pk = self._norm_peer_key(peer_key)
         try:
             with self._msgdb_lock:
                 cur = self._msgdb.execute(
                     "INSERT INTO messages"
-                    " (chan, sender, epoch, bad, body, hops, snr, rssi, path, ack, direction, recv_ts)"
-                    " VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
-                    (chan, sender, int(epoch), bad_int, body,
-                     int(hops) if isinstance(hops, int) else None,
+                    " (chan, sender, epoch, bad, body, hops, snr, rssi, path, ack, direction, recv_ts, peer_key)"
+                    " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    (chan, sender, epoch_text, bad_int, body,
+                     int(hops) if (isinstance(hops, int) and 0 <= hops < HOPS_SENTINEL) else None,
                      float(snr) if snr is not None else None,
                      int(rssi) if rssi is not None else None,
-                     path or None, ack, direction, recv_ts),
+                     path or None, ack, direction, recv_ts_text, norm_pk),
                 )
                 rowid = cur.lastrowid
                 self._msgdb.commit()
@@ -572,14 +627,20 @@ class BasePlugin:
 
         *scope* is 'all' (no channel filter) or a specific chan value.
         *before* is an exclusive upper bound on id (for pagination); None = newest.
-        *limit* is clamped to 1..200.
+        *limit* is clamped to 1..250; a value <= 0 means "all" (no row limit —
+            returns every match for the scope/search, has_more always False).
         *search* is a case-insensitive substring matched against body and sender;
             '%' and '_' in the term are treated literally (escaped).
         """
-        limit = max(1, min(200, int(limit) if limit is not None else 50))
+        try:
+            _lim_in = int(limit) if limit is not None else 50
+        except (TypeError, ValueError):
+            _lim_in = 50
+        all_mode = _lim_in <= 0
+        limit = 0 if all_mode else max(1, min(250, _lim_in))
         search_str = str(search).strip() if search else ""
         if search and not search_str:
-            Domoticz.Debug("inbox_query: search term was whitespace-only — ignoring it")
+            Domoticz.Debug("inbox_query: search term was whitespace-only - ignoring it")
         before_int = int(before) if before is not None else None
 
         rows = []
@@ -602,8 +663,15 @@ class BasePlugin:
             params: list = []
             clauses: list = []
 
-            if scope.startswith("@"):
-                # DM-thread scope: all private messages to/from this contact.
+            if scope.startswith("@k:"):
+                # Key-based DM-thread scope: stable identity via peer_key column.
+                # Normalise the supplied key the same way as stored values.
+                dm_key = self._norm_peer_key(scope[3:])
+                clauses.append("chan='P' AND peer_key=?")
+                params.append(dm_key)
+            elif scope.startswith("@"):
+                # Name-based DM-thread scope (back-compat fallback):
+                # all private messages to/from this contact by sender name.
                 # Outgoing DMs are stored with sender "> <name>" or legacy "▶<name>"
                 # / "▶ <name>"; incoming DMs with sender "<name>".
                 dm_name = scope[1:]
@@ -617,8 +685,26 @@ class BasePlugin:
                     f"▶ {dm_name}",
                 ])
             elif scope != "all":
-                clauses.append("chan=?")
-                params.append(scope)
+                # Channel scope. A channel message is stored under the
+                # resolved channel NAME (e.g. "#test") when the name was
+                # known at receive time, or under the "C<idx>" fallback when
+                # it was not. The frontend sends whichever it has, so match
+                # BOTH forms — otherwise a chip filter shows nothing while
+                # "All" shows the same messages.
+                variants = {scope}
+                m = re.match(r"^C(\d+)$", scope)
+                if m:
+                    nm = self._channel_names.get(int(m.group(1)))
+                    if nm:
+                        variants.add(nm)
+                else:
+                    for _idx, _nm in self._channel_names.items():
+                        if _nm == scope:
+                            variants.add(f"C{_idx}")
+                vs = sorted(variants)
+                clauses.append("chan IN (%s)" % ",".join("?" for _ in vs))
+                params.extend(vs)
+                _dbg(f"_msg_store_query channel scope={scope!r} -> variants={vs}")
 
             if search_str:
                 esc = _like_escape(search_str)
@@ -631,33 +717,50 @@ class BasePlugin:
                 params.append(before_int)
 
             where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
-            fetch_limit = limit + 1
-            params.append(fetch_limit)
-
-            sql = (
-                f"SELECT id,chan,sender,epoch,bad,body,hops,snr,rssi,path,ack,direction"
-                f" FROM messages {where} ORDER BY id DESC LIMIT ?"
-            )
+            if all_mode:
+                # "all": no LIMIT — return every match; nothing left to page.
+                sql = (
+                    f"SELECT id,chan,sender,epoch,bad,body,hops,snr,rssi,path,ack,direction,peer_key"
+                    f" FROM messages {where} ORDER BY id DESC"
+                )
+            else:
+                # Fetch one extra row to detect whether an older page exists.
+                params.append(limit + 1)
+                sql = (
+                    f"SELECT id,chan,sender,epoch,bad,body,hops,snr,rssi,path,ack,direction,peer_key"
+                    f" FROM messages {where} ORDER BY id DESC LIMIT ?"
+                )
             with self._msgdb_lock:
                 cur = self._msgdb.execute(sql, params)
                 fetched = cur.fetchall()
 
-            has_more = len(fetched) > limit
-            trimmed = fetched[:limit]
+            has_more = (not all_mode) and len(fetched) > limit
+            trimmed = fetched if all_mode else fetched[:limit]
             for row in trimmed:
+                # epoch is stored as UTC TEXT; convert back to int Unix-seconds for
+                # the wire contract (frontend's _fmtEpoch and topology logic expect int).
+                raw_epoch = row[3]
+                try:
+                    epoch_int = int(calendar.timegm(time.strptime(raw_epoch, '%Y-%m-%d %H:%M:%S')))
+                except (TypeError, ValueError):
+                    # Malformed stored timestamp (shouldn't happen — the write
+                    # path validates): fall back to "now" rather than 1970 so a
+                    # stray row doesn't sort/display as ancient.
+                    epoch_int = int(time.time())
                 rows.append({
-                    "id":     row[0],
-                    "chan":   row[1],
-                    "sender": row[2],
-                    "epoch":  row[3],
-                    "bad":    bool(row[4]),
-                    "body":   row[5],
-                    "hops":   row[6],
-                    "snr":    row[7],
-                    "rssi":   row[8],
-                    "path":   row[9],
-                    "ack":    row[10],
-                    "dir":    row[11],
+                    "id":       row[0],
+                    "chan":     row[1],
+                    "sender":   row[2],
+                    "epoch":    epoch_int,
+                    "bad":      bool(row[4]),
+                    "body":     row[5],
+                    "hops":     row[6],
+                    "snr":      row[7],
+                    "rssi":     row[8],
+                    "path":     row[9],
+                    "ack":      row[10],
+                    "dir":      row[11],
+                    "peer_key": row[12],
                 })
             oldest_id = rows[-1]["id"] if rows else None
 
@@ -839,6 +942,15 @@ class BasePlugin:
         else:
             Domoticz.Status(f"MeshCore plugin started - TCP {self.host}:{self.port}")
 
+        # Proactively broadcast a snapshot so a dashboard left open across a
+        # plugin-only restart (e.g. hardware disable/enable, or an auto-
+        # reconnect) refreshes itself. The Domoticz WebSocket stays open in
+        # that case, so the page never re-sends `hello` and would otherwise
+        # show stale state until a manual reload. Broadcasting to the
+        # plugin:<key> topic reaches any still-subscribed page; if none is
+        # open the frame is simply dropped.
+        self._broadcast_snapshot("startup")
+
         self._stop_event.clear()
         t = threading.Thread(target=self._worker_main, daemon=True, name="MeshCoreWorker")
         self._worker_thread = t
@@ -969,6 +1081,26 @@ class BasePlugin:
 
     # ── WebSocket channel (F1+) ───────────────────────────────────────────────
 
+    def _broadcast_snapshot(self, reason: str):
+        """Push an unsolicited snapshot (+ deferred heard) to the topic.
+
+        Mirrors the `hello` handler but without a cmd_result/correlation id —
+        the frontend's snapshot handler resets its delta baselines and
+        re-renders on any snapshot it receives, so an open dashboard recovers
+        automatically. Never raises into the caller.
+        """
+        try:
+            snap = self._build_snapshot_payload()
+            self._push("snapshot", snap)
+            try:
+                self._push("heard", {"heard": self._build_heard_payload()})
+            except Exception as _hexc:
+                Domoticz.Debug(f"_broadcast_snapshot({reason}): deferred heard push failed: {_hexc}")
+            _dbg(f"_broadcast_snapshot({reason}): snapshot pushed")
+            Domoticz.Debug(f"_broadcast_snapshot({reason}): snapshot pushed")
+        except Exception as exc:
+            Domoticz.Debug(f"_broadcast_snapshot({reason}): snapshot build/push failed: {exc!r}")
+
     def _push(self, t: str, payload: dict):
         """Send a JSON frame to the dashboard via the plugin WebSocket channel.
 
@@ -996,8 +1128,11 @@ class BasePlugin:
             # emits non-string dict keys unquoted (invalid JSON) and renders
             # None as the literal string "None"; json.dumps produces correct
             # JSON (quoted keys, null) and bypasses that converter entirely.
+            if t in ("cmd_result", "inbox_page", "snapshot"):
+                _dbg(f"_push frame t={t!r} id={payload.get('id')!r}")
             Domoticz.WebSocketSend(json.dumps(msg, ensure_ascii=False, default=str))
         except Exception as exc:
+            _dbg(f"_push: WebSocketSend raised {exc!r} (t={t!r})")
             Domoticz.Debug(f"_push: WebSocketSend raised {exc!r}; ignoring.")
 
     def onWebSocketMessage(self, Data):
@@ -1021,6 +1156,9 @@ class BasePlugin:
         # resolve the exact promise that triggered the command rather than
         # relying on FIFO shift().
         req_id = payload.get("id")
+        if t in ("cmd", "inbox_query", "hello", "resync"):
+            _dbg(f"onWebSocketMessage IN: t={t!r} id={req_id!r} "
+                 f"cmd={payload.get('cmd')!r} scope={payload.get('scope')!r}")
         Domoticz.Debug(f"onWebSocketMessage: t={t!r} id={req_id!r}")
 
         if t == "hello":
@@ -1065,6 +1203,7 @@ class BasePlugin:
                     "id": req_id,
                 })
                 return
+            _dbg(f"cmd dispatched to worker: cmd={cmd!r} id={req_id!r}")
             Domoticz.Debug(f"WebSocket cmd: {cmd}")
             try:
                 asyncio.run_coroutine_threadsafe(
@@ -1098,7 +1237,7 @@ class BasePlugin:
                 with self._rx_log_lock:
                     self._last_pushed_device_map = None
                 self._ws_devices_dirty = True
-                Domoticz.Debug("onWebSocketMessage: resync devices — baseline cleared")
+                Domoticz.Debug("onWebSocketMessage: resync devices - baseline cleared")
 
         elif t == "inbox_query":
             # Paginated inbox query.  Run the DB lookup, build the page, push back.
@@ -1107,10 +1246,16 @@ class BasePlugin:
                 before = payload.get("before")
                 raw_lim = payload.get("limit", 50)
                 search = str(payload.get("search") or "")
+                _dbg(f"inbox_query: scope={scope!r} before={before!r} "
+                     f"limit={raw_lim!r} search={search!r} id={req_id!r}")
                 page = self._msg_store_query(scope, before=before, limit=raw_lim, search=search)
+                _dbg(f"inbox_page: scope={scope!r} rows={len(page.get('rows',[]))} "
+                     f"has_more={page.get('has_more')} oldest_id={page.get('oldest_id')} "
+                     f"id={req_id!r}")
                 page["id"] = req_id
                 self._push("inbox_page", page)
             except Exception as exc:
+                _dbg(f"inbox_query handler EXC: {exc!r}")
                 Domoticz.Error(f"inbox_query handler failed: {exc!r}")
                 self._push("inbox_page", {
                     "id":       req_id,
@@ -1342,7 +1487,7 @@ class BasePlugin:
         plugin_dir = os.path.dirname(os.path.abspath(__file__))
         template = os.path.join(plugin_dir, "meshcore.html")
         if not os.path.isfile(template):
-            Domoticz.Error("meshcore.html template not found — dashboard not installed.")
+            Domoticz.Error("meshcore.html template not found - dashboard not installed.")
             return
 
         domoticz_root = os.path.abspath(os.path.join(plugin_dir, "..", ".."))
@@ -1795,7 +1940,7 @@ class BasePlugin:
                 if restored:
                     with self._rx_log_lock:
                         self._chan_hash_to_name = restored
-                    Domoticz.Log(f"Restored {len(restored)} chan_hash→name mapping(s) from rx-log")
+                    Domoticz.Log(f"Restored {len(restored)} chan_hash->name mapping(s) from rx-log")
         except Exception as exc:
             Domoticz.Error(f"Could not load packet times from meshcore_rx_log.json: {exc}")
 
@@ -2354,6 +2499,15 @@ class BasePlugin:
                 self._self_name = name
             self._queue.put(("self_info", dict(mc.self_info)))
 
+        # Device info (fw / build / model) is a single fast query and is shown
+        # prominently on the dashboard, so fetch it FIRST — before the slower
+        # contacts list and the slot-by-slot channel-name scan — instead of
+        # making the user wait ~10 s for it.
+        try:
+            await self._refresh_device_info(mc)
+        except Exception as exc:
+            Domoticz.Debug(f"Initial device_info error: {exc}")
+
         try:
             await self._refresh_contacts(mc)
         except Exception as exc:
@@ -2370,11 +2524,6 @@ class BasePlugin:
             await self._refresh_flood_scope(mc)
         except Exception as exc:
             Domoticz.Debug(f"Initial flood scope error: {exc}")
-
-        try:
-            await self._refresh_device_info(mc)
-        except Exception as exc:
-            Domoticz.Debug(f"Initial device_info error: {exc}")
 
         # Missed-message catch-up is handled by start_auto_message_fetching()
         # above (immediate get_msg() + MESSAGES_WAITING drain loop); the
@@ -2530,9 +2679,27 @@ class BasePlugin:
         t = time.time()
         ack_code = p.get("code", "")   # 8-char hex string from the ACK frame
         matched_rec = None
+        deferred = False
         with self._rx_log_lock:
-            if ack_code and ack_code in self._pending_acks:
-                matched_rec = self._pending_acks.pop(ack_code)
+            rec = self._pending_acks.get(ack_code) if ack_code else None
+            if rec is not None:
+                if rec.get("inbox_line") or rec.get("msg_rowid") is not None:
+                    # send_result already reconciled this record (we know the
+                    # stored row / inbox line) — safe to consume and annotate.
+                    matched_rec = self._pending_acks.pop(ack_code)
+                else:
+                    # The ACK beat the send_result drain (fast multi-hop reply,
+                    # e.g. a repeater answering in ~1 s while send_result is
+                    # still queued for the next heartbeat). Don't discard the
+                    # correlation: flag it delivered and keep it so the
+                    # back-fill path emits the ack_result the moment it learns
+                    # the row id — otherwise a delivered message never shows
+                    # the "delivered" tick.
+                    rec["delivered"] = True
+                    rec["acked_at"] = t
+                    deferred = True
+        _dbg(f"_on_ack: code={ack_code!r} matched={matched_rec is not None} "
+             f"deferred={deferred} pending_codes={list(self._pending_acks.keys())}")
         if matched_rec:
             Domoticz.Debug(f"ACK matched: code={ack_code} target={matched_rec.get('target')!r}")
             self._queue.put(("ack_result", {
@@ -2755,7 +2922,7 @@ class BasePlugin:
             elif r.type == EventType.ERROR:
                 break
         if fetched:
-            Domoticz.Log(f"Fetched {fetched} pending message(s) from device — added to inbox.")
+            Domoticz.Log(f"Fetched {fetched} pending message(s) from device - added to inbox.")
         return fetched
 
     async def _poll_self_stats(self, mc):
@@ -2843,11 +3010,11 @@ class BasePlugin:
                         all_slots.setdefault(j, "")
                     break
             except asyncio.TimeoutError:
-                Domoticz.Debug(f"get_channel({idx}) timed out — assume empty")
+                Domoticz.Debug(f"get_channel({idx}) timed out - assume empty")
                 all_slots[idx] = ""
                 continue
             except Exception as exc:
-                Domoticz.Debug(f"get_channel({idx}) error: {exc} — assume empty")
+                Domoticz.Debug(f"get_channel({idx}) error: {exc} - assume empty")
                 all_slots[idx] = ""
                 continue
         # Ensure full coverage
@@ -3944,9 +4111,12 @@ class BasePlugin:
         # exactly without timing guesswork (the code is a 4-byte hash of the
         # message content that the firmware embeds in the ACK packet).
         try:
+            _dbg(f"worker send_msg -> target={target!r} body={body[:60]!r}")
             result = await asyncio.wait_for(
                 mc.commands.send_msg(contact, body), timeout=15.0
             )
+            _dbg(f"worker send_msg result: type={getattr(result,'type',None)!r} "
+                 f"target={target!r}")
             tx_busy = (
                 result is not None
                 and result.type == EventType.ERROR
@@ -3967,6 +4137,11 @@ class BasePlugin:
                             "body":     body,
                             "out_ts":   out_ts,
                         }
+                    _dbg(f"worker registered pending_ack code={ack_code} "
+                         f"target={target!r}")
+                else:
+                    _dbg(f"worker MSG_SENT but no usable expected_ack "
+                         f"(exp_ack={exp_ack!r}) target={target!r}")
             self._queue.put(("send_result", {"ok": ok, "target": target, "body": body,
                                              "result": "TX busy - try again" if tx_busy else str(result),
                 "id": req_id,
@@ -3985,11 +4160,23 @@ class BasePlugin:
             self._handle_message(item[1])
         elif kind == "advert":
             # Ambient advertisement — a hint that a node is alive even before
-            # its first message. No Domoticz device is updated here; the next
-            # contacts refresh handles status/last_advert. Advert lifetime
-            # stats are tallied from the RX_LOG ADVERT frame (the canonical,
-            # always-emitted source) — counting here too would double-count.
-            pass
+            # its first message. Lifetime advert stats are tallied from the
+            # RX_LOG ADVERT frame (the canonical source) — not counted here.
+            #
+            # If the advert is from a node we already track as a contact,
+            # bump its activity NOW so "Last Heard" reflects over-the-air
+            # adverts immediately instead of waiting for the next contacts
+            # poll. (Non-contact adverts are handled by the heard-node store.)
+            ap = item[1] or {}
+            adv_name = (ap.get("adv_name") or ap.get("name") or "").strip()
+            if adv_name and adv_name in self._node_pubkey:
+                now_ts = int(time.time())
+                self._node_last_activity[adv_name] = now_ts
+                self._node_last_advert[adv_name]   = now_ts
+                did = self._device_id_for(adv_name)
+                if did is not None:
+                    self._set(did, OFF_STATUS, 1, "On")
+                self._write_device_map()
         elif kind == "contacts":
             self._handle_contacts(item[1])
             # First contacts batch processed — bump heartbeat back to a
@@ -4086,6 +4273,9 @@ class BasePlugin:
             # !favorite, !set, ...) shouldn't appear in the inbox or count as
             # a sent mesh message.
             is_internal = isinstance(d.get("target"), str) and d["target"].startswith("!")
+            _dbg(f"send_result: ok={d.get('ok')} target={d.get('target')!r} "
+                 f"body={d.get('body','')!r} result={d.get('result','')!r} "
+                 f"id={d.get('id')!r} internal={is_internal}")
             if d["ok"]:
                 if is_internal:
                     # The verb handler already logged its own success message;
@@ -4110,32 +4300,69 @@ class BasePlugin:
                         self._set(MESH_DID, UNIT_INBOX, 0,
                                   self._inbox_line(chan_tag, f"> {me}", d['body'], out_ts))
                         # Persist outgoing channel message to SQLite store.
+                        # direction="out" carries the in/out distinction; sender is the actual author.
                         self._msg_store_add(
-                            chan=chan_tag, sender=f"> {me}", body=d['body'],
-                            epoch=out_ts, direction="out",
+                            chan=chan_tag, sender=me, body=d['body'],
+                            epoch=out_ts, direction="out", peer_key=None,
                         )
                     else:
                         sent_line = self._inbox_line("P", f"> {tgt}", d['body'], out_ts)
                         self._set(MESH_DID, UNIT_INBOX, 0, sent_line)
                         self._log_contact_dm(tgt, sent_line)
                         # Persist outgoing DM to SQLite store; capture rowid for ACK back-fill.
-                        _out_rowid = self._msg_store_add(
-                            chan="P", sender=f"> {tgt}", body=d['body'],
-                            epoch=out_ts, direction="out",
+                        # Resolve the peer's pubkey for the stable conversation key.
+                        # direction="out" carries the in/out distinction; sender is the actual author (self).
+                        _tgt_did = self._device_id_for(tgt)
+                        _tgt_pk = (
+                            _tgt_did
+                            if (_tgt_did and _tgt_did not in ("self", None) and len(_tgt_did) == 12)
+                            else self._node_did.get(tgt)
+                            or self._node_pubkey.get(tgt, "")
                         )
+                        _out_rowid = self._msg_store_add(
+                            chan="P", sender=me, body=d['body'],
+                            epoch=out_ts, direction="out",
+                            peer_key=self._norm_peer_key(_tgt_pk),
+                        )
+                        _dbg(f"send_result DM stored: tgt={tgt!r} "
+                             f"resolved_pk={self._norm_peer_key(_tgt_pk)!r} "
+                             f"rowid={_out_rowid} line={sent_line!r}")
                         # Back-fill the inbox_line, dm_name, and msg_rowid into the
                         # pending_ack record so _on_ack / timeout sweep know exactly
                         # which stored line (and DB row) to rewrite.  Match by
                         # (target, body) — the worker wrote the record just before
                         # queuing send_result, so at most one entry will match.
                         # Hold the lock only for the dict lookup.
+                        _early_ack = None
                         with self._rx_log_lock:
-                            for _rec in self._pending_acks.values():
+                            for _code, _rec in self._pending_acks.items():
                                 if _rec.get("target") == tgt and _rec.get("body") == d['body']:
                                     _rec["inbox_line"] = sent_line
                                     _rec["dm_name"]    = tgt
                                     _rec["msg_rowid"]  = _out_rowid
+                                    _dbg(f"send_result: back-filled pending_ack "
+                                         f"for tgt={tgt!r} rowid={_out_rowid}")
+                                    if _rec.get("delivered"):
+                                        # The ACK already arrived before this
+                                        # reconcile (fast reply). Consume the
+                                        # record now and emit the delivered
+                                        # result so the tick shows immediately
+                                        # instead of waiting for a timeout.
+                                        _early_ack = self._pending_acks.pop(_code)
                                     break
+                        if _early_ack is not None:
+                            _dbg(f"send_result: emitting deferred ACK for tgt={tgt!r} "
+                                 f"rowid={_out_rowid}")
+                            self._queue.put(("ack_result", {
+                                "ack_code":   None,
+                                "delivered":  True,
+                                "target":     _early_ack.get("target", ""),
+                                "body":       _early_ack.get("body", ""),
+                                "out_ts":     _early_ack.get("out_ts", 0),
+                                "inbox_line": _early_ack.get("inbox_line"),
+                                "dm_name":    _early_ack.get("dm_name"),
+                                "msg_rowid":  _early_ack.get("msg_rowid"),
+                            }))
             else:
                 Domoticz.Error(f"Send failed to '{d['target']}': {d['result']}")
             # Push result to any connected WebSocket client.  Wrapped so a
@@ -4143,6 +4370,8 @@ class BasePlugin:
             # (_push already swallows exceptions internally, but being explicit
             # here makes the intent clear and guards against future refactors).
             try:
+                _dbg(f"push cmd_result: ok={d['ok']} target={d.get('target','')!r} "
+                     f"id={d.get('id')!r}")
                 self._push("cmd_result", {
                     "ok":     d["ok"],
                     "target": d.get("target", ""),
@@ -4219,19 +4448,24 @@ class BasePlugin:
             # reliable "last seen".
             prev_advert = self._node_last_advert.get(node_name, 0)
             if last_advert and last_advert != prev_advert:
-                if prev_advert == 0:
-                    # First time we see this node this session (e.g. right
-                    # after a plugin restart). The contact-list snapshot is
-                    # NOT a fresh advert that arrived "now" — it's the node's
-                    # last-known advert from before. Estimating last-seen from
-                    # the node's own advert time (bounded to not exceed now)
-                    # keeps "Last Seen" sane across restarts and avoids
-                    # flagging every contact as clock-wrong. A node with a
-                    # genuinely future (bad) clock still clamps to now, so the
-                    # node-vs-our time gap is preserved and correctly flagged.
-                    self._node_last_activity[node_name] = min(now, last_advert)
-                else:
-                    self._node_last_activity[node_name] = now
+                # "Last Seen" must always be OUR local receive time of a real
+                # reception event — never the node's advertised clock (some
+                # nodes have a wrong/stale RTC; that belongs only to the
+                # separate skew check via _node_last_advert).
+                #
+                # prev_advert == 0 is the FIRST sighting this session (e.g.
+                # just after a restart). The contact-list snapshot is not a
+                # fresh advert that arrived "now", and the node's own advert
+                # time is untrustworthy, so we cannot honestly say when we
+                # last heard it: leave Last Seen unset until a real advert
+                # change or an incoming message gives us a local timestamp.
+                #
+                # prev_advert != 0 means the node's advert time CHANGED
+                # between two of our polls → a fresh advert genuinely arrived
+                # ~now, so record our local clock. Monotonic: never regress.
+                if prev_advert != 0:
+                    self._node_last_activity[node_name] = max(
+                        self._node_last_activity.get(node_name, 0), now)
             last_activity = self._node_last_activity.get(node_name, 0)
             advert_online = last_activity > 0 and (now - last_activity) < ONLINE_THRESHOLD_S
 
@@ -4260,8 +4494,17 @@ class BasePlugin:
                 self._set(did, OFF_HOPS, 0, str(path_len))
 
             if last_activity > 0:
+                # We have a real local-clock reception time — show it plainly.
                 ts = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(last_activity))
                 self._set(did, OFF_LASTSEEN, 0, ts)
+            elif last_advert > 0:
+                # No local reception yet (first sighting after a restart), but
+                # the contact list carries the node's OWN advertised time.
+                # Surface it in parentheses so it's unambiguous this is the
+                # node's (possibly wrong) clock, not when WE heard it.
+                node_ts = time.strftime("%Y-%m-%d %H:%M:%S",
+                                        time.localtime(last_advert))
+                self._set(did, OFF_LASTSEEN, 0, f"({node_ts})")
 
             la = self._node_last_activity.get(node_name, 0)
 
@@ -4383,6 +4626,9 @@ class BasePlugin:
         inbox_line = d.get("inbox_line")
         dm_name    = d.get("dm_name")
         delivered  = bool(d.get("delivered"))
+        _dbg(f"_handle_ack_result: delivered={delivered} target={d.get('target')!r} "
+             f"dm_name={dm_name!r} rowid={d.get('msg_rowid')} "
+             f"has_inbox_line={bool(inbox_line)}")
         if not inbox_line:
             return
         annotated = self._annotate_sent_line(inbox_line, delivered)
@@ -4416,12 +4662,19 @@ class BasePlugin:
                 del self._pending_acks[code]
         for _code, rec in expired:
             if rec.get("inbox_line"):
+                # A record can carry delivered=True if the ACK arrived before
+                # send_result reconciled it but, for some reason, the
+                # back-fill path never emitted it (defensive — normally the
+                # back-fill consumes it immediately). Honour that here so a
+                # delivered message is never wrongly annotated "(no ack)".
+                _delivered = bool(rec.get("delivered"))
                 Domoticz.Debug(
-                    f"DM ACK timeout: no ack for target={rec.get('target')!r} "
+                    f"DM ACK {'delivered (deferred)' if _delivered else 'timeout: no ack'} "
+                    f"for target={rec.get('target')!r} "
                     f"body={rec.get('body','')[:40]!r}"
                 )
                 self._queue.put(("ack_result", {
-                    "delivered":  False,
+                    "delivered":  _delivered,
                     "target":     rec.get("target", ""),
                     "body":       rec.get("body", ""),
                     "out_ts":     rec.get("out_ts", 0),
@@ -4515,12 +4768,24 @@ class BasePlugin:
                   self._inbox_line(chan_tag, display_name, text_body, msg_ts,
                                    ts_bad, snr=_msg_snr, hops=_hops,
                                    rssi=_msg_rssi, path=_msg_path))
+        _dbg(f"incoming msg: chan={chan_tag!r} sender={display_name!r} "
+             f"node={node_name!r} prefix={prefix!r} "
+             f"peer_key={self._norm_peer_key(prefix)!r} ts={msg_ts} "
+             f"body={text_body[:60]!r}")
         # Persist to SQLite message store (non-fatal).
+        # Store hops only when it's a real count: exclude sentinel (255) and negatives.
         self._msg_store_add(
             chan=chan_tag, sender=display_name, body=text_body,
             epoch=msg_ts, bad=ts_bad, snr=_msg_snr,
-            hops=_hops if isinstance(_hops, int) else None,
+            # path_len == HOPS_SENTINEL (255) means the firmware reported no
+            # path info; a message that reached us directly is 0 hops, which
+            # is more meaningful than "unknown". Real counts pass through;
+            # anything else invalid -> None.
+            hops=(0 if (isinstance(_hops, int) and _hops == HOPS_SENTINEL)
+                  else _hops if (isinstance(_hops, int) and 0 <= _hops < HOPS_SENTINEL)
+                  else None),
             rssi=_msg_rssi, path=_msg_path, ack=None, direction="in",
+            peer_key=self._norm_peer_key(prefix),
         )
 
         # Persist private (DM) messages to the sender's per-contact Messages
