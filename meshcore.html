@@ -215,6 +215,11 @@
             display: flex;
             flex-wrap: wrap;
             gap: 14px;
+            /* The grid gets an explicit (tall) height from the auto-fill
+               layout. Keep cards at their natural size and top-aligned
+               instead of stretching the few visible ones to fill it. */
+            align-items: flex-start;
+            align-content: flex-start;
         }
         #contacts-grid .node-card {
             width: 230px;
