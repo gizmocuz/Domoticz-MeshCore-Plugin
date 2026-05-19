@@ -3651,6 +3651,11 @@
             for (const name of Object.values(_channelNames)) {
                 if (name) seen.add(name);
             }
+            // "Private" (all DM threads, scope "P") is a stable, always-available
+            // filter — not a configured channel. It must not depend on whether a
+            // DM happens to be in the currently-scoped inbox rows, otherwise
+            // selecting another channel makes the Private chip disappear.
+            seen.add("Private");
             return [...seen].sort();
         }
 
