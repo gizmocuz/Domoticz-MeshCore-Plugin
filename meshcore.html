@@ -3772,7 +3772,10 @@
 
         // ── Contacts filter / sort / view state ──────────────────────────────────────
 
-        let _viewMode = "cards";      // "cards" or "list"
+        const LS_VIEW_MODE = "meshcore.viewMode";
+        let _viewMode = (() => {
+            try { const v = localStorage.getItem(LS_VIEW_MODE); return v === "list" ? "list" : "cards"; } catch (_) { return "cards"; }
+        })();
         const LS_INCLUDE_HEARD = "meshcore.includeHeard";
         let _includeHeard = (() => {
             try { return localStorage.getItem(LS_INCLUDE_HEARD) === "1"; } catch (_) { return false; }
@@ -4269,11 +4272,24 @@
             }
             if (btnCards && !btnCards._bound) {
                 btnCards._bound = true;
-                btnCards.addEventListener("click", () => { _viewMode = "cards"; btnCards.classList.add("active"); btnList.classList.remove("active"); _rerenderContacts(); });
+                // Apply persisted state to buttons on first bind
+                btnCards.classList.toggle("active", _viewMode === "cards");
+                btnList.classList.toggle("active",  _viewMode === "list");
+                btnCards.addEventListener("click", () => {
+                    _viewMode = "cards";
+                    try { localStorage.setItem(LS_VIEW_MODE, "cards"); } catch (_) {}
+                    btnCards.classList.add("active"); btnList.classList.remove("active");
+                    _rerenderContacts();
+                });
             }
             if (btnList && !btnList._bound) {
                 btnList._bound = true;
-                btnList.addEventListener("click", () => { _viewMode = "list"; btnList.classList.add("active"); btnCards.classList.remove("active"); _rerenderContacts(); });
+                btnList.addEventListener("click", () => {
+                    _viewMode = "list";
+                    try { localStorage.setItem(LS_VIEW_MODE, "list"); } catch (_) {}
+                    btnList.classList.add("active"); btnCards.classList.remove("active");
+                    _rerenderContacts();
+                });
             }
             for (const t of [1, 2, 3]) {
                 const b = document.getElementById(`view-type-${t}`);
