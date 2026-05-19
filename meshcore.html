@@ -1778,6 +1778,23 @@
         .signal-bars .bar.active.excellent { background: var(--green); }
         .signal-bars .bar.active.good      { background: var(--yellow); }
         .signal-bars .bar.active.poor      { background: var(--red); }
+
+        /* Light-mode overrides — applied when _bridgeDzTheme() sets body.dz-light
+           or when the parent theme already injects that class.  These mirror the
+           Nightglass body.dz-light palette and serve as a self-contained fallback
+           if the JS bridge cannot read the parent's computed --dz-* variables. */
+        body.dz-light {
+            --bg:      #f0f2f5;
+            --surface: #f5f6fa;
+            --border:  #c4c7d0;
+            --accent:  #2a7de1;
+            --green:   #2e8c58;
+            --red:     #d63b3b;
+            --yellow:  #c07818;
+            --text:    #1a1c24;
+            --muted:   #6b6e7f;
+            color-scheme: light;
+        }
     </style>
 </head>
 <body>
@@ -1883,6 +1900,47 @@
     </div>
 
     <script>
+    // ── Theme bridge ────────────────────────────────────────────────────────
+    // This page runs in a Domoticz iframe.  The host theme CSS (Nightglass or
+    // any other --dz-* theme) is only loaded in the parent document, not here.
+    // We copy every --dz-* variable we use from the parent's computed style so
+    // our local CSS variables (which reference --dz-* with dark fallbacks) pick
+    // up the correct theme colours in both dark and light mode.
+    (function _bridgeDzTheme() {
+        const DZ_VARS = [
+            '--dz-bg', '--dz-surface-2', '--dz-border-b',
+            '--dz-accent', '--dz-accent-light',
+            '--dz-success', '--dz-success-light', '--dz-danger', '--dz-warning',
+            '--dz-text', '--dz-text-soft', '--dz-text-muted',
+            '--dz-accent-rgb', '--dz-success-rgb', '--dz-danger-rgb',
+            '--dz-warning-rgb', '--dz-border-rgb', '--dz-overlay-rgb',
+        ];
+        function _apply() {
+            try {
+                if (window.parent === window) return; // not in an iframe
+                const parentBody = window.parent.document.body;
+                const cs = window.parent.getComputedStyle(parentBody);
+                const root = document.documentElement;
+                DZ_VARS.forEach(v => {
+                    const val = cs.getPropertyValue(v).trim();
+                    if (val) root.style.setProperty(v, val);
+                });
+                // Mirror dz-light body class so body.dz-light {} overrides work
+                document.body.classList.toggle(
+                    'dz-light', parentBody.classList.contains('dz-light')
+                );
+            } catch (_) { /* cross-origin or no parent — keep dark fallbacks */ }
+        }
+        _apply();
+        // Re-apply when the parent body class changes (theme switch at runtime)
+        try {
+            new MutationObserver(_apply).observe(
+                window.parent.document.body,
+                { attributes: true, attributeFilter: ['class', 'style'] }
+            );
+        } catch (_) {}
+    })();
+
     // Inject Leaflet dynamically — Domoticz custom-template loading does not
     // execute <script src> tags reliably across browsers, so we create the
     // tag at runtime from this inline script (which is always executed).
