@@ -400,6 +400,14 @@ class BasePlugin:
         # message, or a direct path. RSSI is only set when the frame actually
         # carried one (adverts do; message events usually don't).
         self._contact_sig: dict = {}
+        # Per-contact clock-skew sample, keyed by pubkey[:12]. Captured ONLY
+        # when we actually receive a contact's ADVERT over the air, so it is
+        # a trustworthy paired measurement: {"node_ts": <node's advertised
+        # RTC>, "our_ts": <our local receive time of THAT advert>}. The
+        # dashboard flags a wrong RTC from this pair (same approach as heard
+        # nodes) instead of the old, false-positive-prone comparison of the
+        # stale contact-list last_advert against an unrelated last_seen.
+        self._contact_clock: dict = {}
         # Pending DM delivery-ACK records.
         # Keyed by expected_ack hex code (8 hex chars from MSG_SENT payload).
         # Value: {"target": str, "body": str, "out_ts": float,
@@ -1625,6 +1633,12 @@ class BasePlugin:
                 # lookup is keyed by the prefix.
                 "pubkey":        pk_full,
                 "pubkey_prefix": pk_full[:12] if pk_full else "",
+                # Trustworthy clock-skew sample (node advert RTC vs our
+                # receive time of that advert), or None if we've not received
+                # an over-the-air advert from this contact this session.
+                "clock":         (dict(self._contact_clock.get(pk_full[:12]))
+                                  if pk_full and self._contact_clock.get(pk_full[:12])
+                                  else None),
                 # Per-contact query results (status / telemetry / neighbours)
                 # from req_* sync calls. None if never queried.
                 "query":         self._contact_query_results.get(node_name, {}),
@@ -2811,6 +2825,14 @@ class BasePlugin:
                         "path_len": p.get("path_len", -1),
                         "t": t, "source": "advert",
                     }
+                    # Trustworthy clock-skew sample: the node's advertised RTC
+                    # vs OUR receive time of this very advert (captured
+                    # together — the only valid comparison).
+                    _ats = p.get("adv_timestamp")
+                    if _ats:
+                        self._contact_clock[adv_key[:12]] = {
+                            "node_ts": int(_ats), "our_ts": int(t),
+                        }
             # Persistent heard-nodes store: ADVERTs from nodes that are NOT
             # already contacts. If it's a contact, the contacts poll tracks
             # it — skip. If already heard, just refresh last_heard + signal.

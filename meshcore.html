@@ -2626,25 +2626,26 @@
         const CLOCK_WRONG_TOLERANCE_S = 3600;   // 1 hour
 
         function _clockSkew(slots) {
-            const nodeAdv = Number(slots && slots.last_advert) || 0;
-            if (!nodeAdv) return { wrong: false, tip: "" };
-            // Our local receive time of the latest advert == last_seen.
-            let oursSec = 0;
-            const lsRaw = _slotValue(slots.last_seen);
-            if (lsRaw) {
-                const d = new Date(String(lsRaw).replace(" ", "T"));
-                if (!isNaN(d.getTime())) oursSec = Math.floor(d.getTime() / 1000);
-            }
-            if (!oursSec) oursSec = Math.floor(Date.now() / 1000);
-            if (Math.abs(nodeAdv - oursSec) <= CLOCK_WRONG_TOLERANCE_S) {
+            // Use ONLY a trustworthy paired sample: the node's advertised RTC
+            // measured against OUR receive time of that very advert (captured
+            // together by the plugin). Comparing the stale contact-list
+            // last_advert against last_seen (an unrelated, often much later
+            // message-receive time) flagged almost every contact that simply
+            // hadn't advertised in the last hour — a false positive, not a
+            // real wrong clock. No advert sample yet → unknown, not wrong.
+            const c = slots && slots.clock;
+            const nodeTs = c && Number(c.node_ts) || 0;
+            const ourTs  = c && Number(c.our_ts)  || 0;
+            if (!nodeTs || !ourTs) return { wrong: false, tip: "" };
+            if (Math.abs(nodeTs - ourTs) <= CLOCK_WRONG_TOLERANCE_S) {
                 return { wrong: false, tip: "" };
             }
             const fmt = s => s ? new Date(s * 1000).toLocaleString() : "?";
             return {
                 wrong: true,
                 tip: `Node clock looks wrong (off by >1h).\n`
-                   + `Received: ${fmt(oursSec)}\n`
-                   + `Node reported: ${fmt(nodeAdv)}`,
+                   + `Received: ${fmt(ourTs)}\n`
+                   + `Node reported: ${fmt(nodeTs)}`,
             };
         }
 
