@@ -2762,7 +2762,11 @@
                 }
             }
 
-            const settingsHtml = isSelf ? _renderNodeSettings() : "";
+            // Node Settings used to live inside the Observer card; they have
+            // been moved into the self side panel (gear button) so the card
+            // stays compact. Keep the placeholder empty so the surrounding
+            // template doesn't need to change.
+            const settingsHtml = "";
             const favHtml = isSelf ? "" : (() => {
                 const fav = _isFavorite(nodeName);
                 const icon = fav ? "fa-solid fa-star" : "fa-regular fa-star";
@@ -2833,6 +2837,9 @@
             return null;
         }
 
+        // Returns the bare settings rows. Lives inside the self side panel
+        // (opened via the gear button on the Observer card) — no collapsible
+        // wrapper any more, because the side panel is itself a settings view.
         function _renderNodeSettings() {
             const rows = _SETTINGS_DEFS.map(def => {
                 const cur = _currentSettingValue(def.key);
@@ -2844,24 +2851,10 @@
                     <div class="settings-options">${opts}</div>
                 </div>`;
             }).join("");
-            const scopeVal = (_deviceMap && _deviceMap.default_flood_scope) || "";
-            const scopeRow = `<div class="settings-row">
-                <span class="settings-label" title="Default flood scope tag — empty = global flood. e.g. #nl or #europe.">Default flood scope</span>
-                <div class="settings-text-wrap">
-                    <input id="settings-flood-scope" class="settings-text" type="text"
-                           value="${escHtml(scopeVal)}" placeholder="(global)" maxlength="31">
-                    <button class="settings-btn-save" data-key="flood_scope" title="Save flood scope">
-                        <i class="fa-solid fa-check"></i>
-                    </button>
-                </div>
-            </div>`;
-            return `<div class="node-settings">
-                <div class="node-settings-header">Node Settings<i class="fa-solid fa-chevron-down ns-chevron"></i></div>
-                <div class="node-settings-body">
-                ${rows}
-                ${scopeRow}
-                </div>
-            </div>`;
+            // Default flood scope is already rendered as its own row in the
+            // Radio section of the self side panel (id "self-flood-scope" +
+            // Apply button), so we don't repeat it here.
+            return rows;
         }
 
         async function _applyNodeSetting(key, val) {
@@ -2892,15 +2885,14 @@
         }
 
         function _initNodeSettings() {
-            const root = document.getElementById("self-grid");
-            if (!root || root._settingsBound) return;
-            root._settingsBound = true;
+            // The settings rows now live in the self side panel (#self-view),
+            // which is built each time it opens. Bind once to document.body so
+            // a single delegation handler catches clicks regardless of which
+            // panel instance produced them — no need to re-bind per re-render.
+            const root = document.body;
+            if (!root || root._mcSettingsBound) return;
+            root._mcSettingsBound = true;
             root.addEventListener("click", (ev) => {
-                const hdr = ev.target.closest(".node-settings-header");
-                if (hdr) {
-                    hdr.closest(".node-settings").classList.toggle("open");
-                    return;
-                }
                 const btn = ev.target.closest(".settings-btn");
                 if (btn) {
                     ev.preventDefault();
@@ -3820,15 +3812,24 @@
                 const slots = liveSlotsOf(name);
                 const type = Number(slots.type) || 0;
                 const online = _slotOnline(slots.status);
-                // Parse last_seen "YYYY-MM-DD HH:MM:SS" into a unix timestamp for sorting
-                let lastTs = Number(slots.last_advert) || 0;
-                if (!lastTs && slots.last_seen) {
+                // Sort timestamp = OUR local-clock "Last Heard" (slots.last_seen),
+                // never the node's advertised epoch (slots.last_advert). The
+                // node clock can be wrong/stale, so using it disagrees with the
+                // "Last Heard" column we display and produces visually
+                // out-of-order cards. A bracketed "(node: ...)" placeholder
+                // value (no local reception yet) deliberately fails to parse
+                // and sorts to the bottom of its group, matching how we
+                // present "no trustworthy time yet". last_advert is only used
+                // as a last-resort fallback when no local time exists at all.
+                let lastTs = 0;
+                if (slots.last_seen) {
                     const raw = _slotValue(slots.last_seen);
                     if (raw) {
-                        const d = new Date(raw.replace(" ", "T"));
+                        const d = new Date(String(raw).replace(" ", "T"));
                         if (!isNaN(d.getTime())) lastTs = Math.floor(d.getTime() / 1000);
                     }
                 }
+                if (!lastTs) lastTs = Number(slots.last_advert) || 0;
                 return { name, slots, type, online, lastTs, favorite: _isFavorite(name) };
             });
             // Merge heard nodes into the SAME list so they sort together with
@@ -5540,6 +5541,9 @@ Larger = more reliable routing but smaller mesh diameter.">Path hash size</label
                     <button class="self-btn" data-action="save-preset">Save current as…</button>
                     <button class="self-btn" data-action="delete-preset" title="Delete the selected preset" disabled><i class="fa-solid fa-trash"></i></button>
                 </div>
+
+                <div class="self-section">Node Settings</div>
+                ${_renderNodeSettings()}
 
                 <div class="self-section">Actions</div>
                 <div class="self-input-wrap">
