@@ -215,6 +215,11 @@
             display: flex;
             flex-wrap: wrap;
             gap: 14px;
+            /* The grid gets an explicit (tall) height from the auto-fill
+               layout. Keep cards at their natural size and top-aligned
+               instead of stretching the few visible ones to fill it. */
+            align-items: flex-start;
+            align-content: flex-start;
         }
         #contacts-grid .node-card {
             width: 230px;
@@ -1328,6 +1333,25 @@
         }
         .bar-row .bar-count { text-align: right; color: var(--text); font-variant-numeric: tabular-nums; }
 
+        /* Packet-types donut card (traffic side-panel) */
+        .payload-card {
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: var(--radius);
+            padding: 14px 16px;
+            margin-bottom: 10px;
+        }
+        .payload-card-title {
+            font-size: 0.72rem;
+            font-weight: 700;
+            text-transform: uppercase;
+            letter-spacing: 0.08em;
+            color: var(--muted);
+            margin: 0 0 8px;
+        }
+        .payload-pie-wrap { position: relative; min-height: 260px; }
+        #payload-pie { width: 100%; height: 280px; }
+
         /* 24h heatmap grid */
         .heatmap-grid {
             display: grid;
@@ -1987,6 +2011,63 @@
             document.head.appendChild(s);
         }
     })();
+    // Highcharts is bundled with Domoticz at /js/highcharts/highcharts.js. Inject
+    // it on demand the same way as Leaflet — RequireJS interferes with UMD
+    // detection, so hide window.define during the load. Idempotent; returns a
+    // shared Promise that callers await before drawing a chart.
+    let _hcPromise = null;
+    function _loadHighcharts() {
+        if (typeof Highcharts !== "undefined") return Promise.resolve();
+        if (_hcPromise) return _hcPromise;
+        _hcPromise = new Promise((resolve, reject) => {
+            const _define = window.define;
+            window.define = undefined;
+            const s = document.createElement("script");
+            s.src = "/js/highcharts/highcharts.js";
+            s.setAttribute("data-highcharts", "1");
+            s.onload  = () => { window.define = _define; resolve(); };
+            s.onerror = () => { window.define = _define; _hcPromise = null; reject(new Error("Highcharts failed to load")); };
+            document.head.appendChild(s);
+        });
+        return _hcPromise;
+    }
+    window._loadHighcharts = _loadHighcharts;
+
+    // Stable colour mapping for known payload types — keeps the same slice/legend
+    // colour across renders. Unknown types fall through to a stable hashed pick
+    // from a small palette so a new firmware type stays visually identifiable.
+    const _PAYLOAD_COLORS = {
+        ADVERT:    "#8b5cf6",   // purple
+        ANON_REQ:  "#ec4899",   // hot pink (distinct from ADVERT)
+        REQ:       "#facc15",   // amber
+        REQUEST:   "#facc15",
+        RESP:      "#fb923c",   // orange
+        RESPONSE:  "#fb923c",   // firmware variant
+        GRP_TXT:   "#06b6d4",   // cyan
+        GRP_DATA:  "#f472b6",   // pink (distinct from GRP_TXT)
+        TXT_MSG:   "#ef4444",   // red
+        TEXT_MSG:  "#ef4444",
+        PATH:      "#34d399",   // mint green
+        TRACE:     "#65a30d",   // dark lime (distinct from PATH)
+        ACK:       "#94a3b8",   // slate
+        "TYPE_":   "#fde047",   // pale yellow (distinct from REQ amber)
+        TYPE_11:   "#38bdf8",   // sky blue
+    };
+    // Colours used ONLY for unknown firmware type names (deliberately avoids
+    // hues that are already assigned above so a new type can never visually
+    // collide with a mapped one).
+    const _PAYLOAD_FALLBACK_PALETTE = [
+        "#6366f1", "#14b8a6", "#f59e0b", "#0ea5e9",
+        "#a855f7", "#22c55e", "#d97706", "#dc2626",
+    ];
+    function _payloadColor(name) {
+        if (_PAYLOAD_COLORS[name]) return _PAYLOAD_COLORS[name];
+        let h = 0;
+        for (let i = 0; i < name.length; i++) h = (h * 31 + name.charCodeAt(i)) >>> 0;
+        return _PAYLOAD_FALLBACK_PALETTE[h % _PAYLOAD_FALLBACK_PALETTE.length];
+    }
+    let _payloadPieChart = null;
+
     (function () {
         // Metrics shown for the self (connected) node — in display order.
         // "key" matches the property names in meshcore_devices.json.
@@ -2621,25 +2702,26 @@
         const CLOCK_WRONG_TOLERANCE_S = 3600;   // 1 hour
 
         function _clockSkew(slots) {
-            const nodeAdv = Number(slots && slots.last_advert) || 0;
-            if (!nodeAdv) return { wrong: false, tip: "" };
-            // Our local receive time of the latest advert == last_seen.
-            let oursSec = 0;
-            const lsRaw = _slotValue(slots.last_seen);
-            if (lsRaw) {
-                const d = new Date(String(lsRaw).replace(" ", "T"));
-                if (!isNaN(d.getTime())) oursSec = Math.floor(d.getTime() / 1000);
-            }
-            if (!oursSec) oursSec = Math.floor(Date.now() / 1000);
-            if (Math.abs(nodeAdv - oursSec) <= CLOCK_WRONG_TOLERANCE_S) {
+            // Use ONLY a trustworthy paired sample: the node's advertised RTC
+            // measured against OUR receive time of that very advert (captured
+            // together by the plugin). Comparing the stale contact-list
+            // last_advert against last_seen (an unrelated, often much later
+            // message-receive time) flagged almost every contact that simply
+            // hadn't advertised in the last hour — a false positive, not a
+            // real wrong clock. No advert sample yet → unknown, not wrong.
+            const c = slots && slots.clock;
+            const nodeTs = c && Number(c.node_ts) || 0;
+            const ourTs  = c && Number(c.our_ts)  || 0;
+            if (!nodeTs || !ourTs) return { wrong: false, tip: "" };
+            if (Math.abs(nodeTs - ourTs) <= CLOCK_WRONG_TOLERANCE_S) {
                 return { wrong: false, tip: "" };
             }
             const fmt = s => s ? new Date(s * 1000).toLocaleString() : "?";
             return {
                 wrong: true,
                 tip: `Node clock looks wrong (off by >1h).\n`
-                   + `Received: ${fmt(oursSec)}\n`
-                   + `Node reported: ${fmt(nodeAdv)}`,
+                   + `Received: ${fmt(ourTs)}\n`
+                   + `Node reported: ${fmt(nodeTs)}`,
             };
         }
 
@@ -2756,7 +2838,11 @@
                 }
             }
 
-            const settingsHtml = isSelf ? _renderNodeSettings() : "";
+            // Node Settings used to live inside the Observer card; they have
+            // been moved into the self side panel (gear button) so the card
+            // stays compact. Keep the placeholder empty so the surrounding
+            // template doesn't need to change.
+            const settingsHtml = "";
             const favHtml = isSelf ? "" : (() => {
                 const fav = _isFavorite(nodeName);
                 const icon = fav ? "fa-solid fa-star" : "fa-regular fa-star";
@@ -2827,6 +2913,9 @@
             return null;
         }
 
+        // Returns the bare settings rows. Lives inside the self side panel
+        // (opened via the gear button on the Observer card) — no collapsible
+        // wrapper any more, because the side panel is itself a settings view.
         function _renderNodeSettings() {
             const rows = _SETTINGS_DEFS.map(def => {
                 const cur = _currentSettingValue(def.key);
@@ -2838,24 +2927,10 @@
                     <div class="settings-options">${opts}</div>
                 </div>`;
             }).join("");
-            const scopeVal = (_deviceMap && _deviceMap.default_flood_scope) || "";
-            const scopeRow = `<div class="settings-row">
-                <span class="settings-label" title="Default flood scope tag — empty = global flood. e.g. #nl or #europe.">Default flood scope</span>
-                <div class="settings-text-wrap">
-                    <input id="settings-flood-scope" class="settings-text" type="text"
-                           value="${escHtml(scopeVal)}" placeholder="(global)" maxlength="31">
-                    <button class="settings-btn-save" data-key="flood_scope" title="Save flood scope">
-                        <i class="fa-solid fa-check"></i>
-                    </button>
-                </div>
-            </div>`;
-            return `<div class="node-settings">
-                <div class="node-settings-header">Node Settings<i class="fa-solid fa-chevron-down ns-chevron"></i></div>
-                <div class="node-settings-body">
-                ${rows}
-                ${scopeRow}
-                </div>
-            </div>`;
+            // Default flood scope is already rendered as its own row in the
+            // Radio section of the self side panel (id "self-flood-scope" +
+            // Apply button), so we don't repeat it here.
+            return rows;
         }
 
         async function _applyNodeSetting(key, val) {
@@ -2886,15 +2961,14 @@
         }
 
         function _initNodeSettings() {
-            const root = document.getElementById("self-grid");
-            if (!root || root._settingsBound) return;
-            root._settingsBound = true;
+            // The settings rows now live in the self side panel (#self-view),
+            // which is built each time it opens. Bind once to document.body so
+            // a single delegation handler catches clicks regardless of which
+            // panel instance produced them — no need to re-bind per re-render.
+            const root = document.body;
+            if (!root || root._mcSettingsBound) return;
+            root._mcSettingsBound = true;
             root.addEventListener("click", (ev) => {
-                const hdr = ev.target.closest(".node-settings-header");
-                if (hdr) {
-                    hdr.closest(".node-settings").classList.toggle("open");
-                    return;
-                }
                 const btn = ev.target.closest(".settings-btn");
                 if (btn) {
                     ev.preventDefault();
@@ -3482,11 +3556,19 @@
             // rows that may bypass the server are optimistic live-prepend entries
             // (_pending/_snapshot) — those are filtered inline below.
             const visible = (_convNode || _inboxLoaded) ? _inboxHistory.filter(m => {
-                // Server-paged rows: always pass — the server already applied scope+search.
-                // Only apply client-side filters to optimistic/snapshot rows that
-                // arrived via the live-prepend path and were NOT from the server.
+                // The selected channel chip is a HARD filter in the main inbox:
+                // never show another channel's messages while a chip is active,
+                // no matter how the row entered the list (server page, snapshot
+                // reseed, reconnect requery, optimistic echo). This is a safe,
+                // idempotent guard for correctly-scoped server rows and the
+                // backstop that keeps a stray cross-channel row from leaking
+                // in. Not applied in conversation mode (a stale chip must not
+                // hide the pinned DM thread).
+                if (!_convNode && _inboxChanFilter && m.channel !== _inboxChanFilter) return false;
+                // Server-paged rows already had scope+search applied — only
+                // re-apply the search needle to client-side optimistic/snapshot
+                // rows that bypassed the server.
                 if (!m._pending && !m._settled && !m._snapshot) return true;
-                if (_inboxChanFilter && m.channel !== _inboxChanFilter) return false;
                 if (needle && !(m.sender || "").toLowerCase().includes(needle)
                     && !(m.text || "").toLowerCase().includes(needle)) return false;
                 return true;
@@ -3637,6 +3719,11 @@
             for (const name of Object.values(_channelNames)) {
                 if (name) seen.add(name);
             }
+            // "Private" (all DM threads, scope "P") is a stable, always-available
+            // filter — not a configured channel. It must not depend on whether a
+            // DM happens to be in the currently-scoped inbox rows, otherwise
+            // selecting another channel makes the Private chip disappear.
+            seen.add("Private");
             return [...seen].sort();
         }
 
@@ -3801,15 +3888,24 @@
                 const slots = liveSlotsOf(name);
                 const type = Number(slots.type) || 0;
                 const online = _slotOnline(slots.status);
-                // Parse last_seen "YYYY-MM-DD HH:MM:SS" into a unix timestamp for sorting
-                let lastTs = Number(slots.last_advert) || 0;
-                if (!lastTs && slots.last_seen) {
+                // Sort timestamp = OUR local-clock "Last Heard" (slots.last_seen),
+                // never the node's advertised epoch (slots.last_advert). The
+                // node clock can be wrong/stale, so using it disagrees with the
+                // "Last Heard" column we display and produces visually
+                // out-of-order cards. A bracketed "(node: ...)" placeholder
+                // value (no local reception yet) deliberately fails to parse
+                // and sorts to the bottom of its group, matching how we
+                // present "no trustworthy time yet". last_advert is only used
+                // as a last-resort fallback when no local time exists at all.
+                let lastTs = 0;
+                if (slots.last_seen) {
                     const raw = _slotValue(slots.last_seen);
                     if (raw) {
-                        const d = new Date(raw.replace(" ", "T"));
+                        const d = new Date(String(raw).replace(" ", "T"));
                         if (!isNaN(d.getTime())) lastTs = Math.floor(d.getTime() / 1000);
                     }
                 }
+                if (!lastTs) lastTs = Number(slots.last_advert) || 0;
                 return { name, slots, type, online, lastTs, favorite: _isFavorite(name) };
             });
             // Merge heard nodes into the SAME list so they sort together with
@@ -4839,20 +4935,118 @@
             const pairs = Object.entries(counts).sort((a, b) => b[1] - a[1]);
             if (!pairs.length) {
                 view.innerHTML = `<div style="color:var(--muted)">No packets seen yet.</div>`;
+                if (_payloadPieChart) { try { _payloadPieChart.destroy(); } catch (_) {} _payloadPieChart = null; }
                 return;
             }
+            const total = pairs.reduce((s, [, n]) => s + n, 0);
             const max = Math.max(...pairs.map(p => p[1]));
             const head = `<div class="bar-row" style="color:var(--accent);font-weight:600;text-transform:uppercase;font-size:0.65rem;letter-spacing:0.05em;border-bottom:1px solid var(--accent);padding-bottom:4px">
                 <span>Payload type</span><span></span><span style="text-align:right">Count</span>
             </div>`;
-            view.innerHTML = head + pairs.map(([name, n]) => {
+            const bars = pairs.map(([name, n]) => {
                 const pct = max ? Math.round(100 * n / max) : 0;
                 return `<div class="bar-row">
-                    <span>${escHtml(name)}</span>
-                    <div class="bar-bar"><span style="width:${pct}%"></span></div>
+                    <span style="display:inline-flex;align-items:center;gap:6px"><span style="width:8px;height:8px;border-radius:2px;background:${_payloadColor(name)};display:inline-block"></span>${escHtml(name)}</span>
+                    <div class="bar-bar"><span style="width:${pct}%;background:${_payloadColor(name)}"></span></div>
                     <span class="bar-count">${n}</span>
                 </div>`;
             }).join("");
+            view.innerHTML = `
+                <div class="payload-card">
+                    <div class="payload-card-title">Packet Types</div>
+                    <div class="payload-pie-wrap"><div id="payload-pie"></div></div>
+                </div>
+                ${head}
+                ${bars}
+            `;
+            // Render the donut chart once Highcharts is available. The bar list
+            // above stays usable even if Highcharts fails to load.
+            _loadHighcharts().then(() => {
+                if (!_isOpen("traffic")) return;
+                const el = document.getElementById("payload-pie");
+                if (!el) return;
+                if (_payloadPieChart) {
+                    try { _payloadPieChart.destroy(); } catch (_) {}
+                    _payloadPieChart = null;
+                }
+                const _txt = (getComputedStyle(document.body).getPropertyValue("--text") || "#fff").trim() || "#fff";
+                const _muted = (getComputedStyle(document.body).getPropertyValue("--muted") || "#888").trim() || "#888";
+                const _bg = (getComputedStyle(document.body).getPropertyValue("--bg") || "#111").trim() || "#111";
+                _payloadPieChart = Highcharts.chart(el, {
+                    chart: {
+                        type: "pie",
+                        backgroundColor: "transparent",
+                        height: 280,
+                        spacing: [4, 4, 4, 4],
+                        events: {
+                            render() {
+                                // Place "<total> / pkts" centered in the donut
+                                // hole, recomputed on every redraw. Two
+                                // separate SVG text nodes (not tspans inside a
+                                // useHTML element, which the browser rendered
+                                // inline as "48pkts").
+                                const ser = this.series[0];
+                                if (!ser || !ser.center) return;
+                                const cx = ser.center[0] + this.plotLeft;
+                                const cy = ser.center[1] + this.plotTop;
+                                const t = ser.points.reduce((s, p) => s + (p.y || 0), 0);
+                                if (this._centerNum) { try { this._centerNum.destroy(); } catch (_) {} }
+                                if (this._centerLbl) { try { this._centerLbl.destroy(); } catch (_) {} }
+                                // The number sits just above the geometric
+                                // centre; the "pkts" label just below. dominant
+                                // -baseline centres each line vertically on its
+                                // own y, so the visual centre of the pair
+                                // matches the hole's centre.
+                                this._centerNum = this.renderer
+                                    .text(t.toLocaleString(), cx, cy - 4)
+                                    .attr({ "text-anchor": "middle", zIndex: 5 })
+                                    .css({ color: _txt, fontSize: "1.4rem", fontWeight: "700" })
+                                    .add();
+                                this._centerLbl = this.renderer
+                                    .text("pkts", cx, cy + 16)
+                                    .attr({ "text-anchor": "middle", zIndex: 5 })
+                                    .css({ color: _muted, fontSize: "0.72rem" })
+                                    .add();
+                            },
+                        },
+                    },
+                    title: { text: "" },
+                    credits: { enabled: false },
+                    tooltip: { pointFormat: "<b>{point.y}</b> ({point.percentage:.1f}%)" },
+                    legend: {
+                        enabled: true,
+                        layout: "vertical",
+                        align: "right",
+                        verticalAlign: "middle",
+                        itemStyle: { color: _txt, fontWeight: "500", fontSize: "0.78rem" },
+                        itemHoverStyle: { color: _txt },
+                        symbolHeight: 10,
+                        symbolRadius: 2,
+                        labelFormatter: function () { return `${this.name} (${this.y})`; },
+                    },
+                    plotOptions: {
+                        pie: {
+                            innerSize: "60%",
+                            borderWidth: 1,
+                            borderColor: _bg,
+                            dataLabels: { enabled: false },
+                            showInLegend: true,
+                        },
+                    },
+                    series: [{
+                        name: "Packets",
+                        data: pairs.map(([name, y]) => ({ name, y, color: _payloadColor(name) })),
+                    }],
+                    responsive: {
+                        rules: [{
+                            condition: { maxWidth: 440 },
+                            chartOptions: {
+                                legend: { layout: "horizontal", align: "center", verticalAlign: "bottom" },
+                            },
+                        }],
+                    },
+                });
+            }).catch(() => { /* highcharts unavailable — bar list still shown */ });
         }
 
         function _renderChannelsIfOpen() {
@@ -5521,6 +5715,9 @@ Larger = more reliable routing but smaller mesh diameter.">Path hash size</label
                     <button class="self-btn" data-action="save-preset">Save current as…</button>
                     <button class="self-btn" data-action="delete-preset" title="Delete the selected preset" disabled><i class="fa-solid fa-trash"></i></button>
                 </div>
+
+                <div class="self-section">Node Settings</div>
+                ${_renderNodeSettings()}
 
                 <div class="self-section">Actions</div>
                 <div class="self-input-wrap">
