@@ -1333,6 +1333,25 @@
         }
         .bar-row .bar-count { text-align: right; color: var(--text); font-variant-numeric: tabular-nums; }
 
+        /* Packet-types donut card (traffic side-panel) */
+        .payload-card {
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: var(--radius);
+            padding: 14px 16px;
+            margin-bottom: 10px;
+        }
+        .payload-card-title {
+            font-size: 0.72rem;
+            font-weight: 700;
+            text-transform: uppercase;
+            letter-spacing: 0.08em;
+            color: var(--muted);
+            margin: 0 0 8px;
+        }
+        .payload-pie-wrap { position: relative; min-height: 260px; }
+        #payload-pie { width: 100%; height: 280px; }
+
         /* 24h heatmap grid */
         .heatmap-grid {
             display: grid;
@@ -1992,6 +2011,63 @@
             document.head.appendChild(s);
         }
     })();
+    // Highcharts is bundled with Domoticz at /js/highcharts/highcharts.js. Inject
+    // it on demand the same way as Leaflet — RequireJS interferes with UMD
+    // detection, so hide window.define during the load. Idempotent; returns a
+    // shared Promise that callers await before drawing a chart.
+    let _hcPromise = null;
+    function _loadHighcharts() {
+        if (typeof Highcharts !== "undefined") return Promise.resolve();
+        if (_hcPromise) return _hcPromise;
+        _hcPromise = new Promise((resolve, reject) => {
+            const _define = window.define;
+            window.define = undefined;
+            const s = document.createElement("script");
+            s.src = "/js/highcharts/highcharts.js";
+            s.setAttribute("data-highcharts", "1");
+            s.onload  = () => { window.define = _define; resolve(); };
+            s.onerror = () => { window.define = _define; _hcPromise = null; reject(new Error("Highcharts failed to load")); };
+            document.head.appendChild(s);
+        });
+        return _hcPromise;
+    }
+    window._loadHighcharts = _loadHighcharts;
+
+    // Stable colour mapping for known payload types — keeps the same slice/legend
+    // colour across renders. Unknown types fall through to a stable hashed pick
+    // from a small palette so a new firmware type stays visually identifiable.
+    const _PAYLOAD_COLORS = {
+        ADVERT:    "#8b5cf6",   // purple
+        ANON_REQ:  "#ec4899",   // hot pink (distinct from ADVERT)
+        REQ:       "#facc15",   // amber
+        REQUEST:   "#facc15",
+        RESP:      "#fb923c",   // orange
+        RESPONSE:  "#fb923c",   // firmware variant
+        GRP_TXT:   "#06b6d4",   // cyan
+        GRP_DATA:  "#f472b6",   // pink (distinct from GRP_TXT)
+        TXT_MSG:   "#ef4444",   // red
+        TEXT_MSG:  "#ef4444",
+        PATH:      "#34d399",   // mint green
+        TRACE:     "#65a30d",   // dark lime (distinct from PATH)
+        ACK:       "#94a3b8",   // slate
+        "TYPE_":   "#fde047",   // pale yellow (distinct from REQ amber)
+        TYPE_11:   "#38bdf8",   // sky blue
+    };
+    // Colours used ONLY for unknown firmware type names (deliberately avoids
+    // hues that are already assigned above so a new type can never visually
+    // collide with a mapped one).
+    const _PAYLOAD_FALLBACK_PALETTE = [
+        "#6366f1", "#14b8a6", "#f59e0b", "#0ea5e9",
+        "#a855f7", "#22c55e", "#d97706", "#dc2626",
+    ];
+    function _payloadColor(name) {
+        if (_PAYLOAD_COLORS[name]) return _PAYLOAD_COLORS[name];
+        let h = 0;
+        for (let i = 0; i < name.length; i++) h = (h * 31 + name.charCodeAt(i)) >>> 0;
+        return _PAYLOAD_FALLBACK_PALETTE[h % _PAYLOAD_FALLBACK_PALETTE.length];
+    }
+    let _payloadPieChart = null;
+
     (function () {
         // Metrics shown for the self (connected) node — in display order.
         // "key" matches the property names in meshcore_devices.json.
@@ -4859,20 +4935,118 @@
             const pairs = Object.entries(counts).sort((a, b) => b[1] - a[1]);
             if (!pairs.length) {
                 view.innerHTML = `<div style="color:var(--muted)">No packets seen yet.</div>`;
+                if (_payloadPieChart) { try { _payloadPieChart.destroy(); } catch (_) {} _payloadPieChart = null; }
                 return;
             }
+            const total = pairs.reduce((s, [, n]) => s + n, 0);
             const max = Math.max(...pairs.map(p => p[1]));
             const head = `<div class="bar-row" style="color:var(--accent);font-weight:600;text-transform:uppercase;font-size:0.65rem;letter-spacing:0.05em;border-bottom:1px solid var(--accent);padding-bottom:4px">
                 <span>Payload type</span><span></span><span style="text-align:right">Count</span>
             </div>`;
-            view.innerHTML = head + pairs.map(([name, n]) => {
+            const bars = pairs.map(([name, n]) => {
                 const pct = max ? Math.round(100 * n / max) : 0;
                 return `<div class="bar-row">
-                    <span>${escHtml(name)}</span>
-                    <div class="bar-bar"><span style="width:${pct}%"></span></div>
+                    <span style="display:inline-flex;align-items:center;gap:6px"><span style="width:8px;height:8px;border-radius:2px;background:${_payloadColor(name)};display:inline-block"></span>${escHtml(name)}</span>
+                    <div class="bar-bar"><span style="width:${pct}%;background:${_payloadColor(name)}"></span></div>
                     <span class="bar-count">${n}</span>
                 </div>`;
             }).join("");
+            view.innerHTML = `
+                <div class="payload-card">
+                    <div class="payload-card-title">Packet Types</div>
+                    <div class="payload-pie-wrap"><div id="payload-pie"></div></div>
+                </div>
+                ${head}
+                ${bars}
+            `;
+            // Render the donut chart once Highcharts is available. The bar list
+            // above stays usable even if Highcharts fails to load.
+            _loadHighcharts().then(() => {
+                if (!_isOpen("traffic")) return;
+                const el = document.getElementById("payload-pie");
+                if (!el) return;
+                if (_payloadPieChart) {
+                    try { _payloadPieChart.destroy(); } catch (_) {}
+                    _payloadPieChart = null;
+                }
+                const _txt = (getComputedStyle(document.body).getPropertyValue("--text") || "#fff").trim() || "#fff";
+                const _muted = (getComputedStyle(document.body).getPropertyValue("--muted") || "#888").trim() || "#888";
+                const _bg = (getComputedStyle(document.body).getPropertyValue("--bg") || "#111").trim() || "#111";
+                _payloadPieChart = Highcharts.chart(el, {
+                    chart: {
+                        type: "pie",
+                        backgroundColor: "transparent",
+                        height: 280,
+                        spacing: [4, 4, 4, 4],
+                        events: {
+                            render() {
+                                // Place "<total> / pkts" centered in the donut
+                                // hole, recomputed on every redraw. Two
+                                // separate SVG text nodes (not tspans inside a
+                                // useHTML element, which the browser rendered
+                                // inline as "48pkts").
+                                const ser = this.series[0];
+                                if (!ser || !ser.center) return;
+                                const cx = ser.center[0] + this.plotLeft;
+                                const cy = ser.center[1] + this.plotTop;
+                                const t = ser.points.reduce((s, p) => s + (p.y || 0), 0);
+                                if (this._centerNum) { try { this._centerNum.destroy(); } catch (_) {} }
+                                if (this._centerLbl) { try { this._centerLbl.destroy(); } catch (_) {} }
+                                // The number sits just above the geometric
+                                // centre; the "pkts" label just below. dominant
+                                // -baseline centres each line vertically on its
+                                // own y, so the visual centre of the pair
+                                // matches the hole's centre.
+                                this._centerNum = this.renderer
+                                    .text(t.toLocaleString(), cx, cy - 4)
+                                    .attr({ "text-anchor": "middle", zIndex: 5 })
+                                    .css({ color: _txt, fontSize: "1.4rem", fontWeight: "700" })
+                                    .add();
+                                this._centerLbl = this.renderer
+                                    .text("pkts", cx, cy + 16)
+                                    .attr({ "text-anchor": "middle", zIndex: 5 })
+                                    .css({ color: _muted, fontSize: "0.72rem" })
+                                    .add();
+                            },
+                        },
+                    },
+                    title: { text: "" },
+                    credits: { enabled: false },
+                    tooltip: { pointFormat: "<b>{point.y}</b> ({point.percentage:.1f}%)" },
+                    legend: {
+                        enabled: true,
+                        layout: "vertical",
+                        align: "right",
+                        verticalAlign: "middle",
+                        itemStyle: { color: _txt, fontWeight: "500", fontSize: "0.78rem" },
+                        itemHoverStyle: { color: _txt },
+                        symbolHeight: 10,
+                        symbolRadius: 2,
+                        labelFormatter: function () { return `${this.name} (${this.y})`; },
+                    },
+                    plotOptions: {
+                        pie: {
+                            innerSize: "60%",
+                            borderWidth: 1,
+                            borderColor: _bg,
+                            dataLabels: { enabled: false },
+                            showInLegend: true,
+                        },
+                    },
+                    series: [{
+                        name: "Packets",
+                        data: pairs.map(([name, y]) => ({ name, y, color: _payloadColor(name) })),
+                    }],
+                    responsive: {
+                        rules: [{
+                            condition: { maxWidth: 440 },
+                            chartOptions: {
+                                legend: { layout: "horizontal", align: "center", verticalAlign: "bottom" },
+                            },
+                        }],
+                    },
+                });
+            }).catch(() => { /* highcharts unavailable — bar list still shown */ });
         }
 
         function _renderChannelsIfOpen() {
