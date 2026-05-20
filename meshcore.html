@@ -381,6 +381,148 @@
             position: absolute;
             top: 0; left: 0; right: 0; bottom: 0;
         }
+
+        /* ── Topology body layout (map on top + radar below) ─────────────── */
+        #map-panel-body.topo-layout {
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+        }
+        .topo-map-wrap {
+            flex: 1 1 auto;
+            min-height: 200px;
+            position: relative;
+        }
+        .topo-map-wrap #map-canvas {
+            position: absolute;
+            top: 0; left: 0; right: 0; bottom: 0;
+        }
+        .topo-radar-wrap {
+            flex: 0 0 auto;
+            height: 320px;
+            border-top: 1px solid var(--border);
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+        }
+        .topo-radar-hdr {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            padding: 6px 10px;
+            border-bottom: 1px solid var(--border);
+            flex-wrap: wrap;
+            flex-shrink: 0;
+        }
+        .topo-radar-title {
+            font-size: 0.65rem;
+            text-transform: uppercase;
+            letter-spacing: 0.08em;
+            color: var(--muted);
+            margin-right: auto;
+        }
+        .topo-radar-seg {
+            display: flex;
+            border: 1px solid var(--border);
+            border-radius: 4px;
+            overflow: hidden;
+        }
+        .topo-radar-seg button {
+            background: transparent;
+            border: none;
+            color: var(--muted);
+            font-size: 0.7rem;
+            padding: 2px 8px;
+            cursor: pointer;
+            transition: background 0.1s, color 0.1s;
+        }
+        .topo-radar-seg button:not(:last-child) { border-right: 1px solid var(--border); }
+        .topo-radar-seg button:hover { background: var(--border); color: var(--text); }
+        .topo-radar-seg button.active { background: var(--accent); color: #fff; }
+        .topo-radar-body {
+            flex: 1;
+            display: flex;
+            overflow: hidden;
+            min-height: 0;
+        }
+        #topo-radar-chart {
+            flex: 0 0 58%;
+            min-height: 0;
+            position: relative;
+        }
+        #topo-radar-list {
+            flex: 1 1 0;
+            overflow-y: auto;
+            padding: 4px 6px;
+            font-size: 0.72rem;
+            display: flex;
+            flex-direction: column;
+            gap: 2px;
+        }
+        .topo-radar-row {
+            display: flex;
+            align-items: center;
+            gap: 5px;
+            padding: 3px 4px;
+            border-radius: 4px;
+            cursor: pointer;
+            transition: background 0.1s;
+        }
+        .topo-radar-row:hover { background: var(--border); }
+        .topo-radar-row.offline { opacity: 0.65; }
+        .topo-radar-row.offline .topo-rank { box-shadow: inset 0 0 0 1px rgba(255,255,255,0.15); }
+        .topo-rank {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            width: 18px;
+            height: 18px;
+            border-radius: 50%;
+            font-size: 0.62rem;
+            font-weight: 700;
+            flex-shrink: 0;
+            color: #fff;
+        }
+        .topo-rname {
+            flex: 1;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            color: var(--text);
+        }
+        .topo-rname.offline { color: var(--muted); }
+        .topo-rval {
+            color: var(--muted);
+            white-space: nowrap;
+            font-variant-numeric: tabular-nums;
+        }
+        .topo-rbearing {
+            display: inline-block;
+            width: 12px;
+            text-align: center;
+            flex-shrink: 0;
+        }
+        .topo-rrssi {
+            color: var(--muted);
+            white-space: nowrap;
+            font-variant-numeric: tabular-nums;
+        }
+        .topo-radar-empty {
+            flex: 1;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: var(--muted);
+            font-size: 0.8rem;
+            text-align: center;
+            padding: 16px;
+            line-height: 1.5;
+        }
+        @media (max-width: 520px) {
+            .topo-radar-hdr { row-gap: 4px; }
+            .topo-radar-title { flex: 0 0 100%; margin-right: 0; order: -1; }
+        }
+
         #map-panel-footer {
             padding: 10px 14px;
             border-top: 1px solid var(--border);
@@ -417,6 +559,100 @@
             border: 2px solid #fff;
             transform: rotate(-45deg);
             box-shadow: 0 2px 6px rgba(0,0,0,0.5);
+        }
+        /* Self marker: slightly larger + accent glow ring */
+        .mc-pin-inner.self {
+            width: 26px;
+            height: 26px;
+            box-shadow: 0 0 0 2px var(--accent), 0 2px 6px rgba(0,0,0,0.5);
+        }
+
+        /* ── Topology map toolbar ─────────────────────────────────────────── */
+        /* Sits as its own row above the Leaflet canvas (no longer floats on
+           top of the map), so it never overlaps the zoom controls or the
+           map tiles. */
+        .topo-map-tool-bar {
+            flex: 0 0 auto;
+            padding: 6px 10px;
+            background: var(--surface);
+            border-bottom: 1px solid var(--border);
+            display: flex;
+            flex-wrap: wrap;
+            gap: 6px;
+            align-items: center;
+        }
+        .topo-map-tool-btn {
+            display: inline-flex;
+            align-items: center;
+            gap: 4px;
+            padding: 2px 7px;
+            height: 22px;
+            font-size: 0.62rem;
+            font-weight: 600;
+            color: var(--text);
+            background: rgba(0, 0, 0, 0.55);
+            border: 1px solid var(--border);
+            border-radius: 11px;
+            cursor: pointer;
+            white-space: nowrap;
+            transition: background 0.12s, border-color 0.12s, color 0.12s;
+            backdrop-filter: blur(4px);
+            -webkit-backdrop-filter: blur(4px);
+        }
+        .topo-map-tool-btn i { font-size: 0.72rem; }
+        /* Icon-only button (no label, regardless of width) — used for Audio.
+           Square-ish so the icon doesn't get clipped on the right edge. */
+        .topo-map-tool-btn.icon-only {
+            padding: 2px 0;
+            gap: 0;
+            min-width: 28px;
+            justify-content: center;
+        }
+        .topo-map-tool-btn.icon-only .topo-tool-label { display: none; }
+        .topo-map-tool-btn:hover {
+            background: rgba(0, 0, 0, 0.75);
+            border-color: var(--muted);
+        }
+        .topo-map-tool-btn.active {
+            background: rgba(78, 154, 241, 0.22);
+            border-color: var(--accent);
+            color: var(--accent);
+        }
+        .topo-map-tool-btn[disabled] {
+            opacity: 0.35;
+            cursor: not-allowed;
+            pointer-events: none;
+        }
+        /* Hide label text on narrow map panels */
+        @media (max-width: 640px) {
+            .topo-map-tool-btn .topo-tool-label { display: none; }
+        }
+
+        /* Delete button inside Leaflet topology popups */
+        .topo-popup-del {
+            margin-top: 6px;
+            display: inline-flex;
+            align-items: center;
+            gap: 5px;
+            padding: 3px 8px;
+            font-size: 0.72rem;
+            background: transparent;
+            border: 1px solid #ef4444;
+            color: #ef4444;
+            border-radius: 6px;
+            cursor: pointer;
+        }
+        .topo-popup-del:hover { background: #ef4444; color: #fff; }
+        .topo-popup-del[disabled] { opacity: 0.55; cursor: not-allowed; }
+
+        /* ── Live-flash pulse keyframe ────────────────────────────────────── */
+        @keyframes topoLivePulse {
+            0%   { transform: rotate(-45deg) scale(1); }
+            40%  { transform: rotate(-45deg) scale(1.35); }
+            100% { transform: rotate(-45deg) scale(1); }
+        }
+        .mc-pin-inner.live-flash {
+            animation: topoLivePulse 2s ease-in-out 1;
         }
 
         /* Floating favorite toggle — bottom-right overlay on contact cards */
@@ -1878,7 +2114,7 @@
                         <button id="view-cards" class="view-btn active" title="Card view"><i class="fa-solid fa-grip"></i></button>
                         <button id="view-list"  class="view-btn"        title="List view"><i class="fa-solid fa-list"></i></button>
                     </div>
-                    <button id="view-type-1" class="view-btn" title="Show/hide Contacts (clients)"><i class="fa-solid fa-user"></i></button>
+                    <button id="view-type-1" class="view-btn" title="Show/hide Companions (clients)"><i class="fa-solid fa-user"></i></button>
                     <button id="view-type-2" class="view-btn" title="Show/hide Repeaters"><i class="fa-solid fa-tower-broadcast"></i></button>
                     <button id="view-type-3" class="view-btn" title="Show/hide Room Servers"><i class="fa-solid fa-house-signal"></i></button>
                     <button id="view-heard" class="view-btn" title="Also show heard (non-contact) nodes"><i class="fa-solid fa-satellite-dish"></i></button>
@@ -2033,6 +2269,26 @@
     }
     window._loadHighcharts = _loadHighcharts;
 
+    let _hcMorePromise = null;
+    function _loadHighchartsMore() {
+        return _loadHighcharts().then(() => {
+            // highcharts-more already applied (polar support registered)
+            if (Highcharts.seriesTypes && Highcharts.seriesTypes.arearange) return;
+            if (_hcMorePromise) return _hcMorePromise;
+            _hcMorePromise = new Promise((resolve, reject) => {
+                const _define = window.define;
+                window.define = undefined;
+                const s = document.createElement("script");
+                s.src = "/js/highcharts/highcharts-more.js";
+                s.setAttribute("data-highcharts-more", "1");
+                s.onload  = () => { window.define = _define; resolve(); };
+                s.onerror = () => { window.define = _define; _hcMorePromise = null; reject(new Error("highcharts-more failed to load")); };
+                document.head.appendChild(s);
+            });
+            return _hcMorePromise;
+        });
+    }
+
     // Stable colour mapping for known payload types — keeps the same slice/legend
     // colour across renders. Unknown types fall through to a stable hashed pick
     // from a small palette so a new firmware type stays visually identifiable.
@@ -2067,6 +2323,61 @@
         return _PAYLOAD_FALLBACK_PALETTE[h % _PAYLOAD_FALLBACK_PALETTE.length];
     }
     let _payloadPieChart = null;
+
+    // ── Polar-radar geo helpers ──────────────────────────────────────────────────
+    function _haversineKm(lat1, lon1, lat2, lon2) {
+        const R = 6371;
+        const dLat = (lat2 - lat1) * Math.PI / 180;
+        const dLon = (lon2 - lon1) * Math.PI / 180;
+        const a = Math.sin(dLat / 2) ** 2 +
+                  Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) *
+                  Math.sin(dLon / 2) ** 2;
+        return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+    }
+
+    function _bearingDeg(lat1, lon1, lat2, lon2) {
+        const toRad = d => d * Math.PI / 180;
+        const dLon = toRad(lon2 - lon1);
+        const y = Math.sin(dLon) * Math.cos(toRad(lat2));
+        const x = Math.cos(toRad(lat1)) * Math.sin(toRad(lat2)) -
+                  Math.sin(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.cos(dLon);
+        return ((Math.atan2(y, x) * 180 / Math.PI) + 360) % 360;
+    }
+
+    function _compassLabel(deg) {
+        const dirs = ["N","NE","E","SE","S","SW","W","NW"];
+        return dirs[Math.round(deg / 45) % 8];
+    }
+
+    function _radarColorForRssi(rssi, online) {
+        if (!online) return "#64748b";
+        if (rssi == null || !isFinite(rssi)) return "#ef4444";
+        if (rssi >= -80)  return "#22c55e";
+        if (rssi >= -100) return "#facc15";
+        if (rssi >= -115) return "#fb923c";
+        return "#ef4444";
+    }
+
+    // Domoticz Settings location — fetched once per session, then cached.
+    let _domoticzLocation = null;
+    async function _getDomoticzLocation() {
+        if (_domoticzLocation !== null) return _domoticzLocation;
+        try {
+            const r = await fetch('/json.htm?type=settings');
+            const j = await r.json();
+            const loc = j && j.Location;
+            if (loc && typeof loc === 'string' && loc.includes(';')) {
+                const [latS, lonS] = loc.split(';');
+                const lat = parseFloat(latS), lon = parseFloat(lonS);
+                if (isFinite(lat) && isFinite(lon) && (lat || lon)) {
+                    _domoticzLocation = { lat, lon };
+                    return _domoticzLocation;
+                }
+            }
+        } catch (_) {}
+        _domoticzLocation = false;   // cache the "not available" result
+        return false;
+    }
 
     (function () {
         // Metrics shown for the self (connected) node — in display order.
@@ -2391,6 +2702,10 @@
             // change (preset apply, settings write, etc.) is reflected within
             // ~1-2 s when the plugin pushes the next `devices` message.
             if (_isOpen('self')) _renderSelfPanel();
+            // Refresh the polar radar when the topology panel is open and data changes.
+            _renderRadarIfOpen();
+            // Live-mode: diff nodes for advert / last_seen changes and flash markers.
+            _topoCheckLiveActivity();
             // Deliver new inbox messages immediately from the devices push
             // without waiting for the next manual refresh or loadData() call.
             // Only when the history is already loaded (so we don't duplicate
@@ -2745,7 +3060,7 @@
         }
 
         // Contact type names (from meshcore: CONTACT_TYPENAMES = NONE/CLI/REP/ROOM/SENS)
-        const TYPE_LABELS = { 0: "", 1: "Contact", 2: "Repeater", 3: "Room Server", 4: "Sensor" };
+        const TYPE_LABELS = { 0: "", 1: "Companion", 2: "Repeater", 3: "Room Server", 4: "Sensor" };
 
         function _isFavorite(name) {
             return !!(_deviceMap && Array.isArray(_deviceMap.favorites) && _deviceMap.favorites.includes(name));
@@ -4723,6 +5038,18 @@
             _rxLogPanelClose(_prevView);
             _sidePanelView = view;
             _rxLogPanelOpen(view);
+            // When leaving the topology view, tear down the radar so the topo-layout
+            // class doesn't bleed into other views that replace body.innerHTML.
+            if (_prevView === "topology" && view !== "topology") {
+                if (_radarChart) { try { _radarChart.destroy(); } catch (_) {} _radarChart = null; }
+                if (_radarThrottleTimer) { clearTimeout(_radarThrottleTimer); _radarThrottleTimer = null; }
+                body.classList.remove("topo-layout");
+                // Reset fit-done flag so next open auto-fits bounds again.
+                _topoFitDone = false;
+                _topoLiveOn = false;
+                _lastSeenByNode = {};
+                _topoLivePulsing.clear();
+            }
             // Mark the panel open BEFORE dispatching the per-view render.
             // The render helpers gate on _isOpen(view), which requires the
             // "open" class; with the migration the renders are synchronous
@@ -4781,10 +5108,12 @@
             } else if (view === "topology") {
                 title.textContent  = "Mesh topology";
                 coords.textContent = "All contacts with a known location";
-                // Use the map canvas Leaflet already knows about; restore it
-                // so Leaflet can attach.
-                _ensureMapCanvas();
+                // Build the flex-column layout (map-wrap on top + radar-wrap below).
+                // _ensureTopologyBody() is idempotent: if the layout already exists
+                // it does nothing so Leaflet's canvas is preserved.
+                _ensureTopologyBody();
                 _renderTopology();
+                _renderRadar();
             } else if (view === "heard") {
                 title.textContent  = "Heard nodes";
                 coords.textContent = "Adverts from nodes not in your contacts";
@@ -4859,7 +5188,7 @@
             _rxLogLastSeen = fresh[fresh.length - 1]._t || _rxLogLastSeen;
             fresh.reverse();
             // Keep most recent 200 in DOM
-            const ADV_TYPE_NAME = { 1: "Contact", 2: "Repeater", 3: "Room Server", 4: "Sensor" };
+            const ADV_TYPE_NAME = { 1: "Companion", 2: "Repeater", 3: "Room Server", 4: "Sensor" };
             const rowsHtml = fresh.map(e => {
                 const ts = e._t ? new Date(e._t * 1000).toLocaleTimeString() : "?";
                 const pt = e.payload_typename || "?";
@@ -5087,8 +5416,12 @@
                 </div>`;
             }).join("");
 
-            // Hashes heard on air (with packet counts)
-            const pairs = Object.entries(counts).sort((a, b) => b[1] - a[1]);
+            // Hashes heard on air (with packet counts), sorted by the channel
+            // hash value ascending (low → high) so the table reads in a stable
+            // numeric order regardless of packet counts.
+            const pairs = Object.entries(counts).sort(
+                (a, b) => (parseInt(a[0], 16) || 0) - (parseInt(b[0], 16) || 0)
+            );
             const hashRows = pairs.map(([h, n]) => {
                 const name = hashToName[h] || "(unknown — no key)";
                 const isKnown = !!hashToName[h];
@@ -5179,7 +5512,7 @@
 
         // Heard-nodes panel. Backed by the plugin's persistent
         // meshcore_heard.json (survives restarts), not the rolling RX log.
-        const _HEARD_ADV_TYPE = { 1: "Contact", 2: "Repeater", 3: "Room Server", 4: "Sensor" };
+        const _HEARD_ADV_TYPE = { 1: "Companion", 2: "Repeater", 3: "Room Server", 4: "Sensor" };
         // Per-type visibility for the heard side-panel (default: all on),
         // persisted like the dashboard's contact-type toggles.
         const LS_HEARD_TYPE = { 1: "meshcore.heardType1", 2: "meshcore.heardType2",
@@ -5345,11 +5678,15 @@
         }
 
         async function _heardDelete(pk) {
+            const node = (_heard.nodes || {})[pk];
+            const displayName = (node && node.name) ? node.name : pk.slice(0, 12);
+            if (!confirm(`Delete "${displayName}" from the heard list?\n\nFuture broadcasts from this node will be ignored.`)) return;
+            // Optimistic update: remove locally so the row vanishes immediately.
             if (_heard.nodes) delete _heard.nodes[pk];
             if (_heardMapPk === pk) _heardToggleMap(pk);
             _renderHeardIfOpen();
             if (_includeHeard) _rerenderContacts();
-            await _sendDeviceCmd(`!heard_delete ${pk}`);
+            await _pluginWS.sendCmdAndWait(`!forget_heard ${pk}`);
         }
 
         function _heardToggleMap(pk) {
@@ -5441,10 +5778,515 @@
                 <div class="heatmap-labels">${labels}</div>`;
         }
 
-        // Topology: render every contact (and self if known) on one Leaflet
-        // map, drawing a polyline from each contact to the self node when we
-        // have both endpoints. Line colour encodes hop count (green = direct,
-        // yellow = 1-3 hops, orange = 4-7, red = 8+).
+        // ── Polar-radar state ────────────────────────────────────────────────────
+        let _radarView  = "distance"; // "distance" | "hops"
+        let _radarZoom  = 0;          // 0 = Auto, else multiplier factor
+        let _radarChart = null;       // active Highcharts instance (polar scatter)
+        let _radarThrottleTimer = null;
+
+        // Throttled entry point — coalesces rapid device-map pushes to ≤1/s.
+        function _renderRadarIfOpen() {
+            if (!_isOpen("topology")) return;
+            if (_radarThrottleTimer) return;
+            _radarThrottleTimer = setTimeout(() => {
+                _radarThrottleTimer = null;
+                _renderRadar();
+            }, 1000);
+        }
+
+        // Main radar render — async because it may need to lazy-load Highcharts libs
+        // and fetch the Domoticz settings location.
+        async function _renderRadar() {
+            const chartDiv = document.getElementById("topo-radar-chart");
+            const listDiv  = document.getElementById("topo-radar-list");
+            if (!chartDiv || !listDiv) return;
+
+            // ── 1. Resolve observer location ──────────────────────────────────
+            let obsLat = null, obsLon = null;
+            const si = _deviceMap && _deviceMap.self_info;
+            if (si && si.adv_lat != null && si.adv_lon != null && (si.adv_lat || si.adv_lon)) {
+                obsLat = si.adv_lat;
+                obsLon = si.adv_lon;
+            }
+            // Also try self node's lat/lon from the device map
+            if ((obsLat == null || (!obsLat && !obsLon)) && _deviceMap && _deviceMap.nodes && _deviceMap.self) {
+                const selfNode = _deviceMap.nodes[_deviceMap.self];
+                if (selfNode && selfNode.lat != null && selfNode.lon != null && (selfNode.lat || selfNode.lon)) {
+                    obsLat = selfNode.lat;
+                    obsLon = selfNode.lon;
+                }
+            }
+            if (obsLat == null || (!obsLat && !obsLon)) {
+                // Invalidate cached false result when self_info changes (on reconnect).
+                if (_domoticzLocation === false) _domoticzLocation = null;
+                const dLoc = await _getDomoticzLocation();
+                if (dLoc) { obsLat = dLoc.lat; obsLon = dLoc.lon; }
+            }
+
+            const hasObs = obsLat != null && (obsLat || obsLon);
+
+            if (!hasObs) {
+                // Destroy any prior chart
+                if (_radarChart) { try { _radarChart.destroy(); } catch (_) {} _radarChart = null; }
+                chartDiv.innerHTML = "";
+                listDiv.innerHTML  = "";
+                chartDiv.closest(".topo-radar-body").innerHTML =
+                    `<div class="topo-radar-empty">Set the observer\'s coordinates (Self panel &rarr; Coordinates, or Domoticz Settings &rarr; Location) to enable the radar.</div>`;
+                return;
+            }
+
+            // ── 2. Collect node data ───────────────────────────────────────────
+            const nodes   = (_deviceMap && _deviceMap.nodes) || {};
+            const selfName = _deviceMap && _deviceMap.self;
+            const points  = [];
+
+            // Stable hash for pseudo-bearing when no lat/lon available (hops mode).
+            function _pseudoBearing(str) {
+                let h = 0;
+                for (let i = 0; i < str.length; i++) h = (h * 31 + str.charCodeAt(i)) >>> 0;
+                return h % 360;
+            }
+
+            for (const [name, node] of Object.entries(nodes)) {
+                if (name === selfName) continue;
+
+                // Parse RSSI
+                let rssiNum = null;
+                if (node.rssi && node.rssi.value != null) {
+                    const rv = String(node.rssi.value).replace(/[^\d.-]/g, "");
+                    const parsed = parseFloat(rv);
+                    if (isFinite(parsed)) rssiNum = parsed;
+                }
+
+                // Parse hops
+                let hopsNum = null;
+                if (node.hops && node.hops.value != null) {
+                    const hv = String(node.hops.value).replace(/[^\d]/g, "");
+                    const parsed = parseInt(hv, 10);
+                    if (isFinite(parsed)) hopsNum = parsed;
+                }
+
+                const hasGeo = node.lat != null && node.lon != null && (node.lat || node.lon);
+                const online = !!(node.status && (node.status.online || node.status.value === "On" || node.status.value === true));
+
+                if (_radarView === "distance") {
+                    if (!hasGeo) continue;
+                    const dist = _haversineKm(obsLat, obsLon, node.lat, node.lon);
+                    const bear = _bearingDeg(obsLat, obsLon, node.lat, node.lon);
+                    points.push({ name, dist, bear, rssi: rssiNum, hops: hopsNum, online, hasGeo: true });
+                } else {
+                    // Hops mode
+                    if (hopsNum == null) continue;
+                    const bear = hasGeo
+                        ? _bearingDeg(obsLat, obsLon, node.lat, node.lon)
+                        : _pseudoBearing(node.pubkey_prefix || name);
+                    const dist = hasGeo ? _haversineKm(obsLat, obsLon, node.lat, node.lon) : null;
+                    points.push({ name, dist, bear, radial: hopsNum, rssi: rssiNum, hops: hopsNum, online, hasGeo });
+                }
+            }
+
+            // Assign radial value and sort
+            if (_radarView === "distance") {
+                points.forEach(p => { p.radial = p.dist; });
+                points.sort((a, b) => a.dist - b.dist);
+            } else {
+                points.sort((a, b) => {
+                    if (a.hops !== b.hops) return a.hops - b.hops;
+                    // Within same hop count: better RSSI (less negative) first
+                    const ra = a.rssi != null ? a.rssi : -999;
+                    const rb = b.rssi != null ? b.rssi : -999;
+                    return rb - ra;
+                });
+            }
+            points.forEach((p, i) => { p.rank = i + 1; });
+
+            // ── 3. Zoom / scale ───────────────────────────────────────────────
+            const radials = points.map(p => p.radial).filter(v => v != null && isFinite(v));
+            const rawMax  = radials.length ? Math.max(...radials) : 1;
+            const autoMax = rawMax > 0 ? rawMax * 1.1 : 1;
+            let yMax;
+            if (_radarZoom === 0) {
+                yMax = autoMax;
+            } else {
+                yMax = autoMax / _radarZoom;
+            }
+
+            // ── 4. Render right-side list ─────────────────────────────────────
+            if (points.length === 0) {
+                if (_radarChart) { try { _radarChart.destroy(); } catch (_) {} _radarChart = null; }
+                chartDiv.innerHTML = "";
+                const body = chartDiv.closest(".topo-radar-body");
+                if (body) {
+                    body.innerHTML = `<div class="topo-radar-empty">No nodes to plot in this view.</div>`;
+                }
+                return;
+            }
+
+            // Restore the two-column layout if it was replaced by an empty-state message.
+            const radarBody = chartDiv.closest(".topo-radar-body") ||
+                              document.getElementById("topo-radar") && document.getElementById("topo-radar").querySelector(".topo-radar-body");
+            if (radarBody && !radarBody.querySelector("#topo-radar-chart")) {
+                radarBody.innerHTML = `<div id="topo-radar-chart"></div><div id="topo-radar-list"></div>`;
+            }
+            const listEl  = document.getElementById("topo-radar-list");
+            const chartEl = document.getElementById("topo-radar-chart");
+            if (!listEl || !chartEl) return;
+
+            function fmtDist(km) {
+                if (km == null) return "?";
+                if (km < 0.01) return "0 m";
+                if (km < 10)   return km.toFixed(1) + " km";
+                return Math.round(km) + " km";
+            }
+            function fmtHops(h) {
+                if (h == null) return "?";
+                return h === 1 ? "1 hop" : h + " hops";
+            }
+
+            listEl.innerHTML = points.map(p => {
+                const color  = _radarColorForRssi(p.rssi, p.online);
+                const val    = _radarView === "distance" ? fmtDist(p.dist) : fmtHops(p.hops);
+                const rssiTx = p.rssi != null ? p.rssi + " dBm" : "?";
+                // Bearing arrow: rotate ↑ (unicode up-arrow) by bearing degrees
+                const bearTx = p.bear != null
+                    ? `<span class="topo-rbearing" style="display:inline-block;transform:rotate(${p.bear.toFixed(0)}deg);">↑</span>`
+                    : `<span class="topo-rbearing">?</span>`;
+                return `<div class="topo-radar-row${p.online ? "" : " offline"}" data-rank="${p.rank}">
+                    <span class="topo-rank" style="background:${color}">${p.rank}</span>
+                    <span class="topo-rname${p.online ? "" : " offline"}">${escHtml(p.name)}</span>
+                    <span class="topo-rval">${escHtml(val)}</span>
+                    ${bearTx}
+                    <span class="topo-rrssi">${escHtml(rssiTx)}</span>
+                </div>`;
+            }).join("");
+
+            // Row click → flash the chart point
+            listEl.querySelectorAll(".topo-radar-row").forEach(row => {
+                row.addEventListener("click", () => {
+                    const rank = parseInt(row.dataset.rank, 10);
+                    if (!_radarChart) return;
+                    _radarChart.series[0].points.forEach(pt => {
+                        if (pt.options && pt.options.custom && pt.options.custom.rank === rank) {
+                            const origR = pt.options.marker && pt.options.marker.radius || 8;
+                            pt.update({ marker: { radius: origR * 2 } }, true, false);
+                            setTimeout(() => {
+                                if (pt && pt.update) pt.update({ marker: { radius: origR } }, true, false);
+                            }, 600);
+                        }
+                    });
+                });
+            });
+
+            // ── 5. Load Highcharts (lazy) then render chart ───────────────────
+            try {
+                await _loadHighchartsMore();
+            } catch (_) {
+                chartEl.innerHTML = `<div class="topo-radar-empty" style="font-size:0.75rem;">Chart library unavailable.</div>`;
+                return;
+            }
+
+            // (chart instance is kept across refreshes — see below)
+
+            // Resolve theme colours once per render so we can use them in
+            // SVG attributes (Highcharts does not evaluate CSS `var(...)` for
+            // marker outlines / text outlines on Firefox/Safari).
+            const _cs = getComputedStyle(document.body);
+            const _radarBg     = (_cs.getPropertyValue("--bg")     || "#0b1220").trim() || "#0b1220";
+            const _radarText   = (_cs.getPropertyValue("--text")   || "#ffffff").trim() || "#ffffff";
+            const _radarBorder = (_cs.getPropertyValue("--border") || "#2a3344").trim() || "#2a3344";
+
+            // Build data for Highcharts polar scatter:
+            // x = bearing (0..360, 0 = N clockwise), y = radial value (clamped to yMax for off-scale)
+            const seriesData = points.map(p => {
+                const rawRadial = p.radial != null ? p.radial : 0;
+                const clamped   = Math.min(rawRadial, yMax);
+                const offScale  = rawRadial > yMax;
+                const color     = _radarColorForRssi(p.rssi, p.online);
+                return {
+                    x: p.bear != null ? p.bear : 0,
+                    y: clamped,
+                    name: p.name,
+                    marker: {
+                        fillColor: offScale ? color + "88" : color,
+                        // Thin white outline (resolved from --text so a
+                        // future light-mode theme stays sensible) — matches
+                        // the Leaflet map pin border style.
+                        lineColor: _radarText,
+                        lineWidth: 1.5,
+                        radius: offScale ? 6 : 8,
+                        symbol: offScale ? "triangle" : "circle",
+                    },
+                    custom: {
+                        rank:     p.rank,
+                        rssi:     p.rssi,
+                        dist:     p.dist,
+                        hops:     p.hops,
+                        online:   p.online,
+                        offScale: offScale,
+                        realRadial: rawRadial,
+                    },
+                };
+            });
+
+            const yUnit = _radarView === "distance" ? " km" : " hop";
+            const yTick = _radarView === "distance"
+                ? (yMax > 50 ? Math.ceil(yMax / 4 / 10) * 10 : yMax > 10 ? 5 : yMax > 2 ? 1 : 0.5)
+                : 1;
+
+            // Incremental update path: reuse the existing chart instance
+            // whenever the view/zoom mode hasn't changed, so a fresh devices_
+            // delta does NOT rebuild the whole chart (which previously caused
+            // a visible full-animation rebuild every few seconds). Only data
+            // and yAxis.max change; the polar grid/axes stay put.
+            const _modeKey = `${_radarView}|${_radarZoom}`;
+            if (_radarChart && _radarChart._mcModeKey === _modeKey && _radarChart.series && _radarChart.series[0]) {
+                try {
+                    _radarChart.yAxis[0].update({ max: yMax, tickInterval: yTick || undefined }, false);
+                    _radarChart.series[0].setData(seriesData, true, false, false);
+                    return;
+                } catch (_) {
+                    // Fall through to full rebuild on any update error.
+                    try { _radarChart.destroy(); } catch (__) {}
+                    _radarChart = null;
+                }
+            }
+            if (_radarChart) { try { _radarChart.destroy(); } catch (_) {} _radarChart = null; }
+
+            try {
+                _radarChart = Highcharts.chart(chartEl, {
+                    chart: {
+                        polar: true,
+                        type: "scatter",
+                        backgroundColor: "transparent",
+                        margin: [10, 10, 10, 10],
+                        animation: false,
+                    },
+                    title:   { text: null },
+                    credits: { enabled: false },
+                    legend:  { enabled: false },
+                    tooltip: {
+                        useHTML: true,
+                        formatter: function () {
+                            const c = this.point.options.custom || {};
+                            const dist  = c.dist  != null ? fmtDist(c.dist)  : null;
+                            const hops  = c.hops  != null ? fmtHops(c.hops)  : null;
+                            const rssi  = c.rssi  != null ? c.rssi + " dBm"   : "?";
+                            const bear  = this.x  != null ? this.x.toFixed(0) + "° " + _compassLabel(this.x) : "?";
+                            const ofsTx = c.offScale ? `<br><i style="color:#fb923c">Off-scale</i>` : "";
+                            const line1 = _radarView === "distance" && dist ? `<b>Dist:</b> ${dist}` : (hops ? `<b>Hops:</b> ${hops}` : "");
+                            return `<b>${c.rank}. ${escHtml(this.point.name || "")}</b><br>
+                                    ${line1}<br>
+                                    <b>Bearing:</b> ${bear}<br>
+                                    <b>RSSI:</b> ${rssi}${ofsTx}`;
+                        },
+                    },
+                    pane: {
+                        startAngle: 0,
+                        endAngle:   360,
+                        background: [{
+                            backgroundColor: "transparent",
+                            borderColor: "transparent",
+                        }],
+                    },
+                    xAxis: {
+                        min: 0,
+                        max: 360,
+                        tickInterval: 45,
+                        tickPositions: [0, 45, 90, 135, 180, 225, 270, 315],
+                        gridLineColor: _radarBorder,
+                        lineColor: _radarBorder,
+                        labels: {
+                            style: {
+                                color: _radarText,
+                                fontSize: "0.65rem",
+                                fontWeight: "600",
+                                textOutline: `2px ${_radarBg}`,
+                            },
+                            formatter: function () {
+                                return ["N","NE","E","SE","S","SW","W","NW"][this.value / 45] || "";
+                            },
+                        },
+                    },
+                    yAxis: {
+                        min: 0,
+                        max: yMax,
+                        tickInterval: yTick || undefined,
+                        gridLineColor: _radarBorder,
+                        gridLineDashStyle: "Dash",
+                        labels: {
+                            style: {
+                                color: _radarText,
+                                fontSize: "0.65rem",
+                                fontWeight: "600",
+                            },
+                            formatter: function () { return this.value + yUnit; },
+                        },
+                    },
+                    series: [{
+                        data: seriesData,
+                        enableMouseTracking: true,
+                        states: { hover: { enabled: true } },
+                        dataLabels: { enabled: false },
+                    }],
+                    plotOptions: {
+                        series: {
+                            // Suppress per-point animation on subsequent
+                            // setData() calls — first paint still animates.
+                            animation: { duration: 250 },
+                        },
+                    },
+                });
+                if (_radarChart) _radarChart._mcModeKey = _modeKey;
+            } catch (e) {
+                chartEl.innerHTML = `<div class="topo-radar-empty" style="font-size:0.75rem;">Chart error: ${escHtml(String(e))}</div>`;
+            }
+        }
+
+        // ── Topology toolbar state ────────────────────────────────────────────
+        // Toggle states persisted in localStorage. Defaults match requirements.
+        const LS_TOPO = {
+            contacts: "meshcore.topo.show_contacts",
+            repeaters: "meshcore.topo.show_repeaters",
+            heard:     "meshcore.topo.show_heard",
+            lines:     "meshcore.topo.show_lines",
+            live:      "meshcore.topo.live",
+            audio:     "meshcore.topo.audio",
+        };
+        function _topoGet(key, def) {
+            const v = localStorage.getItem(LS_TOPO[key]);
+            if (v === null) return def;
+            return v === "1";
+        }
+        function _topoSet(key, val) {
+            try { localStorage.setItem(LS_TOPO[key], val ? "1" : "0"); } catch (_) {}
+        }
+
+        // Whether the first-fit-bounds has been done for the current topology session.
+        // Reset to false when the topology panel is opened fresh, so subsequent
+        // toggle re-renders do not jump the map view back to auto-fit.
+        let _topoFitDone = false;
+
+        // Live-mode: per-node "last observed" epochs for diff.
+        // Key: node pubkey_prefix or name. Value: { last_advert, last_seen_str }
+        let _lastSeenByNode = {};
+
+        // True when the Live toggle is currently ON.
+        // (shorthand re-read from localStorage inside _renderTopology is avoided;
+        //  we maintain this as a module-level flag so _onDeviceMapUpdated can
+        //  check it cheaply without touching the DOM.)
+        let _topoLiveOn = false;
+
+        // Per-node in-flight pulse guard: set of node keys with an active pulse.
+        const _topoLivePulsing = new Set();
+
+        // Audio context (lazily created on first user gesture → Live toggle click).
+        let _topoAudioCtx = null;
+        let _topoLastBeepMs = 0;   // epoch-ms of last beep
+
+        function _topoBeep() {
+            if (!_topoAudioCtx) {
+                try { _topoAudioCtx = new (window.AudioContext || window.webkitAudioContext)(); }
+                catch (_) { _topoAudioCtx = null; return; }
+            }
+            const now = Date.now();
+            if (now - _topoLastBeepMs < 250) return;  // throttle: ≤ 4 Hz
+            _topoLastBeepMs = now;
+            try {
+                const ctx = _topoAudioCtx;
+                const osc = ctx.createOscillator();
+                const gain = ctx.createGain();
+                osc.connect(gain);
+                gain.connect(ctx.destination);
+                osc.type = "sine";
+                osc.frequency.value = 880;
+                const t = ctx.currentTime;
+                gain.gain.setValueAtTime(0, t);
+                gain.gain.linearRampToValueAtTime(0.1, t + 0.03);  // 30 ms attack
+                gain.gain.exponentialRampToValueAtTime(0.001, t + 0.09);  // 80 ms decay
+                osc.start(t);
+                osc.stop(t + 0.09);
+            } catch (_) { /* browser refused audio — silent failure */ }
+        }
+
+        // Attempt to pulse the marker for a given node key (pubkey_prefix or name).
+        // Only fires when the topology view is open and Live is ON.
+        function _topoFlashMarker(nodeKey) {
+            if (!_isOpen("topology")) return;
+            if (_topoLivePulsing.has(nodeKey)) return;
+            // Find the marker element via data attribute we set during render.
+            const el = document.querySelector(`.mc-pin-inner[data-node-key="${CSS.escape(nodeKey)}"]`);
+            if (!el) return;
+            _topoLivePulsing.add(nodeKey);
+            el.classList.add("live-flash");
+            // Beep if audio is also on
+            if (_topoGet("audio", false)) _topoBeep();
+            // Remove class after animation completes (2 s)
+            setTimeout(() => {
+                el.classList.remove("live-flash");
+                _topoLivePulsing.delete(nodeKey);
+            }, 2000);
+        }
+
+        // Called from _onDeviceMapUpdated — diffs nodes against _lastSeenByNode.
+        // When Live is ON and a change is detected, fires a flash.
+        function _topoCheckLiveActivity() {
+            if (!_topoLiveOn) return;
+            const nodes = (_deviceMap && _deviceMap.nodes) || {};
+            for (const [name, node] of Object.entries(nodes)) {
+                const key = node.pubkey_prefix || name;
+                const prev = _lastSeenByNode[key];
+                const curAdvert = (node.last_advert != null) ? node.last_advert : 0;
+                const curSeen   = node.last_seen ? String(node.last_seen.value || node.last_seen || "") : "";
+                if (!prev) {
+                    // First observation — establish baseline without flashing.
+                    _lastSeenByNode[key] = { last_advert: curAdvert, last_seen_str: curSeen };
+                    continue;
+                }
+                const advertChanged = curAdvert > prev.last_advert;
+                const seenChanged   = curSeen !== prev.last_seen_str;
+                _lastSeenByNode[key] = { last_advert: curAdvert, last_seen_str: curSeen };
+                if (advertChanged || seenChanged) {
+                    _topoFlashMarker(key);
+                }
+            }
+        }
+
+        // ── Type-based marker colour (§B) ────────────────────────────────────
+        // polyline colour stays hop-driven (hopColour); only markers use typeColour.
+        function _typeColour(node) {
+            // Topology marker colour scheme:
+            //   self (observer)    = green
+            //   companion (type 1) = purple   (also covers sensor / unknown)
+            //   repeater (type 2)  = red
+            //   room server (3)    = blue
+            // Heard-only nodes use the SAME colour as their type, so a
+            // heard companion is still purple — the smaller / hollow marker
+            // style (set in renderTopology) is what signals "not a contact".
+            if (!node) return "#94a3b8";
+            if (node.isSelf) return "#22c55e";
+            if (node.type === 2) return "#e63946";
+            if (node.type === 3) return "#3b82f6";
+            return "#a855f7";
+        }
+
+        // Hop-count line colour (unchanged — only drives polylines).
+        function _hopColour(h) {
+            if (h == null || h < 0) return "#888";
+            if (h === 0) return "#26c47c";
+            if (h <= 3)  return "#f9c74f";
+            if (h <= 7)  return "#ff8c42";
+            return "#e63946";
+        }
+
+        // Format distance for popup (§D)
+        function _fmtDistKm(km) {
+            if (km == null) return null;
+            if (km < 0.05) return "0 m";
+            if (km < 10)   return km.toFixed(1) + " km";
+            return Math.round(km) + " km";
+        }
+
+        // ── Topology: main render (§C/§G/§D) ────────────────────────────────
         let _topologyLayer = null;
         function _renderTopology() {
             const canvas = document.getElementById("map-canvas");
@@ -5462,88 +6304,302 @@
                     return;
                 }
                 if (!_leafletMap) {
+                    // Zoom controls back at the Leaflet default top-left
+                    // corner; the filter toolbar is now its own row above
+                    // the map, so the corner is free.
                     _leafletMap = L.map(canvas, { zoomControl: true }).setView([52, 5], 7);
                     L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
                         attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors',
                         maxZoom: 19,
                     }).addTo(_leafletMap);
+                } else if (_leafletMap.zoomControl) {
+                    try { _leafletMap.zoomControl.setPosition("topleft"); } catch (_) {}
                 }
                 // Drop any prior topology overlay so a refresh doesn't pile up
                 if (_topologyLayer) { _topologyLayer.remove(); _topologyLayer = null; }
                 _topologyLayer = L.layerGroup().addTo(_leafletMap);
 
+                // Stop the floating toolbar's clicks from reaching Leaflet
+                // (without this, Leaflet's drag handler runs on the toolbar
+                // element and crashes with "Cannot read properties of null
+                // (reading 'offsetWidth')" the moment a button is removed /
+                // the layer is rebuilt under the cursor). Re-applies cheaply
+                // each render — Leaflet de-dups its own handlers internally.
+                const _tb = document.getElementById("topo-toolbar");
+                if (_tb && L.DomEvent) {
+                    L.DomEvent.disableClickPropagation(_tb);
+                    L.DomEvent.disableScrollPropagation(_tb);
+                }
+
+                // ── Read toolbar toggle states ──────────────────────────────
+                const showCompanions = _topoGet("contacts",  true);   // key kept for back-compat
+                const showRepeaters  = _topoGet("repeaters", true);
+                const showRooms      = _topoGet("rooms",     true);
+                const showHeard      = _topoGet("heard",     false);
+                const showLines      = _topoGet("lines",     true);
+                _topoLiveOn = _topoGet("live", false);
+
+                // ── Resolve observer coords (3-tier, same chain as radar) ──
+                //   1) connected node's advertised GPS (self_info.adv_lat/lon)
+                //   2) the self device's lat/lon slot (manual override, etc.)
+                //   3) Domoticz Settings → Location (cached, fetched once)
+                let obsLat = null, obsLon = null;
+                const si = _deviceMap && _deviceMap.self_info;
+                if (si && si.adv_lat != null && si.adv_lon != null && (si.adv_lat || si.adv_lon)) {
+                    obsLat = si.adv_lat; obsLon = si.adv_lon;
+                }
+                if ((obsLat == null || (!obsLat && !obsLon)) && _deviceMap && _deviceMap.nodes && _deviceMap.self) {
+                    const sn = _deviceMap.nodes[_deviceMap.self];
+                    if (sn && sn.lat != null && sn.lon != null && (sn.lat || sn.lon)) {
+                        obsLat = sn.lat; obsLon = sn.lon;
+                    }
+                }
+                if ((obsLat == null || (!obsLat && !obsLon)) && _domoticzLocation && _domoticzLocation.lat != null) {
+                    obsLat = _domoticzLocation.lat; obsLon = _domoticzLocation.lon;
+                }
+                // Cache miss → kick the async fetch once; re-render when it
+                // resolves so the green dot can appear on the very next paint
+                // without the user having to re-open the panel.
+                if (obsLat == null && _domoticzLocation === null) {
+                    _getDomoticzLocation().then(loc => {
+                        if (loc && loc.lat != null && _isOpen("topology")) _renderTopology();
+                    });
+                }
+                const hasObsLoc = obsLat != null && (obsLat || obsLon);
+
                 const nodes = (_deviceMap && _deviceMap.nodes) || {};
                 const selfName = _deviceMap && _deviceMap.self;
-                const selfNode = selfName ? nodes[selfName] : null;
-                const selfLoc = (selfNode && selfNode.lat != null && selfNode.lon != null && (selfNode.lat || selfNode.lon))
-                    ? [selfNode.lat, selfNode.lon] : null;
+                // The self marker uses the same resolved observer coords —
+                // so it works even if the node has no advertised GPS but the
+                // Domoticz Settings location is configured.
+                const selfLoc = hasObsLoc ? [obsLat, obsLon] : null;
 
                 const bounds = [];
                 let plotted = 0;
 
-                // Helper: pick a colour for the hop count
-                const hopColour = (h) => {
-                    if (h == null || h < 0) return "#888";
-                    if (h === 0) return "#26c47c";  // green: direct
-                    if (h <= 3)  return "#f9c74f";  // yellow
-                    if (h <= 7)  return "#ff8c42";  // orange
-                    return "#e63946";               // red
+                // Helper: build a divIcon for a given colour, node key, and isSelf flag.
+                const makePinIcon = (colour, nodeKey, isSelf) => {
+                    const cls = isSelf ? "mc-pin-inner self" : "mc-pin-inner";
+                    const sz  = isSelf ? [30, 30] : [22, 22];
+                    const anc = isSelf ? [15, 30] : [11, 22];
+                    const safeKey = nodeKey.replace(/"/g, "&quot;");
+                    return L.divIcon({
+                        className: "mc-pin",
+                        html: `<div class="${cls}" style="background:${colour}" data-node-key="${safeKey}"></div>`,
+                        iconSize: sz, iconAnchor: anc,
+                    });
                 };
 
-                // Self marker
+                // Self marker — ALWAYS shown regardless of filter toggles
+                // (it is the observer / centre of context).
                 if (selfLoc) {
-                    const icon = L.divIcon({
-                        className: "mc-pin self",
-                        html: '<div class="mc-pin-inner" style="background:#3a7bd5"></div>',
-                        iconSize: [22, 22], iconAnchor: [11, 22],
-                    });
-                    L.marker(selfLoc, { icon }).addTo(_topologyLayer).bindPopup(`<b>${selfName}</b><br>(this node)`);
+                    const selfNodeEntry = selfName ? nodes[selfName] : null;
+                    const selfKey = (selfNodeEntry && selfNodeEntry.pubkey_prefix) || selfName || "self";
+                    const selfColour = _typeColour({ isSelf: true });
+                    const icon = makePinIcon(selfColour, selfKey, true);
+                    L.marker(selfLoc, { icon })
+                        .addTo(_topologyLayer)
+                        .bindPopup(`<b>${escHtml(selfName || "Self")}</b><br>(this node)`);
                     bounds.push(selfLoc);
                     plotted++;
                 }
+
+                // Helper: does the current toolbar state include this node's type?
+                // Type 2 -> Repeaters bucket. Type 3 -> Room Servers bucket.
+                // Everything else (1 / 4 / 0 / null) -> Companions bucket.
+                const _typeBucketOn = (t) => {
+                    if (t === 2) return showRepeaters;
+                    if (t === 3) return showRooms;
+                    return showCompanions;
+                };
+                const noContactFilters = !showCompanions && !showRepeaters && !showRooms;
 
                 // Contact markers + lines
                 for (const [name, node] of Object.entries(nodes)) {
                     if (name === selfName) continue;
                     if (node.lat == null || node.lon == null) continue;
                     if (!node.lat && !node.lon) continue;
+                    if (!_typeBucketOn(node.type)) continue;
+
                     const ll = [node.lat, node.lon];
                     const hopsRaw = node.hops && node.hops.value;
                     const h = hopsRaw != null ? parseInt(String(hopsRaw).replace(/[^\d-]/g, ""), 10) : null;
-                    const colour = hopColour(h);
-                    const icon = L.divIcon({
-                        className: "mc-pin",
-                        html: `<div class="mc-pin-inner" style="background:${colour}"></div>`,
-                        iconSize: [20, 20], iconAnchor: [10, 20],
-                    });
-                    L.marker(ll, { icon }).addTo(_topologyLayer).bindPopup(
-                        `<b>${name}</b><br>` +
-                        `Hops: ${h != null && !isNaN(h) ? h : "?"}<br>` +
-                        `Type: ${({1:"Contact",2:"Repeater",3:"Room Server",4:"Sensor"})[node.type] || "?"}`
-                    );
-                    if (selfLoc) {
-                        L.polyline([selfLoc, ll], {
-                            color: colour, weight: 2, opacity: 0.7, dashArray: h === 0 ? null : "4 4",
-                        }).addTo(_topologyLayer);
+                    const lineColour = _hopColour(h);
+                    const markerColour = _typeColour(node);
+                    const typeLabel = ({1:"Companion",2:"Repeater",3:"Room Server",4:"Sensor"})[node.type] || "Unknown";
+                    const nodeKey = node.pubkey_prefix || name;
+
+                    let distLine = "";
+                    if (hasObsLoc) {
+                        const km = _haversineKm(obsLat, obsLon, node.lat, node.lon);
+                        const ds = _fmtDistKm(km);
+                        if (ds) distLine = `<br>Distance: ${ds}`;
+                    }
+
+                    const icon = makePinIcon(markerColour, nodeKey, false);
+                    const _pkAttr = node.pubkey_prefix ? ` data-pk="${escHtml(node.pubkey_prefix)}"` : "";
+                    L.marker(ll, { icon })
+                        .addTo(_topologyLayer)
+                        .bindPopup(
+                            `<b>${escHtml(name)}</b><br>` +
+                            `Hops: ${h != null && !isNaN(h) ? h : "?"}<br>` +
+                            `Type: ${typeLabel}` +
+                            distLine +
+                            `<br><button class="topo-popup-del" data-kind="contact" data-name="${escHtml(name)}"${_pkAttr} title="Permanently remove from the system"><i class="fa-solid fa-trash"></i> Delete</button>`
+                        );
+                    if (showLines && selfLoc) {
+                        // Build a multi-segment polyline through resolved
+                        // repeater waypoints when out_path is available.
+                        const outPath     = node.out_path || "";
+                        const hashMode    = node.out_path_hash_mode || 1;
+                        // Token byte-width: mode 1 = 1 byte (2 hex chars),
+                        // mode 2 = 2 bytes (4 hex chars), mode 3 = 3 bytes (6 hex chars).
+                        const tokenChars  = hashMode <= 1 ? 2 : hashMode === 2 ? 4 : 6;
+                        let waypoints     = [selfLoc];
+                        let resolvedHops  = [];
+                        const isFlood     = !outPath || outPath === "ff" || /^(ff)+$/i.test(outPath);
+                        if (!isFlood && outPath.length >= tokenChars) {
+                            // Split outPath into tokens and resolve each to a coordinate.
+                            const raw = outPath.replace(/[^0-9a-fA-F]/g, "").toLowerCase();
+                            for (let i = 0; i + tokenChars <= raw.length; i += tokenChars) {
+                                const token = raw.slice(i, i + tokenChars);
+                                const hopName = _resolvePathHop(token);
+                                if (!hopName) continue;
+                                const hopNode = ((_deviceMap && _deviceMap.nodes) || {})[hopName];
+                                const hopLat  = hopNode && hopNode.lat;
+                                const hopLon  = hopNode && hopNode.lon;
+                                if (hopLat == null || hopLon == null || (!hopLat && !hopLon)) continue;
+                                waypoints.push([hopLat, hopLon]);
+                                resolvedHops.push(hopName);
+                            }
+                        }
+                        waypoints.push(ll);
+                        const isMultiHop  = resolvedHops.length > 0;
+                        const lineOpts    = {
+                            color: lineColour, weight: 2, opacity: 0.7,
+                            dashArray: (h === 0 && !isMultiHop) ? null : "4 4",
+                        };
+                        // Build tooltip listing the resolved hop chain.
+                        let lineTooltip;
+                        if (isMultiHop) {
+                            const chain = [selfName || "self", ...resolvedHops, name].join(" → ");
+                            lineTooltip = chain;
+                        }
+                        const pl = L.polyline(waypoints, lineOpts).addTo(_topologyLayer);
+                        if (lineTooltip) pl.bindTooltip(lineTooltip, { sticky: true });
+                        // Small waypoint markers at intermediate hops.
+                        for (let wi = 1; wi < waypoints.length - 1; wi++) {
+                            L.circleMarker(waypoints[wi], {
+                                radius: 4, weight: 2,
+                                color: "#ffffff", fillColor: lineColour, fillOpacity: 0.6,
+                            }).addTo(_topologyLayer)
+                             .bindTooltip(escHtml(resolvedHops[wi - 1]), { sticky: true });
+                        }
                     }
                     bounds.push(ll);
                     plotted++;
                 }
 
-                if (bounds.length >= 2) {
-                    _leafletMap.fitBounds(bounds, { padding: [30, 30] });
-                } else if (bounds.length === 1) {
-                    _leafletMap.setView(bounds[0], 11);
+                // Heard-only nodes — "Heard" is a modifier on top of the
+                // type filters: we only plot a heard node if its type's
+                // bucket is enabled. So "Heard ON + everything else OFF"
+                // shows nothing extra; "Companions ON + Heard ON" shows
+                // contact companions PLUS heard companions; etc.
+                if (showHeard && !noContactFilters) {
+                    const heardNodes = (_heard && _heard.nodes) || {};
+                    for (const [pk, hnode] of Object.entries(heardNodes)) {
+                        if (!_typeBucketOn(hnode.type)) continue;
+                        // Plugin stores heard-node coords as h.lat/h.lon
+                        // (set from the advert's adv_lat/adv_lon). Some snapshot
+                        // builds also expose adv_lat/adv_lon as a mirror, so
+                        // accept either field name.
+                        const lat = (hnode.lat != null) ? hnode.lat : hnode.adv_lat;
+                        const lon = (hnode.lon != null) ? hnode.lon : hnode.adv_lon;
+                        if (lat == null || lon == null) continue;
+                        if (!lat && !lon) continue;
+                        // Skip if already a known contact
+                        const alreadyKnown = Object.values(nodes).some(n => n.pubkey_prefix === pk || n.pubkey === pk);
+                        if (alreadyKnown) continue;
+                        const ll = [lat, lon];
+                        // Heard nodes are coloured by their own type so a
+                        // "heard companion" is purple, "heard repeater" is red,
+                        // "heard room server" is blue — matching contact dots.
+                        const hColour = _typeColour({ type: hnode.type });
+                        const nodeKey = pk;
+                        const hName = hnode.name || pk.slice(0, 8) || "Unknown";
+                        const lastHearTx = hnode.last_heard
+                            ? new Date(hnode.last_heard * 1000).toLocaleString()
+                            : "?";
+
+                        let distLine = "";
+                        if (hasObsLoc) {
+                            const km = _haversineKm(obsLat, obsLon, lat, lon);
+                            const ds = _fmtDistKm(km);
+                            if (ds) distLine = `<br>Distance: ${ds}`;
+                        }
+
+                        const icon = makePinIcon(hColour, nodeKey, false);
+                        L.marker(ll, { icon })
+                            .addTo(_topologyLayer)
+                            .bindPopup(
+                                `<b>${escHtml(hName)}</b><br>` +
+                                `Heard (not a contact)<br>` +
+                                `Last heard: ${lastHearTx}` +
+                                distLine +
+                                `<br><button class="topo-popup-del" data-kind="heard" data-pk="${escHtml(pk)}" data-name="${escHtml(hName)}" title="Permanently remove from the heard list"><i class="fa-solid fa-trash"></i> Delete</button>`
+                            );
+                        bounds.push(ll);
+                        plotted++;
+                    }
                 }
 
+                // (Empty-state messaging is consolidated below into a single
+                // overlay so we never show two stacked notes at the same time.)
+
+                // Fit bounds only on first open; subsequent toggle re-renders
+                // preserve the user's current pan/zoom.
+                if (!_topoFitDone) {
+                    if (bounds.length >= 2) {
+                        _leafletMap.fitBounds(bounds, { padding: [30, 30] });
+                    } else if (bounds.length === 1) {
+                        _leafletMap.setView(bounds[0], 11);
+                    }
+                    _topoFitDone = true;
+                }
+
+                // Single consolidated empty state. Only shown when literally
+                // NOTHING was plotted (no self, no contacts, no heard). If the
+                // self marker is visible the observer IS the on-screen state —
+                // no banner needed, and we deliberately don't dim the green
+                // observer dot with an overlay just because filters are off.
+                const panelBody = document.getElementById("map-panel-body");
+                const wrap = panelBody && panelBody.querySelector(".topo-map-wrap");
+                const existing = wrap && wrap.querySelector("#topo-empty-overlay");
+                if (existing) existing.remove();
                 if (!plotted) {
-                    canvas.innerHTML = `<div style="padding:24px;color:var(--text);opacity:.7;font-size:0.85rem;text-align:center;">
-                        No contacts have shared a location yet.<br>
-                        Set <code>adv_loc_policy = Share</code> on the connected node
-                        and ask remote contacts to do the same, or add manual
-                        positions in <code>meshcore_locations.json</code>.
-                    </div>`;
+                    const noContacts = !showContacts && !showRepeaters && !showHeard;
+                    const note = noContacts
+                        ? `All node filters are off &mdash; use the toolbar to enable Contacts / Repeaters / Heard.<br>
+                           Set the observer's GPS or Domoticz location to centre the map.`
+                        : `No contacts have shared a location yet.<br>
+                           Set <code>adv_loc_policy = Share</code> on the connected node
+                           and ask remote contacts to do the same, or add manual
+                           positions in <code>meshcore_locations.json</code>.`;
+                    if (wrap) {
+                        const div = document.createElement("div");
+                        div.id = "topo-empty-overlay";
+                        div.style.cssText = "position:absolute;top:48px;left:50%;transform:translateX(-50%);max-width:80%;text-align:center;background:rgba(0,0,0,0.55);color:var(--text);opacity:.9;font-size:0.8rem;padding:10px 14px;border-radius:8px;border:1px solid var(--border);z-index:900;pointer-events:none;";
+                        div.innerHTML = note;
+                        wrap.appendChild(div);
+                    }
                     return;
+                }
+                // When ONLY the observer is plotted (all node filters off
+                // or no contacts have a known location), re-centre the map
+                // on the observer so the green dot is always visible even
+                // if the saved pan/zoom was previously on a contact.
+                if (plotted === 1 && selfLoc) {
+                    _leafletMap.setView(selfLoc, Math.max(_leafletMap.getZoom() || 11, 11));
                 }
 
                 // Force Leaflet to recompute container size after the panel animation
@@ -5628,7 +6684,7 @@
                 </div>
                 <div class="self-row">
                     <label>Adv type</label>
-                    <span class="self-value">${escHtml(({1:"Contact",2:"Repeater",3:"Room Server",4:"Sensor"})[si.adv_type] || si.adv_type || "?")}</span>
+                    <span class="self-value">${escHtml(({1:"Companion",2:"Repeater",3:"Room Server",4:"Sensor"})[si.adv_type] || si.adv_type || "?")}</span>
                 </div>
 
                 <div class="self-section">Coordinates
@@ -6090,7 +7146,7 @@ Larger = more reliable routing but smaller mesh diameter.">Path hash size</label
             view.innerHTML = `
                 <div class="self-section">Contact info</div>
                 <div class="self-row"><label>Name</label><span class="self-value">${escHtml(name)}</span></div>
-                <div class="self-row"><label>Type</label><span class="self-value">${escHtml(({1:"Contact",2:"Repeater",3:"Room Server",4:"Sensor"})[node.type] || node.type || "?")}</span></div>
+                <div class="self-row"><label>Type</label><span class="self-value">${escHtml(({1:"Companion",2:"Repeater",3:"Room Server",4:"Sensor"})[node.type] || node.type || "?")}</span></div>
                 <div class="self-row"><label><i class="fa-regular fa-clock"></i> Last heard</label><span class="self-value">${escHtml(_lastHeardStr)}</span></div>
                 <div class="self-row"><label><i class="fa-solid fa-tower-broadcast"></i> Hops</label><span class="self-value">${escHtml(hops)}</span></div>
                 <div class="self-row"><label><i class="fa-solid fa-signal"></i> SNR</label><span class="self-value">${escHtml(snr)} dB</span></div>
@@ -6263,6 +7319,173 @@ Larger = more reliable routing but smaller mesh diameter.">Path hash size</label
             if (ext) ext.style.display = "";
         }
 
+        // Rebuild the topology body as flex column: map on top, radar at bottom.
+        // Idempotent: only rebuilds if the topo-layout class or the sub-divs are missing.
+        function _ensureTopologyBody() {
+            const body = document.getElementById("map-panel-body");
+            if (!body) return;
+            // If already in topo layout with both sub-divs present, keep it intact
+            // (Leaflet already attached to map-canvas; destroying it would force a re-init).
+            const hasMapWrap   = !!body.querySelector(".topo-map-wrap");
+            const hasRadarWrap = !!body.querySelector(".topo-radar-wrap");
+            if (body.classList.contains("topo-layout") && hasMapWrap && hasRadarWrap) return;
+
+            // Entering topo layout fresh: reset fit-done flag so the new open
+            // auto-fits bounds, and clear live-baseline so we don't fire stale pulses.
+            _topoFitDone = false;
+            _lastSeenByNode = {};
+            _topoLivePulsing.clear();
+
+            // Entering topo layout from a non-topo view: rebuild content.
+            body.classList.add("topo-layout");
+            body.innerHTML = `
+                <div class="topo-map-tool-bar" id="topo-toolbar">
+                        <button class="topo-map-tool-btn" id="topo-btn-contacts" title="Show companion markers">
+                            <i class="fa-solid fa-user"></i>
+                            <span class="topo-tool-label">Companions</span>
+                        </button>
+                        <button class="topo-map-tool-btn" id="topo-btn-repeaters" title="Show repeater markers">
+                            <i class="fa-solid fa-tower-broadcast"></i>
+                            <span class="topo-tool-label">Repeaters</span>
+                        </button>
+                        <button class="topo-map-tool-btn" id="topo-btn-rooms" title="Show room-server markers">
+                            <i class="fa-solid fa-door-open"></i>
+                            <span class="topo-tool-label">Room Servers</span>
+                        </button>
+                        <button class="topo-map-tool-btn" id="topo-btn-heard" title="Also show heard-only nodes of the enabled types">
+                            <i class="fa-solid fa-satellite-dish"></i>
+                            <span class="topo-tool-label">Heard</span>
+                        </button>
+                        <button class="topo-map-tool-btn" id="topo-btn-lines" title="Draw connection lines">
+                            <i class="fa-solid fa-share-nodes"></i>
+                            <span class="topo-tool-label">Lines</span>
+                        </button>
+                        <button class="topo-map-tool-btn" id="topo-btn-live" title="Highlight active nodes">
+                            <i class="fa-solid fa-bolt"></i>
+                            <span class="topo-tool-label">Live</span>
+                        </button>
+                        <button class="topo-map-tool-btn icon-only" id="topo-btn-audio" title="Audio cue on activity (requires Live)">
+                            <i class="fa-solid fa-volume-high"></i>
+                        </button>
+                </div>
+                <div class="topo-map-wrap">
+                    <div id="map-canvas"></div>
+                </div>
+                <div class="topo-radar-wrap" id="topo-radar">
+                    <div class="topo-radar-hdr">
+                        <span class="topo-radar-title">Polar Radar</span>
+                        <div class="topo-radar-seg" id="topo-radar-view-seg">
+                            <button data-view="distance" class="active">Distance</button>
+                            <button data-view="hops">Hops</button>
+                        </div>
+                        <div class="topo-radar-seg" id="topo-radar-zoom-seg">
+                            <button data-zoom="0" class="active">Auto</button>
+                            <button data-zoom="2">2×</button>
+                            <button data-zoom="4">4×</button>
+                            <button data-zoom="8">8×</button>
+                            <button data-zoom="16">16×</button>
+                            <button data-zoom="32">32×</button>
+                        </div>
+                    </div>
+                    <div class="topo-radar-body">
+                        <div id="topo-radar-chart"></div>
+                        <div id="topo-radar-list"></div>
+                    </div>
+                </div>`;
+            // Force a Leaflet re-init since we replaced the map-canvas DOM node.
+            _leafletMap = null;
+            _leafletMarker = null;
+
+            // ── Apply persisted toggle states to toolbar buttons ─────────────
+            function _applyTopoToolbarState() {
+                const defs = { contacts: true, repeaters: true, rooms: true, heard: false, lines: true, live: false, audio: false };
+                for (const [key, def] of Object.entries(defs)) {
+                    const btn = document.getElementById(`topo-btn-${key}`);
+                    if (!btn) continue;
+                    btn.classList.toggle("active", _topoGet(key, def));
+                }
+                // Audio is visually disabled when Live is off
+                const liveOn  = _topoGet("live", false);
+                const audioBtn = document.getElementById("topo-btn-audio");
+                if (audioBtn) audioBtn.toggleAttribute("disabled", !liveOn);
+            }
+            _applyTopoToolbarState();
+
+            // ── Wire toolbar button clicks ────────────────────────────────────
+            const toolbar = body.querySelector("#topo-toolbar");
+            toolbar.addEventListener("click", ev => {
+                const btn = ev.target.closest(".topo-map-tool-btn");
+                if (!btn || btn.hasAttribute("disabled")) return;
+                const id = btn.id; // e.g. "topo-btn-contacts"
+                const key = id.replace("topo-btn-", "");
+                const defs = { contacts: true, repeaters: true, rooms: true, heard: false, lines: true, live: false, audio: false };
+                const newVal = !_topoGet(key, defs[key] !== undefined ? defs[key] : false);
+                _topoSet(key, newVal);
+                btn.classList.toggle("active", newVal);
+
+                // If Live was toggled, update audio button disabled state
+                // and reset the baseline (toggling ON → fresh baseline, no burst).
+                if (key === "live") {
+                    _topoLiveOn = newVal;
+                    if (newVal) {
+                        // Establish a fresh baseline from current data (no flashes)
+                        _lastSeenByNode = {};
+                        const nodes = (_deviceMap && _deviceMap.nodes) || {};
+                        for (const [name, node] of Object.entries(nodes)) {
+                            const nk = node.pubkey_prefix || name;
+                            _lastSeenByNode[nk] = {
+                                last_advert: (node.last_advert != null) ? node.last_advert : 0,
+                                last_seen_str: node.last_seen ? String(node.last_seen.value || node.last_seen || "") : "",
+                            };
+                        }
+                    }
+                    const audioBtn = document.getElementById("topo-btn-audio");
+                    if (audioBtn) audioBtn.toggleAttribute("disabled", !newVal);
+                    // When Live is turned off, also turn Audio off
+                    if (!newVal) {
+                        _topoSet("audio", false);
+                        if (audioBtn) audioBtn.classList.remove("active");
+                    }
+                }
+
+                // If Audio was just toggled ON, create the AudioContext now (user gesture)
+                // so it is authorised before the first beep fires asynchronously.
+                if (key === "audio" && newVal && !_topoAudioCtx) {
+                    try { _topoAudioCtx = new (window.AudioContext || window.webkitAudioContext)(); }
+                    catch (_) { _topoAudioCtx = null; }
+                }
+
+                // Filter / view toggles re-fit the visible bounds so the
+                // result of the change always fits nicely on screen. Live
+                // and Audio don't change which nodes are visible, so they
+                // do NOT reset the fit flag (keeps the user's pan/zoom).
+                if (key !== "live" && key !== "audio") {
+                    _topoFitDone = false;
+                }
+                _renderTopology();
+            });
+
+            // Wire button event handlers for the radar toolbar.
+            body.querySelector("#topo-radar-view-seg").addEventListener("click", ev => {
+                const btn = ev.target.closest("button[data-view]");
+                if (!btn) return;
+                body.querySelectorAll("#topo-radar-view-seg button").forEach(b => b.classList.remove("active"));
+                btn.classList.add("active");
+                _radarView = btn.dataset.view;
+                _renderRadar();
+            });
+            body.querySelector("#topo-radar-zoom-seg").addEventListener("click", ev => {
+                const btn = ev.target.closest("button[data-zoom]");
+                if (!btn) return;
+                body.querySelectorAll("#topo-radar-zoom-seg button").forEach(b => b.classList.remove("active"));
+                btn.classList.add("active");
+                _radarZoom = parseInt(btn.dataset.zoom, 10);
+                _renderRadar();
+            });
+            const ext = document.getElementById("map-panel-external");
+            if (ext) ext.style.display = "";
+        }
+
         // Delegated click handler for the "info" button on each message
         document.addEventListener("click", (ev) => {
             const btn = ev.target.closest(".msg-info-btn");
@@ -6273,6 +7496,74 @@ Larger = more reliable routing but smaller mesh diameter.">Path hash size</label
                 const json = decodeURIComponent(escape(atob(btn.dataset.msg)));
                 _openMsgDetails(JSON.parse(json));
             } catch (_) { /* corrupt data attr — ignore */ }
+        });
+
+        // Topology popup delete buttons. Contact markers send !remove (which
+        // demotes the contact into the heard list) followed by !forget_heard
+        // (which purges it). Heard markers just !forget_heard. Net effect on
+        // either path: the node is fully gone from our system and a future
+        // advert from it will not resurrect the entry (the purged pubkey is
+        // persisted in meshcore_heard.json).
+        //
+        // _deletionInProgress serialises deletions so two rapid clicks on
+        // different popups can't interleave their save/restore snapshots.
+        // Native <button> elements already fire `click` on Enter/Space, so
+        // keyboard activation is covered by this handler too.
+        let _deletionInProgress = false;
+        document.addEventListener("click", async (ev) => {
+            const btn = ev.target.closest(".topo-popup-del");
+            if (!btn || btn.hasAttribute("disabled") || _deletionInProgress) return;
+            ev.preventDefault();
+            ev.stopPropagation();
+            const kind = btn.dataset.kind;
+            const name = btn.dataset.name || "";
+            const pk   = btn.dataset.pk   || "";
+            const tag  = name || pk.slice(0, 12) || "this node";
+            if (!confirm(`Permanently remove ${tag} from your MeshCore data?\n\nThis cannot be undone — further adverts from this node will be ignored.`)) return;
+            _deletionInProgress = true;
+            btn.setAttribute("disabled", "disabled");
+            btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Removing…';
+            // Optimistically remove from local state and redraw immediately so
+            // the marker vanishes the moment the user confirms. The popup is
+            // closed before the WebSocket round-trip so the user never sees
+            // the spinner state — the next devices_delta from the plugin will
+            // confirm the removal, and on failure we redraw without restoring
+            // (a fresh server push will reconcile any divergent state).
+            if (kind === "contact" && name && _deviceMap && _deviceMap.nodes) {
+                delete _deviceMap.nodes[name];
+            }
+            if (pk && _heard && _heard.nodes) {
+                delete _heard.nodes[pk];
+            }
+            if (_leafletMap) _leafletMap.closePopup();
+            _topoFitDone = false;
+            _renderTopology();
+            try {
+                if (kind === "contact" && name) {
+                    await _pluginWS.sendCmdAndWait(`!remove ${name}`);
+                    if (pk) {
+                        try { await _pluginWS.sendCmdAndWait(`!forget_heard ${pk}`); } catch (_) {}
+                    }
+                } else if (kind === "heard" && pk) {
+                    await _pluginWS.sendCmdAndWait(`!forget_heard ${pk}`);
+                }
+            } catch (err) {
+                // Don't restore from a stale snapshot — concurrent inbox /
+                // devices_delta pushes may have changed the entry since the
+                // click. Ask the user to refresh; the next server push will
+                // re-seed any node we shouldn't have removed.
+                const msg = (err && typeof err.message === "string" && err.message) || "Unknown error";
+                alert(`Removal failed: ${msg}\n\nPlease refresh the dashboard to resync.`);
+            } finally {
+                _deletionInProgress = false;
+                // The button's DOM node was destroyed by _renderTopology()'s
+                // layer rebuild, but reset attributes defensively in case the
+                // popup somehow survived (e.g. closePopup() no-op'd).
+                if (btn.isConnected) {
+                    btn.removeAttribute("disabled");
+                    btn.innerHTML = '<i class="fa-solid fa-trash"></i> Delete';
+                }
+            }
         });
 
         // Card action buttons (self gear, contact info)
@@ -6367,6 +7658,13 @@ Larger = more reliable routing but smaller mesh diameter.">Path hash size</label
             panel.setAttribute("aria-hidden", "true");
             // Release rxlog subscription if a heavy panel was open.
             _rxLogPanelClose(_sidePanelView);
+            // Destroy the radar chart if the topology panel was open.
+            if (_sidePanelView === "topology") {
+                if (_radarChart) { try { _radarChart.destroy(); } catch (_) {} _radarChart = null; }
+                if (_radarThrottleTimer) { clearTimeout(_radarThrottleTimer); _radarThrottleTimer = null; }
+                const body = document.getElementById("map-panel-body");
+                if (body) body.classList.remove("topo-layout");
+            }
             _sidePanelView = null;
         }
 

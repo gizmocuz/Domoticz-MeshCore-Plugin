@@ -228,6 +228,12 @@ class BasePlugin:
         self._node_last_advert: dict = {}
         # node_name → contact public_key hex (needed for remove_contact)
         self._node_pubkey: dict = {}
+        # node_name → out_path hex string (e.g. "22a83b") or "" for flood.
+        # Populated from the contacts list; pruned on contact removal.
+        self._node_out_path: dict = {}
+        # node_name → out_path_hash_mode (int, +1 offset matching the
+        # dashboard convention used elsewhere for device_info path_hash_mode).
+        self._node_out_path_hash_mode: dict = {}
         # node_name → DomoticzEx DeviceID (12-hex pubkey prefix). Populated
         # from contact pubkeys and from incoming message pubkey prefixes so a
         # device can be created/updated before the contacts poll runs.
@@ -396,6 +402,13 @@ class BasePlugin:
         self._heard_nodes: dict = {}
         self._heard_dirty = False
         self._known_pubkeys: set = set()
+        # Pubkeys that the user has explicitly deleted from the heard list.
+        # Full pubkey hex strings.  Persisted in meshcore_heard.json under
+        # "purged": [...] so purged nodes stay dead across restarts.
+        # Once a purged key reappears as a real contact (i.e. it shows up in
+        # _known_pubkeys via _handle_contacts) it is removed from this set so
+        # a subsequent removal can add it back to heard normally.
+        self._heard_purged: set = set()
         # Latest received signal for nodes that ARE contacts, keyed by the
         # 12-hex pubkey prefix → {snr, rssi, path_len, t, source}.
         # Last-writer-wins across ADVERT (worker, _on_rx_log) and incoming
@@ -1348,6 +1361,8 @@ class BasePlugin:
         _deviceMap.favorites array on click, so it doesn't need confirmation
         roundtripping through the queue.
         """
+        if text.startswith("!forget_heard "):
+            return self._handle_forget_heard(text[len("!forget_heard "):])
         if not text.startswith("!favorite "):
             return False
         try:
@@ -1373,6 +1388,76 @@ class BasePlugin:
         self._save_favorites()
         self._write_device_map()
         Domoticz.Debug(f"Favorite {action}: {name}")
+        return True
+
+    def _demote_contact_to_heard(self, name: str):
+        """Demote a just-removed contact into the heard-nodes store so its
+        last-known metadata is not lost.  Call this BEFORE clearing the
+        per-contact dicts so data is still available.
+
+        Merges with an existing heard entry if one was present (preserves
+        first_heard / count).  Removes the pubkey from _known_pubkeys so the
+        worker's ADVERT gate lets future broadcasts through (for the heard
+        store, not as a contact).  Sets _heard_dirty / _ws_heard_dirty.
+
+        Caller must NOT hold _rx_log_lock."""
+        pk = self._node_pubkey.get(name, "")
+        if not pk:
+            return
+        h = {
+            "pubkey":      pk,
+            "name":        name,
+            "type":        int(self._node_types.get(name, 1)),
+            "first_heard": int(self._node_last_advert.get(name, 0) or time.time()),
+            "last_heard":  int(self._node_last_advert.get(name, 0) or time.time()),
+            "count":       0,
+            "lat":         (self._node_locations.get(name) or {}).get("lat") or 0.0,
+            "lon":         (self._node_locations.get(name) or {}).get("lon") or 0.0,
+        }
+        sig = self._contact_sig.get(pk[:12]) or {}
+        h["snr"]      = sig.get("snr")
+        h["rssi"]     = sig.get("rssi")
+        h["path_len"] = sig.get("path_len", -1)
+        with self._rx_log_lock:
+            existing = self._heard_nodes.get(pk)
+            if existing:
+                # Preserve accumulator fields from the existing entry.
+                # All other fields from the freshest contact state win.
+                for k, v in h.items():
+                    if k in ("first_heard", "count"):
+                        continue  # never regress these accumulators
+                    if v not in (None, "", 0, 0.0):
+                        existing[k] = v
+            else:
+                self._heard_nodes[pk] = h
+            self._known_pubkeys.discard(pk)
+        self._heard_dirty = True
+        self._ws_heard_dirty = True
+        self._write_heard()
+        Domoticz.Log(f"Contact '{name}' removed and demoted to heard nodes")
+
+    def _handle_forget_heard(self, pubkey_or_prefix: str) -> bool:
+        """Permanently delete a heard node and add it to the purged set so
+        re-broadcasts from that node do not resurrect it.  Accepts a 12-hex
+        prefix or a full pubkey.  Returns True (always consumed)."""
+        prefix = pubkey_or_prefix.strip().lower()
+        if not prefix:
+            Domoticz.Log("!forget_heard: no pubkey specified")
+            return True
+        with self._rx_log_lock:
+            matched_pk = next(
+                (k for k in self._heard_nodes if k.lower().startswith(prefix)), None
+            )
+            if matched_pk:
+                self._heard_nodes.pop(matched_pk, None)
+                self._heard_purged.add(matched_pk)
+                self._heard_dirty = True
+                self._ws_heard_dirty = True
+                Domoticz.Log(f"Heard node {matched_pk[:12]} deleted and purged")
+            else:
+                Domoticz.Log(f"!forget_heard: no heard node matched prefix {prefix!r}")
+        if matched_pk:
+            self._write_heard()
         return True
 
     def _delete_node_devices(self, node_name: str):
@@ -1702,6 +1787,12 @@ class BasePlugin:
                 # Per-contact query results (status / telemetry / neighbours)
                 # from req_* sync calls. None if never queried.
                 "query":         self._contact_query_results.get(node_name, {}),
+                # Outbound path for the topology polyline renderer.
+                # out_path: hex string of repeater hash bytes (e.g. "22a83b"),
+                # empty string when the path is direct / flood, or None when unknown.
+                # out_path_hash_mode: integer +1 offset (1=1-byte, 2=2-byte, 3=3-byte).
+                "out_path":           self._node_out_path.get(node_name, ""),
+                "out_path_hash_mode": self._node_out_path_hash_mode.get(node_name, 0),
             }
 
             # Fall back to the latest received signal (advert OR message) for
@@ -2189,6 +2280,11 @@ class BasePlugin:
             if isinstance(nodes, dict):
                 self._heard_nodes = nodes
                 Domoticz.Log(f"Loaded {len(nodes)} heard node(s) from meshcore_heard.json")
+            purged = data.get("purged") if isinstance(data, dict) else None
+            if isinstance(purged, list):
+                self._heard_purged = set(purged)
+                if purged:
+                    Domoticz.Log(f"Loaded {len(purged)} purged heard pubkey(s)")
         except Exception as exc:
             Domoticz.Error(f"Could not load meshcore_heard.json: {exc}")
 
@@ -2200,6 +2296,7 @@ class BasePlugin:
             payload = {
                 "written_at": int(time.time()),
                 "nodes": {k: dict(v) for k, v in self._heard_nodes.items()},
+                "purged": sorted(self._heard_purged),
             }
         return payload
 
@@ -2897,7 +2994,8 @@ class BasePlugin:
             # already contacts. If it's a contact, the contacts poll tracks
             # it — skip. If already heard, just refresh last_heard + signal.
             if (p.get("payload_typename") == "ADVERT" and adv_key
-                    and adv_key not in self._known_pubkeys):
+                    and adv_key not in self._known_pubkeys
+                    and adv_key not in self._heard_purged):
                 h = self._heard_nodes.get(adv_key)
                 if h is None:
                     h = {"pubkey": adv_key, "first_heard": t, "count": 0}
@@ -3971,6 +4069,9 @@ class BasePlugin:
                     "id": req_id,
                 }))
                 if ok:
+                    # Demote the contact into the heard store BEFORE clearing
+                    # local state so all metadata is still available.
+                    self._demote_contact_to_heard(name)
                     # Drop from local tracking so it disappears from the dashboard immediately
                     if name in self._contact_names:
                         self._contact_names.remove(name)
@@ -3981,6 +4082,8 @@ class BasePlugin:
                     self._contact_query_results.pop(name, None)
                     self._node_last_activity.pop(name, None)
                     self._node_locations.pop(name, None)
+                    self._node_out_path.pop(name, None)
+                    self._node_out_path_hash_mode.pop(name, None)
                     self._ws_devices_dirty = True
                     if name in self._favorites:
                         self._favorites.discard(name)
@@ -4510,6 +4613,11 @@ class BasePlugin:
                     self._heard_nodes.pop(pk, None)
                     self._heard_dirty = True
                     self._ws_heard_dirty = True
+            # If a previously-purged node has been re-added as a real contact,
+            # lift the purge so a future removal can demote it back to heard.
+            purge_lift = self._heard_purged & new_known
+            if purge_lift:
+                self._heard_purged -= purge_lift
 
         # Register any new contacts (non-self) in discovery order
         for contact in contacts.values():
@@ -4573,6 +4681,15 @@ class BasePlugin:
             if pk:
                 self._node_pubkey[node_name] = pk
                 self._node_did[node_name] = pk[:12]
+
+            # Store outbound path for topology routing.
+            # out_path is a hex string of 1-byte (or N-byte) hash tokens.
+            # out_path_hash_mode from the library is 0-based; we store it as
+            # +1 to match the dashboard convention used for device_info.
+            raw_path = contact.get("out_path", "") or ""
+            self._node_out_path[node_name] = str(raw_path)
+            raw_mode = contact.get("out_path_hash_mode", 0) or 0
+            self._node_out_path_hash_mode[node_name] = int(raw_mode) + 1
 
             self._ensure_node_devices(node_name)
             did = self._device_id_for(node_name)
