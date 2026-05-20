@@ -376,6 +376,12 @@
             flex: 1;
             position: relative;
             min-height: 0;
+            /* Match min-height:0 with min-width:0 so flex children that
+               contain wide content (analytics charts, long lists) can't
+               push the parent wider than its column and force the side
+               panel to overflow. */
+            min-width: 0;
+            overflow-x: hidden;
         }
         #map-canvas {
             position: absolute;
@@ -1768,6 +1774,28 @@
             background: var(--heard);
             border-color: var(--heard);
         }
+        /* Retry button on unacknowledged outgoing DMs. Hidden until the row
+           is hovered (same pattern as the reply button) so it doesn't crowd
+           the row when at rest. Red border to signal a failure-recovery
+           action. */
+        .msg-retry-btn {
+            flex-shrink: 0;
+            background: var(--surface);
+            border: 1px solid var(--red, #e05555);
+            color: var(--red, #e05555);
+            border-radius: 4px;
+            padding: 1px 7px;
+            font-size: 0.72rem;
+            cursor: pointer;
+            opacity: 0;
+            transition: opacity 0.15s, color 0.15s, background 0.15s;
+        }
+        .inbox-msg:hover .msg-retry-btn { opacity: 1; }
+        .msg-retry-btn:hover {
+            color: #fff;
+            background: var(--red, #e05555);
+        }
+        .msg-retry-btn[disabled] { opacity: 0.55; cursor: not-allowed; }
         .msg-info-btn {
             flex-shrink: 0;
             display: inline-flex;
@@ -2411,6 +2439,142 @@
         .signal-bars .bar.active.good      { background: var(--yellow); }
         .signal-bars .bar.active.poor      { background: var(--red); }
 
+        /* ── Analytics side-panel wide state ─────────────────────────────────── */
+        #map-panel.panel-analytics-wide {
+            width: 900px;
+            /* Enable container queries so the chart grid can react to the
+               panel's actual width, not the viewport. This lets a user
+               drag the panel narrow and have the 2-column chart layout
+               collapse to a single column without affecting the rest of
+               the dashboard. */
+            container-type: inline-size;
+            container-name: analytics-panel;
+        }
+        @media (max-width: 1100px) { #map-panel.panel-analytics-wide { width: 90vw; } }
+        /* Time-range segmented control */
+        .analytics-range-bar {
+            display: flex;
+            align-items: center;
+            justify-content: flex-end;
+            gap: 8px;
+            margin-bottom: 12px;
+        }
+        .analytics-range-label {
+            font-size: 0.68rem;
+            font-weight: 600;
+            letter-spacing: 0.08em;
+            color: var(--muted);
+            text-transform: uppercase;
+        }
+        .analytics-range-seg {
+            display: flex;
+            border: 1px solid var(--border);
+            border-radius: 4px;
+            overflow: hidden;
+        }
+        .analytics-range-seg button {
+            background: transparent;
+            border: none;
+            color: var(--muted);
+            font-size: 0.7rem;
+            padding: 2px 8px;
+            cursor: pointer;
+            transition: background 0.1s, color 0.1s;
+        }
+        .analytics-range-seg button:not(:last-child) { border-right: 1px solid var(--border); }
+        .analytics-range-seg button:hover { background: var(--border); color: var(--text); }
+        .analytics-range-seg button.active { background: var(--accent); color: #fff; }
+        /* Chart grid: stacked by default. Inside the analytics side panel,
+           switch to 2 columns once the panel itself is at least 720 px wide
+           (container query, not viewport). Below that, charts stack so they
+           always have enough horizontal room to render usefully. */
+        .analytics-chart-grid {
+            display: grid;
+            grid-template-columns: 1fr;
+            gap: 12px;
+            /* Same min-width:0 trick — keeps the grid from being expanded
+               by content (Highcharts SVGs have an intrinsic minimum that
+               otherwise pushes the grid wider than the panel). */
+            min-width: 0;
+        }
+        /* 2 columns down to ~500 px panel width — each chart then gets
+           ~240 px which is still legible for sparkline-style time-series.
+           Anything narrower stacks. */
+        @container analytics-panel (min-width: 500px) {
+            .analytics-chart-grid { grid-template-columns: 1fr 1fr; }
+        }
+        .analytics-chart-slot {
+            position: relative;
+            min-height: 250px;
+            /* CSS grid items default to `min-width: auto` — i.e. the
+               intrinsic minimum size of the content. Highcharts charts
+               have an effective minimum that's wider than half the panel
+               at most viewport widths, which forces the grid column to
+               expand and pushes the whole panel wider (creating the
+               horizontal scrollbar). Setting min-width:0 lets the grid
+               cell shrink past the chart's preferred width; combined
+               with overflow:hidden the chart is clipped to the slot,
+               and our ResizeObserver kicks reflow() to refit it. */
+            min-width: 0;
+            overflow: hidden;
+        }
+        .analytics-chart-slot > div[id$="-chart"] {
+            width: 100%;
+            height: 250px;
+        }
+        /* Empty-state per chart slot */
+        .analytics-empty-state {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            height: 250px;
+            gap: 6px;
+            color: var(--muted);
+            font-size: 0.82rem;
+            opacity: 0.7;
+        }
+        .analytics-empty-state i { font-size: 1.6rem; margin-bottom: 4px; }
+        .analytics-empty-hint { font-size: 0.72rem; }
+        /* ── Relay keys table (panel #7) ──────────────────────────────────────── */
+        .analytics-relays-wrapper {
+            max-height: 280px;
+            overflow-y: auto;
+        }
+        .analytics-relays-table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 0.78rem;
+        }
+        .analytics-relays-table thead th {
+            position: sticky;
+            top: 0;
+            background: var(--surface);
+            color: var(--muted);
+            text-align: left;
+            padding: 6px 8px;
+            border-bottom: 1px solid var(--border);
+        }
+        .analytics-relays-table tbody td {
+            padding: 5px 8px;
+            border-bottom: 1px solid var(--border-subtle, rgba(255,255,255,0.05));
+        }
+        .analytics-relays-table tbody tr:hover {
+            background: var(--bg-hover, rgba(255,255,255,0.04));
+            cursor: pointer;
+        }
+        .relay-hex-chip {
+            font-family: monospace;
+            padding: 1px 6px;
+            border: 1px solid var(--border);
+            border-radius: 4px;
+            background: var(--surface);
+        }
+        .relay-name-empty { color: var(--muted); }
+        .relays-note { font-size: 0.65rem; color: var(--muted); margin-left: 6px; }
+        .analytics-panel-title { font-size: 0.75rem; color: var(--muted); margin: 4px 0 6px; }
+        /* ── End analytics card ──────────────────────────────────────────────── */
+
         /* Light-mode overrides — applied when _bridgeDzTheme() sets body.dz-light
            or when the parent theme already injects that class.  These mirror the
            Nightglass body.dz-light palette and serve as a self-contained fallback
@@ -2442,6 +2606,7 @@
                 <button class="rx-tool-btn" onclick="_openSidePanel('channels')" title="Channel auto-discovery"><i class="fa-solid fa-hashtag"></i></button>
                 <button class="rx-tool-btn" onclick="_openSidePanel('topology')" title="Mesh topology: all contacts + paths"><i class="fa-solid fa-sitemap"></i></button>
                 <button class="rx-tool-btn" onclick="_openSidePanel('heard')" title="Heard nodes — adverts from nodes not in your contacts"><i class="fa-solid fa-satellite-dish"></i></button>
+                <button class="rx-tool-btn" onclick="_openSidePanel('analytics')" title="Historical analytics charts"><i class="fa-solid fa-chart-line"></i></button>
             </div>
             <span id="last-updated"></span>
             <button id="refresh-btn" onclick="loadData()">↻ Refresh</button>
@@ -2623,7 +2788,15 @@
             const s = document.createElement("script");
             s.src = "/js/highcharts/highcharts.js";
             s.setAttribute("data-highcharts", "1");
-            s.onload  = () => { window.define = _define; resolve(); };
+            s.onload  = () => {
+                window.define = _define;
+                // Highcharts defaults every datetime axis to UTC. We want
+                // the user's local time across every chart on the
+                // dashboard (analytics, polar radar, packet-type donut) —
+                // set the global option once, immediately after load.
+                try { Highcharts.setOptions({ time: { useUTC: false } }); } catch (_) {}
+                resolve();
+            };
             s.onerror = () => { window.define = _define; _hcPromise = null; reject(new Error("Highcharts failed to load")); };
             document.head.appendChild(s);
         });
@@ -2898,7 +3071,12 @@
             }
 
             _open();
-            return { sendPluginCommand, sendCmdAndWait, onPluginMessage };
+            // Expose a lightweight ready-check so callers (e.g. the analytics
+            // card's on-load path) can wait for the WS handshake to complete
+            // before issuing cmds — `sendPluginCommand` silently drops them
+            // when the socket is closed.
+            function isOpen() { return !!_sock && _sock.readyState === WebSocket.OPEN; }
+            return { sendPluginCommand, sendCmdAndWait, onPluginMessage, isOpen };
         })();
 
         // ── State-push reducer ────────────────────────────────────────────────────────
@@ -4322,6 +4500,25 @@
                 const ackHtml = (isSent && !isPending && ack != null)
                     ? `<span class="msg-ack${ack ? " acked" : " no-ack"}" title="${ack ? "Delivered" : "No acknowledgement received"}">${ack ? "✓ delivered" : "(no ack)"}</span>`
                     : "";
+                // Retry button on unacked outgoing DMs — only visible on hover
+                // (see .msg-retry-btn CSS). Recipient is the same `rcpt` we
+                // already derived for senderLabel above; body is base64-encoded
+                // so arbitrary characters survive the data attribute.
+                let retryHtml = "";
+                if (isSent && !isPending && ack === false && channel === "Private") {
+                    const selfName = (_deviceMap && _deviceMap.self) || "Me";
+                    let rcpt = "";
+                    if (sender && (sender.startsWith("> ") || sender.startsWith("▶ "))) {
+                        rcpt = sender.replace(/^(> |▶ ?)/, "").trim();
+                    } else if (sender && sender.startsWith("▶")) {
+                        rcpt = sender.slice(1).trim();
+                    }
+                    if (!rcpt || rcpt === selfName) rcpt = _nameForPubkey(peer_key) || rcpt;
+                    if (rcpt) {
+                        const bodyB64 = btoa(unescape(encodeURIComponent(text || "")));
+                        retryHtml = `<button class="msg-retry-btn" data-retry-rcpt="${escHtml(rcpt)}" data-retry-body="${bodyB64}" title="Resend this message"><i class="fa-solid fa-rotate-right"></i> Retry</button>`;
+                    }
+                }
                 // Stash the message in a data attribute we can read on click;
                 // base64-encode so JSON quotes don't break the attribute.
                 // Best-effort parse of the Domoticz timestamp to Unix seconds so
@@ -4348,6 +4545,7 @@
           ${senderLabel ? `<span class="msg-sender">${escHtml(senderLabel)}</span>` : ""}
           <span class="msg-text">${_renderMsgText(text)}</span>
           ${ackHtml}
+          ${retryHtml}
           ${dmBtn}
           ${replyBtn}
         </div>`;
@@ -5430,6 +5628,20 @@
                 _lastSeenByNode = {};
                 _topoLivePulsing.clear();
             }
+            if (_prevView === "analytics" && view !== "analytics") {
+                _analyticsStopTimer();
+                if (_analyticsUnsubWS) { try { _analyticsUnsubWS(); } catch (_) {} _analyticsUnsubWS = null; }
+                if (_analyticsResizeObs) { try { _analyticsResizeObs.disconnect(); } catch (_) {} _analyticsResizeObs = null; }
+                try { if (_analyticsRssiChart)    { _analyticsRssiChart.destroy();    _analyticsRssiChart    = null; } } catch (_) {}
+                try { if (_analyticsSnrChart)     { _analyticsSnrChart.destroy();     _analyticsSnrChart     = null; } } catch (_) {}
+                try { if (_analyticsPacketsChart) { _analyticsPacketsChart.destroy(); _analyticsPacketsChart = null; } } catch (_) {}
+                try { if (_analyticsNoiseChart)   { _analyticsNoiseChart.destroy();   _analyticsNoiseChart   = null; } } catch (_) {}
+                try { if (_analyticsHourlyChart)  { _analyticsHourlyChart.destroy();  _analyticsHourlyChart  = null; } } catch (_) {}
+                try { if (_analyticsHopsChart)    { _analyticsHopsChart.destroy();    _analyticsHopsChart    = null; } } catch (_) {}
+                try { if (_analyticsChanChart)    { _analyticsChanChart.destroy();    _analyticsChanChart    = null; } } catch (_) {}
+                const _mp = document.getElementById("map-panel");
+                if (_mp) _mp.classList.remove("panel-analytics-wide");
+            }
             // Mark the panel open BEFORE dispatching the per-view render.
             // The render helpers gate on _isOpen(view), which requires the
             // "open" class; with the migration the renders are synchronous
@@ -5499,6 +5711,92 @@
                 coords.textContent = "Adverts from nodes not in your contacts";
                 body.innerHTML = `<div class="panel-view" id="heard-view"></div>`;
                 _renderHeardIfOpen();
+            } else if (view === "analytics") {
+                title.textContent  = "Historical analytics";
+                coords.textContent = "Time-series charts since plugin start";
+                panel.classList.add("panel-analytics-wide");
+                body.innerHTML = `<div class="panel-view" id="analytics-view">
+                    <div class="analytics-range-bar">
+                        <span class="analytics-range-label">Time Range</span>
+                        <div class="analytics-range-seg" id="analytics-range-seg">
+                            <button data-range="10800">3h</button>
+                            <button data-range="21600" class="active">6h</button>
+                            <button data-range="43200">12h</button>
+                            <button data-range="86400">24h</button>
+                            <button data-range="172800">48h</button>
+                            <button data-range="604800">7d</button>
+                        </div>
+                    </div>
+                    <div class="analytics-chart-grid" id="analytics-chart-grid">
+                        <div class="analytics-chart-slot" id="analytics-slot-rssi">
+                            <div id="analytics-rssi-chart"></div>
+                        </div>
+                        <div class="analytics-chart-slot" id="analytics-slot-snr">
+                            <div id="analytics-snr-chart"></div>
+                        </div>
+                    </div>
+                </div>`;
+                // Re-create extra chart slots for all IIFE-registered panels
+                // (packets, noise, hourly, relays, hops, channels). These IIFEs
+                // tried to insert slots at page-load time when the inline card
+                // existed; now the grid is built fresh each panel open.
+                const _agGrid = document.getElementById('analytics-chart-grid');
+                if (_agGrid) {
+                    const _extraSlots = [
+                        'analytics-slot-packets',
+                        'analytics-slot-noise',
+                        'analytics-slot-hourly',
+                        'analytics-slot-relays',
+                        'analytics-slot-hops',
+                        'analytics-slot-channels',
+                    ];
+                    for (const slotId of _extraSlots) {
+                        if (!document.getElementById(slotId)) {
+                            const s = document.createElement('div');
+                            s.className = 'analytics-chart-slot';
+                            s.id = slotId;
+                            _agGrid.appendChild(s);
+                        }
+                    }
+                    // Re-bind the relay-row delegated click (was bound to the old grid
+                    // element which is now gone; re-attach to the new one).
+                    if (!_agGrid._relaysClickBound) {
+                        _agGrid._relaysClickBound = true;
+                        _agGrid.addEventListener('click', function (ev) {
+                            const row = ev.target.closest('tr[data-relay-name]');
+                            if (!row) return;
+                            const name = row.dataset.relayName;
+                            if (name) _openSidePanel('contact:' + name);
+                        });
+                    }
+                }
+                _analyticsAttachUI();
+                // Observe the chart grid AND every individual chart slot. The
+                // panel-level observer wasn't enough: when the container
+                // query toggles the grid from 2 columns to 1, the slot
+                // widths change but the panel's own width didn't change in
+                // that same frame, so no callback fired. Observing each
+                // slot guarantees we catch every geometry change — drag
+                // resize, column-count flip, font reflow, anything.
+                if (typeof ResizeObserver !== "undefined") {
+                    if (_analyticsResizeObs) { try { _analyticsResizeObs.disconnect(); } catch (_) {} }
+                    _analyticsResizeObs = new ResizeObserver(() => _scheduleAnalyticsReflow());
+                    const _ag = document.getElementById("analytics-chart-grid");
+                    if (_ag) _analyticsResizeObs.observe(_ag);
+                    document.querySelectorAll(".analytics-chart-slot").forEach(s => {
+                        try { _analyticsResizeObs.observe(s); } catch (_) {}
+                    });
+                }
+                Promise.all([_loadHighcharts(), _waitForWSOpen(10_000)]).then(() => {
+                    if (!_analyticsIsOpen()) return;
+                    _analyticsRefresh();
+                    _analyticsStartTimer();
+                }).catch(err => {
+                    document.querySelectorAll(".analytics-chart-slot").forEach(s => {
+                        s.innerHTML = `<div class="analytics-empty-state" style="color:var(--red,#e05555);">Could not initialise analytics: ${(err && err.message) || err}. Reload or click a time-range button to retry.</div>`;
+                    });
+                    console.warn('Analytics init failed', err);
+                });
             } else if (view === "stats") {
                 title.textContent  = "Statistics";
                 coords.textContent = "Lifetime totals & leaderboards";
@@ -9914,12 +10212,14 @@ Larger = more reliable routing but smaller mesh diameter.">Path hash size</label
                 const w = Math.max(360, Math.min(window.innerWidth - 80, window.innerWidth - e.clientX));
                 panel.style.width = w + "px";
                 _scheduleMapInvalidate();
+                _scheduleAnalyticsReflow();
             });
             document.addEventListener("mouseup", () => {
                 if (!dragging) return;
                 dragging = false;
                 panel.classList.remove("resizing");
                 if (_leafletMap) _leafletMap.invalidateSize();
+                _scheduleAnalyticsReflow();
                 try { localStorage.setItem(LS_KEY, parseInt(panel.style.width, 10) || 480); } catch (_) {}
             });
         })();
@@ -10577,6 +10877,37 @@ Larger = more reliable routing but smaller mesh diameter.">Path hash size</label
             });
         }
 
+        // Delegated listener for the retry button on unacked outgoing DMs.
+        // Resends "rcpt: body" via the same WS cmd path as _sendMessage, then
+        // forces an inbox re-query so the new outgoing row replaces (logically)
+        // the unacked one.
+        if (!window._mcRetryListenerAdded) {
+            window._mcRetryListenerAdded = true;
+            document.addEventListener("click", async (ev) => {
+                const btn = ev.target.closest(".msg-retry-btn");
+                if (!btn || btn.hasAttribute("disabled")) return;
+                ev.stopPropagation();
+                const rcpt = btn.dataset.retryRcpt || "";
+                let body = "";
+                try { body = decodeURIComponent(escape(atob(btn.dataset.retryBody || ""))); }
+                catch (_) { body = ""; }
+                if (!rcpt || !body) return;
+                const originalHtml = btn.innerHTML;
+                btn.setAttribute("disabled", "disabled");
+                btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Retrying…';
+                try {
+                    await _pluginWS.sendCmdAndWait(`${rcpt}: ${body}`);
+                    // Re-query so the freshly-stored outgoing row (and its
+                    // pending ack) is rendered. Same trick _sendMessage uses.
+                    if (_convNode) _convQueryNewest(); else _mainQueryNewest();
+                } catch (e) {
+                    btn.removeAttribute("disabled");
+                    btn.innerHTML = originalHtml;
+                    alert(`Retry failed: ${(e && e.message) || e}`);
+                }
+            });
+        }
+
         function _clearReply() {
             // Remove any @[Username] prefix from the input
             const input = document.getElementById("compose-input");
@@ -10679,6 +11010,1036 @@ Larger = more reliable routing but smaller mesh diameter.">Path hash size</label
             input.setSelectionRange(input.value.length, input.value.length);
             document.getElementById("compose-bar").scrollIntoView({ behavior: "smooth", block: "nearest" });
         }
+
+        // ── Analytics card ────────────────────────────────────────────────────
+        //
+        // Registration API for other panels:
+        //   _analyticsPanels.push({ id: <string>, panel: <string>, render: function(data){} })
+        //   where:
+        //     id     — unique identifier for this entry (e.g. "rssi", "snr")
+        //     panel  — the analytics panel name sent to the backend (e.g. "rssi")
+        //     render — called with the cmd_result data when the response arrives
+        //
+        // The registration must happen before or immediately after _analyticsInit()
+        // is called (on DOMContentLoaded). Entries added while the card is open
+        // will be included in the next refresh cycle.
+        //
+        const _analyticsPanels = [];
+
+        // Current time range in seconds. Persisted in localStorage.
+        let _analyticsRange = 21600;  // default 6 h
+
+        // Auto-refresh timer handle (setInterval while card is open).
+        let _analyticsRefreshTimer = null;
+
+        // Generation counter — bumped on every refresh so stale responses are dropped.
+        let _analyticsGeneration = 0;
+
+        // Monotonic command-id counter shared across all analytics commands.
+        let _analyticsCmdId = 1;
+
+        // Unsubscribe handle for the analytics onPluginMessage listener.
+        let _analyticsUnsubWS = null;
+
+        // Escape node names before passing to Highcharts, which may render
+        // legend labels as HTML in some configurations.
+        const _escAnalyticsName = (name) => {
+            const div = document.createElement("div");
+            div.textContent = name == null ? "unknown" : String(name);
+            return div.innerHTML;
+        };
+
+        // Highcharts instances for RSSI and SNR charts (kept for cross-chart legend sync).
+        let _analyticsRssiChart = null;
+        let _analyticsSnrChart  = null;
+        // ResizeObserver attached to the side panel while the analytics view
+        // is active; disconnected on view leave.
+        let _analyticsResizeObs = null;
+
+        // Reflow all analytics charts in a single rAF tick (called from the
+        // side-panel resize handler so charts track the container width).
+        let _analyticsReflowPending = false;
+        function _scheduleAnalyticsReflow() {
+            if (_analyticsReflowPending) return;
+            _analyticsReflowPending = true;
+            requestAnimationFrame(() => {
+                _analyticsReflowPending = false;
+                [_analyticsRssiChart, _analyticsSnrChart, _analyticsPacketsChart,
+                 _analyticsNoiseChart, _analyticsHourlyChart, _analyticsHopsChart,
+                 _analyticsChanChart].forEach(c => {
+                    if (c) { try { c.reflow(); } catch (_) {} }
+                });
+            });
+        }
+
+        // Map node → colour (cache so palette is stable within a session).
+        const _analyticsColorCache = {};
+
+        // Returns a hash-stable HSL colour string for a node key.
+        function _nodePalette(pk) {
+            if (_analyticsColorCache[pk]) return _analyticsColorCache[pk];
+            let h = 0;
+            for (let i = 0; i < pk.length; i++) {
+                h = (h * 31 + pk.charCodeAt(i)) >>> 0;
+            }
+            const hue = h % 360;
+            const col = `hsl(${hue}, 65%, 58%)`;
+            _analyticsColorCache[pk] = col;
+            return col;
+        }
+
+        // Bucket size table from 00-timeseries-store.md.
+        function _analyticsBucket(rangeSecs) {
+            if (rangeSecs <= 10800)  return 60;
+            if (rangeSecs <= 21600)  return 120;
+            if (rangeSecs <= 43200)  return 300;
+            if (rangeSecs <= 86400)  return 600;
+            if (rangeSecs <= 172800) return 1200;
+            return 3600;
+        }
+
+        // Fire one analytics WS command per registered panel, drop stale results
+        // via the generation guard.
+        function _analyticsRefresh() {
+            if (!_analyticsIsOpen()) return;
+            const gen = ++_analyticsGeneration;
+            const now = Math.floor(Date.now() / 1000);
+            const from = now - _analyticsRange;
+            const bucket = _analyticsBucket(_analyticsRange);
+
+            // Register a one-shot listener for this generation's results.
+            // We keep a running unsubscribe and replace it so we never pile up
+            // duplicate listeners.
+            if (_analyticsUnsubWS) { try { _analyticsUnsubWS(); } catch (_) {} }
+            _analyticsUnsubWS = _pluginWS.onPluginMessage(msg => {
+                if (msg.t !== 'cmd_result') return;
+                // The backend echoes analytics_id when present; fall back to
+                // matching by panel name (the backend always echoes `panel`).
+                const matchId = msg.analytics_id || msg.panel;
+                if (!matchId) return;
+                // Drop stale-generation results when analytics_gen is present.
+                if (msg.analytics_gen !== undefined && msg.analytics_gen !== gen) return;
+                // Match by id first; if not found, match by panel name.
+                let entry = _analyticsPanels.find(p => p.id === matchId);
+                if (!entry) entry = _analyticsPanels.find(p => p.panel === matchId);
+                if (entry) {
+                    try { entry.render(msg); } catch (e) { console.warn('analytics render error', e); }
+                }
+            });
+
+            for (const p of _analyticsPanels) {
+                const id = _analyticsCmdId++;
+                _pluginWS.sendPluginCommand({
+                    t: 'cmd',
+                    cmd: 'analytics',
+                    id,
+                    panel: p.panel,
+                    analytics_id: p.id,
+                    analytics_gen: gen,
+                    from,
+                    to: now,
+                    bucket
+                });
+            }
+        }
+
+        // Whether the analytics side-panel is currently open.
+        function _analyticsIsOpen() {
+            return _isOpen('analytics');
+        }
+
+        // Start / stop the 60-second auto-refresh timer.
+        function _analyticsStartTimer() {
+            _analyticsStopTimer();
+            _analyticsRefreshTimer = setInterval(_analyticsRefresh, 60000);
+        }
+        function _analyticsStopTimer() {
+            if (_analyticsRefreshTimer) { clearInterval(_analyticsRefreshTimer); _analyticsRefreshTimer = null; }
+        }
+
+        // Human-readable range label for empty states.
+        function _analyticsRangeLabel(secs) {
+            if (secs < 3600)   return `${Math.round(secs / 60)} minutes`;
+            if (secs < 86400)  return `${(secs / 3600).toFixed(secs % 3600 === 0 ? 0 : 1)} hours`;
+            return `${(secs / 86400).toFixed(secs % 86400 === 0 ? 0 : 1)} days`;
+        }
+
+        // ── RSSI chart renderer ───────────────────────────────────────────────
+        function _renderRssiChart(data) {
+            const slot = document.getElementById('analytics-slot-rssi');
+            if (!slot) return;
+            const rangeLabel = _analyticsRangeLabel(_analyticsRange);
+            if (!data || !data.ok || !data.series || !data.series.length) {
+                slot.innerHTML = `<div class="analytics-empty-state">
+                    <i class="fa-solid fa-chart-line"></i>
+                    <span>No RSSI samples in the last ${rangeLabel}</span>
+                    <span class="analytics-empty-hint">Widen the range or wait for more data</span>
+                </div>`;
+                if (_analyticsRssiChart) { try { _analyticsRssiChart.destroy(); } catch (_) {} _analyticsRssiChart = null; }
+                return;
+            }
+            const series = _analyticsCapSeries(data.series);
+            if (_analyticsRssiChart && _analyticsRssiChart.series &&
+                _analyticsRssiChart.series.length === series.length &&
+                _analyticsRssiChart.series.every((s, i) => s.name === series[i].name)) {
+                series.forEach((s, i) => _analyticsRssiChart.series[i].setData(s.data, true, false, false));
+                return;
+            }
+            if (_analyticsRssiChart) { try { _analyticsRssiChart.destroy(); } catch (_) {} _analyticsRssiChart = null; }
+            slot.innerHTML = '<div id="analytics-rssi-chart" style="width:100%;height:250px"></div>';
+            _analyticsRssiChart = Highcharts.chart('analytics-rssi-chart', _analyticsChartOptions({
+                title: 'RSSI over time',
+                yAxisTitle: 'RSSI (dBm)',
+                series,
+                sibling: () => _analyticsSnrChart
+            }));
+        }
+
+        // ── SNR chart renderer ────────────────────────────────────────────────
+        function _renderSnrChart(data) {
+            const slot = document.getElementById('analytics-slot-snr');
+            if (!slot) return;
+            const rangeLabel = _analyticsRangeLabel(_analyticsRange);
+            if (!data || !data.ok || !data.series || !data.series.length) {
+                slot.innerHTML = `<div class="analytics-empty-state">
+                    <i class="fa-solid fa-chart-line"></i>
+                    <span>No SNR samples in the last ${rangeLabel}</span>
+                    <span class="analytics-empty-hint">Widen the range or wait for more data</span>
+                </div>`;
+                if (_analyticsSnrChart) { try { _analyticsSnrChart.destroy(); } catch (_) {} _analyticsSnrChart = null; }
+                return;
+            }
+            const series = _analyticsCapSeries(data.series);
+            if (_analyticsSnrChart && _analyticsSnrChart.series &&
+                _analyticsSnrChart.series.length === series.length &&
+                _analyticsSnrChart.series.every((s, i) => s.name === series[i].name)) {
+                series.forEach((s, i) => _analyticsSnrChart.series[i].setData(s.data, true, false, false));
+                return;
+            }
+            if (_analyticsSnrChart) { try { _analyticsSnrChart.destroy(); } catch (_) {} _analyticsSnrChart = null; }
+            slot.innerHTML = '<div id="analytics-snr-chart" style="width:100%;height:250px"></div>';
+            _analyticsSnrChart = Highcharts.chart('analytics-snr-chart', _analyticsChartOptions({
+                title: 'SNR over time',
+                yAxisTitle: 'SNR (dB)',
+                series,
+                sibling: () => _analyticsRssiChart
+            }));
+        }
+
+        // Cap series to top-8 by sample count; collapse the rest into "Other" (averaged).
+        function _analyticsCapSeries(rawSeries) {
+            const MAX = 8;
+            if (rawSeries.length <= MAX) {
+                return rawSeries.map(s => ({
+                    name: _escAnalyticsName(s.node || s.name),
+                    data: (s.data || []).map(([ts, v]) => [ts * 1000, v]),
+                    color: _nodePalette(s.node || s.name || ''),
+                    type: 'spline',
+                    lineWidth: 1.5,
+                    marker: { enabled: false }
+                }));
+            }
+            // Sort by sample count descending.
+            const sorted = [...rawSeries].sort((a, b) => (b.data || []).length - (a.data || []).length);
+            const top = sorted.slice(0, MAX);
+            const rest = sorted.slice(MAX);
+            // Build Other: merge all timestamps and average same-bucket values.
+            const otherMap = {};
+            const otherCount = {};
+            for (const s of rest) {
+                for (const [ts, v] of (s.data || [])) {
+                    if (v === null || v === undefined) continue;
+                    otherMap[ts]   = (otherMap[ts]   || 0) + v;
+                    otherCount[ts] = (otherCount[ts] || 0) + 1;
+                }
+            }
+            const otherData = Object.keys(otherMap)
+                .sort((a, b) => a - b)
+                .map(ts => [parseInt(ts, 10) * 1000, otherMap[ts] / otherCount[ts]]);
+
+            const result = top.map(s => ({
+                name: _escAnalyticsName(s.node || s.name),
+                data: (s.data || []).map(([ts, v]) => [ts * 1000, v]),
+                color: _nodePalette(s.node || s.name || ''),
+                type: 'spline',
+                lineWidth: 1.5,
+                marker: { enabled: false }
+            }));
+            if (otherData.length) {
+                result.push({
+                    name: 'Other',
+                    data: otherData,
+                    color: '#888888',
+                    type: 'spline',
+                    lineWidth: 1,
+                    dashStyle: 'ShortDash',
+                    marker: { enabled: false }
+                });
+            }
+            return result;
+        }
+
+        // Shared Highcharts options factory. sibling() returns the other chart instance.
+        function _analyticsChartOptions({ title, yAxisTitle, series, sibling }) {
+            return {
+                chart: {
+                    backgroundColor: 'transparent',
+                    style: { fontFamily: 'inherit', color: 'var(--text)' },
+                    animation: false,
+                    marginRight: 10
+                },
+                // Hide the Highcharts hamburger / context menu on the RSSI,
+                // SNR, and Noise charts (the three that build their options
+                // via this helper). The other analytics charts already set
+                // this inline.
+                exporting: { enabled: false },
+                title: {
+                    text: title,
+                    style: { color: 'var(--text)', fontSize: '0.78rem', fontWeight: '600' },
+                    align: 'left',
+                    margin: 8
+                },
+                xAxis: {
+                    type: 'datetime',
+                    lineColor: 'var(--border)',
+                    tickColor: 'var(--border)',
+                    labels: { style: { color: 'var(--muted)', fontSize: '0.68rem' } },
+                    crosshair: { color: 'rgba(255,255,255,0.15)', dashStyle: 'Solid' }
+                },
+                yAxis: {
+                    title: { text: yAxisTitle, style: { color: 'var(--muted)', fontSize: '0.7rem' } },
+                    gridLineColor: 'rgba(255,255,255,0.06)',
+                    labels: { style: { color: 'var(--muted)', fontSize: '0.68rem' } }
+                },
+                tooltip: {
+                    backgroundColor: 'var(--surface)',
+                    borderColor: 'var(--border)',
+                    style: { color: 'var(--text)', fontSize: '0.75rem' },
+                    xDateFormat: '%H:%M:%S',
+                    shared: false
+                },
+                legend: {
+                    enabled: true,
+                    itemStyle: { color: 'var(--text)', fontSize: '0.72rem', fontWeight: 'normal' },
+                    itemHoverStyle: { color: 'var(--accent)' }
+                },
+                plotOptions: {
+                    series: {
+                        events: {
+                            legendItemClick: function(e) {
+                                // Cross-chart legend: toggle the same series in the sibling chart.
+                                const siblingChart = sibling();
+                                if (!siblingChart) return;
+                                const seriesName = this.name;
+                                const isVisible  = this.visible;
+                                const siblingSeries = siblingChart.series.find(s => s.name === seriesName);
+                                if (siblingSeries) {
+                                    if (isVisible) siblingSeries.hide(); else siblingSeries.show();
+                                }
+                                // Let Highcharts perform the default toggle on this chart too.
+                            }
+                        }
+                    }
+                },
+                credits: { enabled: false },
+                series
+            };
+        }
+
+        // ── Analytics side-panel helpers ──────────────────────────────────────
+
+        // Poll until the plugin WebSocket is open (or time out).
+        // Used by _openSidePanel when entering the analytics view.
+        function _waitForWSOpen(timeoutMs) {
+            return new Promise((resolve, reject) => {
+                if (_pluginWS.isOpen && _pluginWS.isOpen()) return resolve();
+                const t0 = Date.now();
+                (function poll() {
+                    if (_pluginWS.isOpen && _pluginWS.isOpen()) return resolve();
+                    if (Date.now() - t0 > timeoutMs) return reject(new Error("WS open timeout"));
+                    setTimeout(poll, 150);
+                })();
+            });
+        }
+
+        // Wire the range-segment control that lives inside the analytics panel body.
+        // Called every time the analytics panel is opened (body.innerHTML is replaced
+        // each open, so event listeners must be re-attached).
+        function _analyticsAttachUI() {
+            const seg = document.getElementById('analytics-range-seg');
+            if (!seg) return;
+            seg.querySelectorAll('button').forEach(btn => {
+                btn.classList.toggle('active', parseInt(btn.dataset.range, 10) === _analyticsRange);
+            });
+            seg.addEventListener('click', ev => {
+                const btn = ev.target.closest('button[data-range]');
+                if (!btn) return;
+                const r = parseInt(btn.dataset.range, 10);
+                _analyticsRange = r;
+                seg.querySelectorAll('button').forEach(b => b.classList.toggle('active', parseInt(b.dataset.range, 10) === r));
+                try { localStorage.setItem('meshcore.analytics.range', String(r)); } catch (_) {}
+                _analyticsRefresh();
+            });
+        }
+
+        // ── Analytics panel init (registration only) ──────────────────────────
+        function _analyticsInit() {
+            // Load persisted range.
+            try {
+                const saved = localStorage.getItem('meshcore.analytics.range');
+                if (saved) {
+                    const n = parseInt(saved, 10);
+                    if ([10800, 21600, 43200, 86400, 172800, 604800].includes(n)) _analyticsRange = n;
+                }
+            } catch (_) {}
+
+            // Register built-in RSSI and SNR panels.
+            _analyticsPanels.push({ id: 'rssi', panel: 'rssi', render: _renderRssiChart });
+            _analyticsPanels.push({ id: 'snr',  panel: 'snr',  render: _renderSnrChart  });
+        }
+
+        // Initialise after DOM is ready (the IIFE runs at DOMContentLoaded time or
+        // inline — schedule via microtask to be safe).
+        Promise.resolve().then(_analyticsInit);
+
+        // ── Packet volume chart (#4) ──────────────────────────────────────────
+        let _analyticsPacketsChart = null;
+
+        function _renderPacketsChart(data) {
+            const slot = document.getElementById('analytics-slot-packets');
+            if (!slot) return;
+            const rangeLabel = _analyticsRangeLabel(_analyticsRange);
+
+            const series = data && data.ok && Array.isArray(data.series) ? data.series : [];
+            const rxData = [], txData = [];
+            for (const row of series) {
+                // ts is Unix epoch-seconds from the backend.
+                const x = row.ts * 1000;
+                rxData.push([x, row.rx || 0]);
+                txData.push([x, row.tx || 0]);
+            }
+
+            // Empty state when both series carry no data points.
+            if (rxData.length === 0 && txData.length === 0) {
+                if (_analyticsPacketsChart) { try { _analyticsPacketsChart.destroy(); } catch (_) {} _analyticsPacketsChart = null; }
+                slot.innerHTML = `<div class="analytics-empty-state">
+                    <i class="fa-solid fa-chart-area"></i>
+                    <span>No packet data in the last ${rangeLabel}</span>
+                    <span class="analytics-empty-hint">Packet counters are sampled every 5 min from the self node</span>
+                </div>`;
+                return;
+            }
+
+            // Static 2-series structure (RX / TX) → in-place update when chart exists.
+            if (_analyticsPacketsChart && _analyticsPacketsChart.series &&
+                _analyticsPacketsChart.series.length === 2) {
+                _analyticsPacketsChart.series[0].setData(rxData, false, false, false);
+                _analyticsPacketsChart.series[1].setData(txData, true,  false, false);
+                return;
+            }
+            if (_analyticsPacketsChart) { try { _analyticsPacketsChart.destroy(); } catch (_) {} _analyticsPacketsChart = null; }
+            slot.innerHTML = '<div id="analytics-chart-packets" style="width:100%;height:250px"></div>';
+
+            // NOTE: if the selected range straddles a plugin restart, the backend's
+            // _ts_packets_add drops the very first delta on session start to avoid a
+            // counter-vs-zero spike.  A restart mid-range may still produce a one-bucket
+            // dip where the new session's first sample is zero; this is cosmetic and expected.
+            _analyticsPacketsChart = Highcharts.chart('analytics-chart-packets', {
+                chart: {
+                    type: 'spline',
+                    backgroundColor: 'transparent',
+                    style: { fontFamily: 'inherit', color: 'var(--text)' },
+                    animation: false,
+                    marginRight: 10,
+                },
+                title: {
+                    text: 'RX / TX packet volume',
+                    style: { color: 'var(--text)', fontSize: '0.78rem', fontWeight: '600' },
+                    align: 'left',
+                    margin: 8,
+                },
+                credits: { enabled: false },
+                exporting: { enabled: false },
+                xAxis: {
+                    type: 'datetime',
+                    lineColor: 'var(--border)',
+                    tickColor: 'var(--border)',
+                    labels: { style: { color: 'var(--muted)', fontSize: '0.68rem' } },
+                    crosshair: { color: 'rgba(255,255,255,0.15)', dashStyle: 'Solid' },
+                },
+                yAxis: {
+                    title: { text: 'packets', style: { color: 'var(--muted)', fontSize: '0.7rem' } },
+                    gridLineColor: 'rgba(255,255,255,0.06)',
+                    labels: {
+                        style: { color: 'var(--muted)', fontSize: '0.68rem' },
+                        // Packet counts are whole numbers.
+                        formatter: function () { return Math.round(this.value); },
+                    },
+                    allowDecimals: false,
+                    min: 0,
+                },
+                tooltip: {
+                    shared: true,
+                    backgroundColor: 'var(--surface)',
+                    borderColor: 'var(--border)',
+                    style: { color: 'var(--text)', fontSize: '0.75rem' },
+                    formatter: function () {
+                        const ts = Highcharts.dateFormat('%H:%M, %e %b', this.x);
+                        let s = `<span style="font-size:0.65rem;color:var(--muted)">${ts}</span><br>`;
+                        this.points.forEach(pt => {
+                            const dir = pt.series.name === 'RX' ? 'rx' : 'tx';
+                            s += `<span style="color:${pt.color}">●</span> ${pt.y.toLocaleString()} packets (${dir})<br>`;
+                        });
+                        return s;
+                    },
+                },
+                legend: {
+                    enabled: true,
+                    itemStyle: { color: 'var(--text)', fontSize: '0.72rem', fontWeight: 'normal' },
+                    itemHoverStyle: { color: 'var(--accent)' },
+                },
+                series: [
+                    { name: 'RX', color: '#3eb6e6', lineWidth: 2, marker: { enabled: false }, data: rxData },
+                    { name: 'TX', color: '#e63946', lineWidth: 2, marker: { enabled: false }, data: txData },
+                ],
+            });
+        }
+
+        // ── Noise floor chart (#3) ────────────────────────────────────────────
+        let _analyticsNoiseChart = null;
+
+        function _renderNoiseChart(data) {
+            const slot = document.getElementById('analytics-slot-noise');
+            if (!slot) return;
+            const rangeLabel = _analyticsRangeLabel(_analyticsRange);
+
+            // Shape: [{node: <str>, data: [[bucket_ts_s, avg_noise_dbm], ...]}, ...]
+            const rawSeries = data && data.ok && Array.isArray(data.series)
+                ? data.series.filter(s => Array.isArray(s.data) && s.data.length > 0)
+                : [];
+
+            if (rawSeries.length === 0) {
+                if (_analyticsNoiseChart) { try { _analyticsNoiseChart.destroy(); } catch (_) {} _analyticsNoiseChart = null; }
+                slot.innerHTML = `<div class="analytics-empty-state">
+                    <i class="fa-solid fa-wave-square"></i>
+                    <span>No noise floor data in the last ${rangeLabel}</span>
+                    <span class="analytics-empty-hint">Only self noise floor is recorded today. Remote-node noise reporting needs periodic STATUS_SYNC polling — planned.</span>
+                </div>`;
+                return;
+            }
+
+            // Dashed series style distinguishes "ambient" noise from
+            // "link" data (RSSI/SNR) in the sibling charts.
+            const hcSeries = rawSeries.map(s => ({
+                name: _escAnalyticsName(s.node),
+                color: _nodePalette(s.node || ''),
+                dashStyle: 'ShortDash',
+                lineWidth: 2,
+                marker: { enabled: false },
+                // Convert epoch-seconds → milliseconds for the datetime axis.
+                data: s.data.map(([ts, v]) => [ts * 1000, v]),
+            }));
+
+            if (_analyticsNoiseChart && _analyticsNoiseChart.series &&
+                _analyticsNoiseChart.series.length === hcSeries.length &&
+                _analyticsNoiseChart.series.every((s, i) => s.name === hcSeries[i].name)) {
+                hcSeries.forEach((s, i) => _analyticsNoiseChart.series[i].setData(s.data, true, false, false));
+                return;
+            }
+            if (_analyticsNoiseChart) { try { _analyticsNoiseChart.destroy(); } catch (_) {} _analyticsNoiseChart = null; }
+            slot.innerHTML = '<div id="analytics-chart-noise" style="width:100%;height:250px"></div>';
+
+            _analyticsNoiseChart = Highcharts.chart('analytics-chart-noise', _analyticsChartOptions({
+                title: 'Noise floor',
+                yAxisTitle: 'Noise (dBm)',
+                series: hcSeries,
+                // No cross-chart sibling for noise; each series is dashed so the
+                // "ambient vs link" distinction is already visually clear.
+                sibling: () => null,
+            }));
+        }
+
+        // Register packets + noise panels (slots are created in _openSidePanel).
+        (function _registerExtraPanels() {
+            if (!_analyticsPanels.some(p => p.panel === 'packets')) {
+                _analyticsPanels.push(
+                    { id: 'analytics-chart-packets', panel: 'packets', render: _renderPacketsChart },
+                    { id: 'analytics-chart-noise',   panel: 'noise',   render: _renderNoiseChart  }
+                );
+            }
+        }());
+
+        // ── Traffic volume per hour chart (#6) ───────────────────────────────
+        let _analyticsHourlyChart = null;
+
+        function _renderHourlyChart(data) {
+            const slot = document.getElementById('analytics-slot-hourly');
+            if (!slot) return;
+
+            if (!data || !data.ok) {
+                const errMsg = _escAnalyticsName((data && data.error) || 'unknown error');
+                slot.innerHTML = `<div class="analytics-empty-state" style="color:var(--red,#e05555);">Could not load: ${errMsg}</div>`;
+                return;
+            }
+
+            const rows = Array.isArray(data.rows) ? data.rows : [];
+
+            if (rows.length === 0) {
+                if (_analyticsHourlyChart) { try { _analyticsHourlyChart.destroy(); } catch (_) {} _analyticsHourlyChart = null; }
+                slot.innerHTML = `<div class="analytics-empty-state">
+                    <i class="fa-solid fa-chart-column"></i>
+                    <span>No packet activity in this range</span>
+                </div>`;
+                return;
+            }
+
+            // Determine x-axis tick interval based on selected range.
+            // 6 h / 12 h → every hour; 48 h → every 6 h; 7 d → every 24 h.
+            let tickInterval;
+            if (_analyticsRange <= 43200) {
+                tickInterval = 3600 * 1000;       // 1 h
+            } else if (_analyticsRange <= 172800) {
+                tickInterval = 6 * 3600 * 1000;   // 6 h
+            } else {
+                tickInterval = 24 * 3600 * 1000;  // 24 h
+            }
+
+            // Build column data: [epoch_ms, total_packets].
+            const colData = rows.map(r => {
+                const ts = (r.hour_ts || r.ts || 0) * 1000;
+                const rx = r.rx_count != null ? r.rx_count : (r.rx || 0);
+                const tx = r.tx_count != null ? r.tx_count : (r.tx || 0);
+                return { x: ts, y: rx + tx, rx, tx };
+            });
+
+            // Static single-series column chart → in-place update when chart exists.
+            if (_analyticsHourlyChart && _analyticsHourlyChart.series &&
+                _analyticsHourlyChart.series.length === 1) {
+                _analyticsHourlyChart.series[0].setData(colData, true, false, false);
+                return;
+            }
+            if (_analyticsHourlyChart) { try { _analyticsHourlyChart.destroy(); } catch (_) {} _analyticsHourlyChart = null; }
+            slot.innerHTML = '<div id="analytics-chart-hourly" style="width:100%;height:250px"></div>';
+
+            _analyticsHourlyChart = Highcharts.chart('analytics-chart-hourly', {
+                chart: {
+                    type: 'column',
+                    backgroundColor: 'transparent',
+                    style: { fontFamily: 'inherit', color: 'var(--text)' },
+                    animation: false,
+                    marginRight: 10,
+                },
+                title: {
+                    text: 'TRAFFIC VOLUME (packets per hour)',
+                    style: { color: 'var(--text)', fontSize: '0.78rem', fontWeight: '600' },
+                    align: 'left',
+                    margin: 8,
+                },
+                credits: { enabled: false },
+                exporting: { enabled: false },
+                legend: { enabled: false },
+                xAxis: {
+                    type: 'datetime',
+                    lineColor: 'var(--border)',
+                    tickColor: 'var(--border)',
+                    tickInterval: tickInterval,
+                    labels: {
+                        style: { color: 'var(--muted)', fontSize: '0.68rem' },
+                        formatter: function () {
+                            const fmt = (typeof _analyticsRange === 'number' && _analyticsRange > 86400) ? '%e %b %H:00' : '%H:00';
+                            return Highcharts.dateFormat(fmt, this.value);
+                        },
+                    },
+                },
+                yAxis: {
+                    title: { text: 'packets', style: { color: 'var(--muted)', fontSize: '0.7rem' } },
+                    gridLineColor: 'rgba(255,255,255,0.06)',
+                    labels: {
+                        style: { color: 'var(--muted)', fontSize: '0.68rem' },
+                        formatter: function () { return Math.round(this.value); },
+                    },
+                    allowDecimals: false,
+                    min: 0,
+                },
+                tooltip: {
+                    backgroundColor: 'var(--surface)',
+                    borderColor: 'var(--border)',
+                    style: { color: 'var(--text)', fontSize: '0.75rem' },
+                    formatter: function () {
+                        const hourLabel = Highcharts.dateFormat('%H:00, %e %b', this.x);
+                        const total = this.y.toLocaleString();
+                        const rx = (this.point.rx || 0).toLocaleString();
+                        const tx = (this.point.tx || 0).toLocaleString();
+                        return `<span style="font-size:0.65rem;color:var(--muted)">${hourLabel}</span><br>` +
+                               `${total} packets (${rx} RX / ${tx} TX)`;
+                    },
+                },
+                plotOptions: {
+                    column: {
+                        color: '#8b5cf6',
+                        borderWidth: 0,
+                        pointPadding: 0.05,
+                        groupPadding: 0.02,
+                    },
+                },
+                series: [{ name: 'Packets', data: colData }],
+            });
+        }
+
+        // ── Top relay keys table (#7) ─────────────────────────────────────────
+
+        function _renderRelaysTable(data) {
+            const slot = document.getElementById('analytics-slot-relays');
+            if (!slot) return;
+
+            if (!data || !data.ok) {
+                const errMsg = _escAnalyticsName((data && data.error) || 'unknown error');
+                slot.innerHTML = `<div class="analytics-empty-state" style="color:var(--red,#e05555);">Could not load: ${errMsg}</div>`;
+                return;
+            }
+
+            const rows = Array.isArray(data.rows) ? data.rows.slice() : [];
+            rows.sort((a, b) => (b.count || 0) - (a.count || 0));
+
+            if (rows.length === 0) {
+                slot.innerHTML = `<div class="analytics-empty-state">
+                    <i class="fa-solid fa-route"></i>
+                    <span>No relay activity recorded yet</span>
+                </div>`;
+                return;
+            }
+
+            // Build table rows safely using DOM manipulation (XSS-safe).
+            const frag = document.createDocumentFragment();
+
+            const wrapper = document.createElement('div');
+            wrapper.className = 'analytics-relays-wrapper';
+
+            const table = document.createElement('table');
+            table.className = 'analytics-relays-table';
+
+            // Header.
+            const thead = document.createElement('thead');
+            const hr = document.createElement('tr');
+            ['Hex', 'Name', 'Count'].forEach((label, i) => {
+                const th = document.createElement('th');
+                th.textContent = label;
+                if (i === 2) th.style.textAlign = 'right';
+                hr.appendChild(th);
+            });
+            thead.appendChild(hr);
+            table.appendChild(thead);
+
+            // Body.
+            const tbody = document.createElement('tbody');
+            for (const row of rows) {
+                const hex = String(row.hex || row.hex_key || '??');
+                const name = row.name || null;
+                const count = (row.count || 0).toLocaleString();
+
+                const tr = document.createElement('tr');
+                if (name) tr.dataset.relayName = name;
+
+                const tdHex = document.createElement('td');
+                const chip = document.createElement('span');
+                chip.className = 'relay-hex-chip';
+                chip.textContent = hex;
+                tdHex.appendChild(chip);
+
+                const tdName = document.createElement('td');
+                if (name) {
+                    tdName.textContent = name;
+                } else {
+                    const em = document.createElement('span');
+                    em.className = 'relay-name-empty';
+                    em.textContent = '—';
+                    tdName.appendChild(em);
+                }
+
+                const tdCount = document.createElement('td');
+                tdCount.textContent = count;
+                tdCount.style.textAlign = 'right';
+
+                tr.appendChild(tdHex);
+                tr.appendChild(tdName);
+                tr.appendChild(tdCount);
+                tbody.appendChild(tr);
+            }
+            table.appendChild(tbody);
+            wrapper.appendChild(table);
+
+            // Title bar above the table wrapper.
+            const titleBar = document.createElement('div');
+            titleBar.className = 'analytics-panel-title';
+            titleBar.textContent = 'TOP RELAY KEYS (path 2-char hex) ';
+            const noteText = document.createElement('span');
+            noteText.className = 'relays-note';
+            noteText.textContent = 'lifetime totals · not filtered by time range';
+            titleBar.appendChild(noteText);
+
+            frag.appendChild(titleBar);
+            frag.appendChild(wrapper);
+
+            slot.innerHTML = '';
+            slot.appendChild(frag);
+        }
+
+        // Register hourly + relays panels (slots are created in _openSidePanel).
+        (function _registerHourlyRelaysPanels() {
+            if (!_analyticsPanels.some(p => p.panel === 'hourly')) {
+                _analyticsPanels.push(
+                    { id: 'analytics-chart-hourly', panel: 'hourly', render: _renderHourlyChart },
+                    { id: 'analytics-chart-relays', panel: 'relays', render: _renderRelaysTable }
+                );
+            }
+        }());
+
+        // ── Path length distribution chart (#8) ─────────────────────────────
+        let _analyticsHopsChart = null;
+
+        // Compute weighted percentile from histogram buckets [{hops, count}].
+        function _hopPercentile(rows, pct) {
+            const total = rows.reduce((s, r) => s + r.count, 0);
+            if (total === 0) return 0;
+            const target = total * pct;
+            let cum = 0;
+            for (const r of rows) {
+                cum += r.count;
+                if (cum >= target) return r.hops;
+            }
+            return rows[rows.length - 1].hops;
+        }
+
+        function _renderHopHistogram(data) {
+            const slot = document.getElementById('analytics-slot-hops');
+            if (!slot) return;
+            const rangeLabel = _analyticsRangeLabel(_analyticsRange);
+
+            if (!data || !data.ok) {
+                if (_analyticsHopsChart) { try { _analyticsHopsChart.destroy(); } catch (_) {} _analyticsHopsChart = null; }
+                slot.innerHTML = `<div class="analytics-empty-state" style="color:var(--red,#e05555);">
+                    <i class="fa-solid fa-triangle-exclamation"></i>
+                    <span>${_escAnalyticsName((data && data.error) || 'Query failed')}</span>
+                </div>`;
+                return;
+            }
+
+            const rows = Array.isArray(data.rows) ? data.rows : [];
+            const total = rows.reduce((s, r) => s + r.count, 0);
+
+            if (rows.length === 0 || total === 0) {
+                if (_analyticsHopsChart) { try { _analyticsHopsChart.destroy(); } catch (_) {} _analyticsHopsChart = null; }
+                slot.innerHTML = `<div class="analytics-empty-state">
+                    <i class="fa-solid fa-diagram-project"></i>
+                    <span>No routed frames recorded in the last ${rangeLabel}</span>
+                </div>`;
+                return;
+            }
+
+            const median = _hopPercentile(rows, 0.5);
+            const p90    = _hopPercentile(rows, 0.9);
+
+            // In-place update when the hop-count categories haven't changed.
+            const hopCategories = rows.map(r => String(r.hops));
+            if (_analyticsHopsChart && _analyticsHopsChart.series &&
+                _analyticsHopsChart.series.length === 1 &&
+                _analyticsHopsChart.xAxis[0].categories.length === hopCategories.length &&
+                _analyticsHopsChart.xAxis[0].categories.every((c, i) => c === hopCategories[i])) {
+                _analyticsHopsChart.series[0].setData(rows.map(r => r.count), false, false, false);
+                _analyticsHopsChart.setTitle(null,
+                    { text: `median = ${median} hops · p90 = ${p90} hops` }, false);
+                _analyticsHopsChart.redraw(false);
+                return;
+            }
+            if (_analyticsHopsChart) { try { _analyticsHopsChart.destroy(); } catch (_) {} _analyticsHopsChart = null; }
+            slot.innerHTML = '<div id="analytics-chart-hops" style="width:100%;height:250px"></div>';
+
+            _analyticsHopsChart = Highcharts.chart('analytics-chart-hops', {
+                chart: {
+                    type: 'column',
+                    backgroundColor: 'transparent',
+                    style: { fontFamily: 'inherit', color: 'var(--text)' },
+                    animation: false,
+                    marginRight: 10,
+                },
+                title: {
+                    text: 'PATH LENGTH DISTRIBUTION (mesh depth)',
+                    style: { color: 'var(--text)', fontSize: '0.78rem', fontWeight: '600' },
+                    align: 'left',
+                    margin: 4,
+                },
+                subtitle: {
+                    text: `median = ${median} hops · p90 = ${p90} hops`,
+                    style: { color: 'var(--muted)', fontSize: '0.7rem' },
+                    align: 'left',
+                },
+                credits: { enabled: false },
+                exporting: { enabled: false },
+                xAxis: {
+                    categories: rows.map(r => String(r.hops)),
+                    tickInterval: 3,
+                    lineColor: 'var(--border)',
+                    tickColor: 'var(--border)',
+                    labels: { style: { color: 'var(--text-soft)', fontSize: '0.72rem' } },
+                    title: { text: 'Hops', style: { color: 'var(--muted)', fontSize: '0.72rem' } },
+                },
+                yAxis: {
+                    title: { text: 'Frames', style: { color: 'var(--muted)', fontSize: '0.72rem' } },
+                    gridLineColor: 'rgba(255,255,255,0.06)',
+                    labels: { style: { color: 'var(--text-soft)', fontSize: '0.72rem' } },
+                    allowDecimals: false,
+                },
+                tooltip: {
+                    backgroundColor: 'var(--surface)',
+                    borderColor: 'var(--border)',
+                    style: { color: 'var(--text)', fontSize: '0.78rem' },
+                    formatter: function () {
+                        const pct = (this.y / total * 100).toFixed(1);
+                        return `<b>${this.x} hops</b><br>${pct}% of ${total} frames`;
+                    },
+                },
+                legend: { enabled: false },
+                plotOptions: {
+                    column: {
+                        color: '#3eb6e6',
+                        borderWidth: 0,
+                        groupPadding: 0.05,
+                        pointPadding: 0.05,
+                    },
+                },
+                series: [{ name: 'Frames', data: rows.map(r => r.count) }],
+            });
+        }
+
+        // ── Messages per channel chart (#5) ──────────────────────────────────
+        let _analyticsChanChart = null;
+
+        // Hash-stable HSL colour for a channel name.
+        function _chanColour(name) {
+            let h = 0;
+            const s = String(name || '');
+            for (let i = 0; i < s.length; i++) {
+                h = (h * 31 + s.charCodeAt(i)) & 0xffff;
+            }
+            return `hsl(${h % 360}, 65%, ${45 + ((h >> 8) % 20)}%)`;
+        }
+
+        function _renderChannelBars(data) {
+            const slot = document.getElementById('analytics-slot-channels');
+            if (!slot) return;
+            const rangeLabel = _analyticsRangeLabel(_analyticsRange);
+
+            if (!data || !data.ok) {
+                if (_analyticsChanChart) { try { _analyticsChanChart.destroy(); } catch (_) {} _analyticsChanChart = null; }
+                slot.innerHTML = `<div class="analytics-empty-state" style="color:var(--red,#e05555);">
+                    <i class="fa-solid fa-triangle-exclamation"></i>
+                    <span>${_escAnalyticsName((data && data.error) || 'Query failed')}</span>
+                </div>`;
+                return;
+            }
+
+            const rows = Array.isArray(data.rows) ? [...data.rows].sort((a, b) => b.count - a.count) : [];
+            const total = rows.reduce((s, r) => s + r.count, 0);
+
+            if (rows.length === 0 || total === 0) {
+                if (_analyticsChanChart) { try { _analyticsChanChart.destroy(); } catch (_) {} _analyticsChanChart = null; }
+                slot.innerHTML = `<div class="analytics-empty-state">
+                    <i class="fa-solid fa-hashtag"></i>
+                    <span>No channel messages in the last ${rangeLabel}</span>
+                </div>`;
+                return;
+            }
+
+            // In-place update when the channel list hasn't changed.
+            const chanCategories = rows.map(r => _escAnalyticsName(r.chan));
+            if (_analyticsChanChart && _analyticsChanChart.series &&
+                _analyticsChanChart.series.length === 1 &&
+                _analyticsChanChart.xAxis[0].categories.length === chanCategories.length &&
+                _analyticsChanChart.xAxis[0].categories.every((c, i) => c === chanCategories[i])) {
+                _analyticsChanChart.series[0].setData(rows.map(r => r.count), false, false, false);
+                _analyticsChanChart.setTitle({ text: `MESSAGES PER CHANNEL (${total} total)` }, null, false);
+                _analyticsChanChart.redraw(false);
+                return;
+            }
+            if (_analyticsChanChart) { try { _analyticsChanChart.destroy(); } catch (_) {} _analyticsChanChart = null; }
+            slot.innerHTML = '<div id="analytics-chart-channels" style="width:100%;height:250px"></div>';
+
+            _analyticsChanChart = Highcharts.chart('analytics-chart-channels', {
+                chart: {
+                    type: 'bar',
+                    backgroundColor: 'transparent',
+                    style: { fontFamily: 'inherit', color: 'var(--text)' },
+                    animation: false,
+                    marginRight: 10,
+                },
+                title: {
+                    text: `MESSAGES PER CHANNEL (${total} total)`,
+                    style: { color: 'var(--text)', fontSize: '0.78rem', fontWeight: '600' },
+                    align: 'left',
+                    margin: 8,
+                },
+                credits: { enabled: false },
+                exporting: { enabled: false },
+                // Horizontal bars (type: 'bar') in Highcharts: categories go
+                // on xAxis (which renders at the LEFT), values on yAxis
+                // (which renders at the BOTTOM). Reversing this swaps the
+                // labels — left axis shows tick numbers, bottom shows
+                // channel names — which is exactly what we want to avoid.
+                xAxis: {
+                    categories: rows.map(r => _escAnalyticsName(r.chan)),
+                    lineColor: 'var(--border)',
+                    tickColor: 'var(--border)',
+                    labels: { style: { color: 'var(--text-soft)', fontSize: '0.72rem' } },
+                },
+                yAxis: {
+                    title: { text: 'Messages', style: { color: 'var(--muted)', fontSize: '0.72rem' } },
+                    gridLineColor: 'rgba(255,255,255,0.06)',
+                    labels: { style: { color: 'var(--text-soft)', fontSize: '0.72rem' } },
+                    allowDecimals: false,
+                },
+                tooltip: {
+                    backgroundColor: 'var(--surface)',
+                    borderColor: 'var(--border)',
+                    style: { color: 'var(--text)', fontSize: '0.78rem' },
+                    formatter: function () {
+                        const chan = this.point && this.point.category ? this.point.category : '';
+                        return `<b>${this.y} messages</b><br>${chan}`;
+                    },
+                },
+                legend: { enabled: false },
+                plotOptions: {
+                    bar: {
+                        borderWidth: 0,
+                        colorByPoint: true,
+                        colors: rows.map(r => _chanColour(r.chan)),
+                        cursor: 'pointer',
+                        point: {
+                            events: {
+                                click: function () {
+                                    // _setChanFilter is the inbox channel-chip API.
+                                    if (typeof _setChanFilter === 'function' && rows[this.index]) {
+                                        _setChanFilter(rows[this.index].chan);
+                                    }
+                                },
+                            },
+                        },
+                    },
+                },
+                series: [{ name: 'Messages', data: rows.map(r => r.count) }],
+            });
+        }
+
+        // Register hops and channels panels (slots are created in _openSidePanel).
+        (function _registerHopsChannelsPanels() {
+            if (!_analyticsPanels.some(p => p.panel === 'hops')) {
+                _analyticsPanels.push(
+                    { id: 'analytics-chart-hops',     panel: 'hops',     render: _renderHopHistogram },
+                    { id: 'analytics-chart-channels', panel: 'channels', render: _renderChannelBars  }
+                );
+            }
+        }());
+
+        // ── End analytics card ────────────────────────────────────────────────
 
         // Expose functions referenced by inline HTML event handlers to global scope
         window.loadData            = loadData;

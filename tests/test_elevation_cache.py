@@ -110,7 +110,7 @@ class TestMigrationV3(unittest.TestCase):
         self._make_v2_db(self.path)
         self._p, _ = _open_db(self.path)
         ver = self._p._pref_get("db_version")
-        self.assertEqual(ver, "3", "db_version pref must be '3' after migration")
+        self.assertEqual(ver, "4", "db_version pref must be '4' after full migration")
 
     def test_migration_is_idempotent_on_fresh_db(self):
         """A completely fresh DB should also end up at version 3 without errors."""

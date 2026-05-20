@@ -742,9 +742,9 @@ class TestMsgStorePreferences(unittest.TestCase):
         ver = self.bp._pref_get("db_version")
         self.assertEqual(ver, str(plugin.BasePlugin.MSG_DB_SCHEMA_VERSION))
 
-    def test_schema_version_constant_is_3(self):
+    def test_schema_version_constant_is_4(self):
         import plugin
-        self.assertEqual(plugin.BasePlugin.MSG_DB_SCHEMA_VERSION, 3)
+        self.assertEqual(plugin.BasePlugin.MSG_DB_SCHEMA_VERSION, 4)
 
     # ── _pref_set / _pref_get round-trip ─────────────────────────────────────
 
@@ -890,8 +890,8 @@ class TestMsgStoreSchemaBaseline(unittest.TestCase):
         bp = _make_store(tmp)
         try:
             import plugin
-            self.assertEqual(plugin.BasePlugin.MSG_DB_SCHEMA_VERSION, 3)
-            self.assertEqual(bp._pref_get("db_version"), "3")
+            self.assertEqual(plugin.BasePlugin.MSG_DB_SCHEMA_VERSION, 4)
+            self.assertEqual(bp._pref_get("db_version"), "4")
         finally:
             _close_store(bp)
             shutil.rmtree(tmp, ignore_errors=True)
@@ -942,7 +942,7 @@ class TestMsgStoreSchemaBaseline(unittest.TestCase):
             shutil.rmtree(tmp, ignore_errors=True)
 
     def test_migration_idempotent_on_fresh_db(self):
-        """Opening an already-current DB a second time must not raise and keeps version='3'."""
+        """Opening an already-current DB a second time must not raise and keeps version='4'."""
         tmp = tempfile.mkdtemp()
         db_path = os.path.join(tmp, "v1.db")
         import plugin
@@ -952,7 +952,7 @@ class TestMsgStoreSchemaBaseline(unittest.TestCase):
         bp2 = plugin.BasePlugin()
         bp2._msg_store_open(db_path)
         try:
-            self.assertEqual(bp2._pref_get("db_version"), "3")
+            self.assertEqual(bp2._pref_get("db_version"), "4")
             with bp2._msgdb_lock:
                 cur = bp2._msgdb.execute("PRAGMA table_info(messages)")
                 cols = {row[1] for row in cur.fetchall()}

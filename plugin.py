@@ -46,6 +46,7 @@ import asyncio
 import calendar
 import collections
 import copy
+import functools
 import gc
 import json
 import math
@@ -457,6 +458,16 @@ class BasePlugin:
         self._cmd_origins: dict = {}
         self._dzv_req_id: int = 0
         self._dzv_in_seq: int = 0
+        # Time-series analytics state.
+        # Previous packet counter values for delta computation in _ts_packets_add.
+        self._ts_prev_pkt_recv:     int | None = None
+        self._ts_prev_pkt_sent:     int | None = None
+        self._ts_prev_pkt_flood_rx: int | None = None
+        self._ts_prev_pkt_flood_tx: int | None = None
+        self._ts_prev_pkt_dir_rx:   int | None = None
+        self._ts_prev_pkt_dir_tx:   int | None = None
+        # Set of panel names whose cached query results are stale after a new insert.
+        self._ts_dirty_panels: set = set()
 
     # ── dzVents command bridge helpers ────────────────────────────────────────
 
@@ -497,7 +508,7 @@ class BasePlugin:
     # Prune at most once every N inserts (cheap amortised cost).
     _MSG_STORE_PRUNE_EVERY = 200
     # Current schema version stored in the preferences table.
-    MSG_DB_SCHEMA_VERSION = 3
+    MSG_DB_SCHEMA_VERSION = 4
 
     # ── Elevation cache ───────────────────────────────────────────────────────
 
@@ -633,6 +644,65 @@ class BasePlugin:
                     cur.execute(
                         "CREATE INDEX IF NOT EXISTS ix_elev_last_used"
                         " ON elevation_cache (last_used)"
+                    )
+                    self._msgdb.commit()
+                elif ver == 4:
+                    # Time-series tables for historical analytics panels.
+                    cur = self._msgdb.cursor()
+                    cur.execute("""
+                        CREATE TABLE IF NOT EXISTS ts_radio (
+                            ts        INTEGER NOT NULL,
+                            node_key  TEXT    NOT NULL,
+                            rssi      INTEGER,
+                            snr       REAL,
+                            noise     INTEGER,
+                            path_len  INTEGER,
+                            src       TEXT
+                        )
+                    """)
+                    cur.execute(
+                        "CREATE INDEX IF NOT EXISTS ix_ts_radio_ts"
+                        " ON ts_radio (ts)"
+                    )
+                    cur.execute(
+                        "CREATE INDEX IF NOT EXISTS ix_ts_radio_node_ts"
+                        " ON ts_radio (node_key, ts)"
+                    )
+                    cur.execute("""
+                        CREATE TABLE IF NOT EXISTS ts_packets_hourly (
+                            hour_ts   INTEGER PRIMARY KEY,
+                            rx_count  INTEGER NOT NULL DEFAULT 0,
+                            tx_count  INTEGER NOT NULL DEFAULT 0,
+                            flood_rx  INTEGER NOT NULL DEFAULT 0,
+                            flood_tx  INTEGER NOT NULL DEFAULT 0,
+                            direct_rx INTEGER NOT NULL DEFAULT 0,
+                            direct_tx INTEGER NOT NULL DEFAULT 0
+                        )
+                    """)
+                    cur.execute("""
+                        CREATE TABLE IF NOT EXISTS ts_packets_min (
+                            ts        INTEGER PRIMARY KEY,
+                            rx_count  INTEGER NOT NULL DEFAULT 0,
+                            tx_count  INTEGER NOT NULL DEFAULT 0
+                        )
+                    """)
+                    cur.execute("""
+                        CREATE TABLE IF NOT EXISTS ts_relay_keys (
+                            hex_key    TEXT PRIMARY KEY,
+                            name       TEXT,
+                            last_seen  INTEGER NOT NULL,
+                            count      INTEGER NOT NULL DEFAULT 0
+                        )
+                    """)
+                    cur.execute("""
+                        CREATE TABLE IF NOT EXISTS ts_hops (
+                            ts    INTEGER NOT NULL,
+                            hops  INTEGER NOT NULL
+                        )
+                    """)
+                    cur.execute(
+                        "CREATE INDEX IF NOT EXISTS ix_ts_hops_ts"
+                        " ON ts_hops (ts)"
                     )
                     self._msgdb.commit()
 
@@ -886,6 +956,496 @@ class BasePlugin:
                 self._msgdb.commit()
         except Exception as exc:
             Domoticz.Error(f"Elevation cache prune failed (non-fatal): {exc!r}")
+
+    # ── Time-series analytics helpers ─────────────────────────────────────────
+
+    def _ts_ingest(self, src: str, *, node_key: str = None,
+                   rssi=None, snr=None, noise=None, path_len=None):
+        """Insert one radio sample into ts_radio.
+
+        Inserts immediately — SQLite WAL mode handles concurrent writes at this
+        frequency without batching.  Marks all radio-related analytics panels
+        dirty so cached query results are invalidated.
+
+        Never raises into callers.
+        """
+        if self._msgdb is None:
+            return
+        try:
+            ts = int(time.time())
+            nk = node_key or "unknown"
+            rssi_v  = int(rssi)    if rssi  is not None else None
+            snr_v   = float(snr)   if snr   is not None else None
+            noise_v = int(noise)   if noise is not None else None
+            pl_v    = int(path_len) if path_len is not None else None
+            with self._msgdb_lock:
+                self._msgdb.execute(
+                    "INSERT INTO ts_radio (ts, node_key, rssi, snr, noise, path_len, src)"
+                    " VALUES (?,?,?,?,?,?,?)",
+                    (ts, nk, rssi_v, snr_v, noise_v, pl_v, src),
+                )
+                self._msgdb.commit()
+            self._ts_dirty_panels.update({"rssi", "snr", "noise"})
+        except Exception as exc:
+            Domoticz.Debug(f"_ts_ingest failed (non-fatal): {exc!r}")
+
+    def _ts_packets_add(self, now_ts: int, drx: int, dtx: int,
+                        flood_drx: int = 0, flood_dtx: int = 0,
+                        direct_drx: int = 0, direct_dtx: int = 0):
+        """Upsert the current-minute row in ts_packets_min and the current-hour
+        row in ts_packets_hourly in a single transaction.
+
+        All delta arguments should be non-negative counters.  Wrap-around-safe
+        deltas are computed by the caller (_handle_self_stats).
+        Never raises into callers.
+        """
+        if self._msgdb is None:
+            return
+        try:
+            min_ts  = now_ts - (now_ts % 60)
+            hour_ts = now_ts - (now_ts % 3600)
+            with self._msgdb_lock:
+                self._msgdb.execute(
+                    "INSERT INTO ts_packets_min (ts, rx_count, tx_count)"
+                    " VALUES (?,?,?)"
+                    " ON CONFLICT(ts) DO UPDATE SET"
+                    "   rx_count = rx_count + excluded.rx_count,"
+                    "   tx_count = tx_count + excluded.tx_count",
+                    (min_ts, max(0, drx), max(0, dtx)),
+                )
+                self._msgdb.execute(
+                    "INSERT INTO ts_packets_hourly"
+                    " (hour_ts, rx_count, tx_count, flood_rx, flood_tx, direct_rx, direct_tx)"
+                    " VALUES (?,?,?,?,?,?,?)"
+                    " ON CONFLICT(hour_ts) DO UPDATE SET"
+                    "   rx_count  = rx_count  + excluded.rx_count,"
+                    "   tx_count  = tx_count  + excluded.tx_count,"
+                    "   flood_rx  = flood_rx  + excluded.flood_rx,"
+                    "   flood_tx  = flood_tx  + excluded.flood_tx,"
+                    "   direct_rx = direct_rx + excluded.direct_rx,"
+                    "   direct_tx = direct_tx + excluded.direct_tx",
+                    (hour_ts,
+                     max(0, drx), max(0, dtx),
+                     max(0, flood_drx), max(0, flood_dtx),
+                     max(0, direct_drx), max(0, direct_dtx)),
+                )
+                self._msgdb.commit()
+            self._ts_dirty_panels.update({"packets", "hourly"})
+        except Exception as exc:
+            Domoticz.Debug(f"_ts_packets_add failed (non-fatal): {exc!r}")
+
+    def _ts_relay_observed(self, hex_key: str, name: str = None):
+        """Bump count and update last_seen for a 2-char hex relay token.
+
+        Updates name only if the provided name is non-empty and different from
+        the stored one.  Never raises into callers.
+        """
+        if self._msgdb is None:
+            return
+        if not hex_key or len(hex_key) != 2:
+            return
+        try:
+            ts = int(time.time())
+            with self._msgdb_lock:
+                self._msgdb.execute(
+                    "INSERT INTO ts_relay_keys (hex_key, name, last_seen, count)"
+                    " VALUES (?,?,?,1)"
+                    " ON CONFLICT(hex_key) DO UPDATE SET"
+                    "   last_seen = excluded.last_seen,"
+                    "   count = count + 1,"
+                    "   name = CASE"
+                    "     WHEN COALESCE(excluded.name, '') != ''"
+                    "      AND COALESCE(excluded.name, '') != COALESCE(ts_relay_keys.name, '')"
+                    "     THEN excluded.name"
+                    "     ELSE ts_relay_keys.name"
+                    "   END",
+                    (hex_key.lower(), name or None, ts),
+                )
+                self._msgdb.commit()
+            self._ts_dirty_panels.add("relays")
+        except Exception as exc:
+            Domoticz.Debug(f"_ts_relay_observed failed (non-fatal): {exc!r}")
+
+    def _ts_hops_record(self, ts: int, hops):
+        """Append one row to ts_hops.
+
+        Skips if hops is None, negative, or equals HOPS_SENTINEL.
+        Never raises into callers.
+        """
+        if self._msgdb is None:
+            return
+        if hops is None:
+            return
+        try:
+            hops_i = int(hops)
+        except (TypeError, ValueError):
+            return
+        if hops_i < 0 or hops_i == HOPS_SENTINEL:
+            return
+        try:
+            with self._msgdb_lock:
+                self._msgdb.execute(
+                    "INSERT INTO ts_hops (ts, hops) VALUES (?,?)",
+                    (int(ts), hops_i),
+                )
+                self._msgdb.commit()
+            self._ts_dirty_panels.add("hops")
+        except Exception as exc:
+            Domoticz.Debug(f"_ts_hops_record failed (non-fatal): {exc!r}")
+
+    def _ts_prune(self):
+        """Delete rows older than each table's retention window.
+
+        Schedules:
+          ts_radio:         14 days
+          ts_packets_min:   48 hours
+          ts_hops:          14 days
+          ts_relay_keys:    30 days (only rows with count < 100)
+          ts_packets_hourly: kept indefinitely (small table)
+        Never raises into callers.
+        """
+        if self._msgdb is None:
+            return
+        try:
+            now = int(time.time())
+            cutoffs = {
+                "ts_radio":      now - 14 * 86400,
+                "ts_packets_min": now - 48 * 3600,
+                "ts_hops":       now - 14 * 86400,
+            }
+            with self._msgdb_lock:
+                for tbl, cutoff in cutoffs.items():
+                    self._msgdb.execute(
+                        f"DELETE FROM {tbl} WHERE ts < ?", (cutoff,)
+                    )
+                relay_cutoff = now - 30 * 86400
+                self._msgdb.execute(
+                    "DELETE FROM ts_relay_keys"
+                    " WHERE last_seen < ? AND count < 100",
+                    (relay_cutoff,),
+                )
+                self._msgdb.commit()
+        except Exception as exc:
+            Domoticz.Debug(f"_ts_prune failed (non-fatal): {exc!r}")
+
+    # ── Analytics query helpers ───────────────────────────────────────────────
+
+    # Default bucket sizes (seconds) keyed by range upper bound (seconds).
+    # Chosen so charts have ~100–300 data points.
+    _TS_BUCKET_TABLE = [
+        (3  * 3600,  60),        # <= 3 h  -> 1 min buckets
+        (6  * 3600,  120),       # <= 6 h  -> 2 min buckets
+        (12 * 3600,  300),       # <= 12 h -> 5 min buckets
+        (24 * 3600,  600),       # <= 24 h -> 10 min buckets
+        (48 * 3600,  1200),      # <= 48 h -> 20 min buckets
+        (7  * 86400, 3600),      # <= 7 d  -> 1 h buckets
+    ]
+    # Hard cap on the analytics range accepted from the dashboard.
+    _TS_MAX_RANGE_S = 30 * 86400  # 30 days
+
+    @staticmethod
+    def _ts_default_bucket(range_s: int) -> int:
+        """Return a sensible default bucket size for the given time range."""
+        for upper, bucket in BasePlugin._TS_BUCKET_TABLE:
+            if range_s <= upper:
+                return bucket
+        return 3600  # > 7 d: use 1 h
+
+    def _q_rssi_snr(self, panel: str, t_from: int, t_to: int,
+                    bucket_s: int, nodes_tuple: tuple) -> dict:
+        """Return per-node time-series for the rssi or snr panel.
+
+        Shape:
+          {
+            "series": [
+              {"node": <key>, "data": [[<bucket_ts>, <avg_value>], ...]},
+              ...
+            ]
+          }
+        Only returns nodes whose series is non-empty within the range.
+        Filtered to nodes_tuple when non-empty.
+        """
+        col = "rssi" if panel == "rssi" else "snr"
+        if self._msgdb is None:
+            return {"series": []}
+        try:
+            where_nodes = ""
+            if nodes_tuple:
+                placeholders = ",".join("?" * len(nodes_tuple))
+                where_nodes = f" AND node_key IN ({placeholders})"
+            sql = (
+                f"SELECT node_key,"
+                f" (ts / ? * ?) AS bucket,"
+                f" AVG({col}) AS val"
+                f" FROM ts_radio"
+                f" WHERE ts >= ? AND ts < ? AND {col} IS NOT NULL"
+                f"{where_nodes}"
+                f" GROUP BY node_key, bucket"
+                f" ORDER BY node_key, bucket"
+            )
+            params_ordered = [bucket_s, bucket_s, t_from, t_to] + (list(nodes_tuple) if nodes_tuple else [])
+            with self._msgdb_lock:
+                rows = self._msgdb.execute(sql, params_ordered).fetchall()
+            by_node: dict = {}
+            for node_key, bucket, val in rows:
+                by_node.setdefault(node_key, []).append([bucket, round(val, 2) if val is not None else None])
+            series = [{"node": k, "data": v} for k, v in sorted(by_node.items())]
+            return {"series": series}
+        except Exception as exc:
+            Domoticz.Debug(f"_q_rssi_snr({panel}) failed (non-fatal): {exc!r}")
+            return {"series": []}
+
+    def _q_noise(self, panel: str, t_from: int, t_to: int,
+                 bucket_s: int, nodes_tuple: tuple) -> dict:
+        """Return self-node noise-floor time-series.
+
+        Shape:
+          {
+            "series": [
+              {"node": "self", "data": [[<bucket_ts>, <avg_noise>], ...]},
+            ]
+          }
+        """
+        if self._msgdb is None:
+            return {"series": []}
+        try:
+            sql = (
+                "SELECT (ts / ? * ?) AS bucket, AVG(noise) AS val"
+                " FROM ts_radio"
+                " WHERE ts >= ? AND ts < ? AND noise IS NOT NULL"
+                " GROUP BY bucket"
+                " ORDER BY bucket"
+            )
+            with self._msgdb_lock:
+                rows = self._msgdb.execute(sql, (bucket_s, bucket_s, t_from, t_to)).fetchall()
+            data = [[bucket, round(val, 2) if val is not None else None] for bucket, val in rows]
+            return {"series": [{"node": "self", "data": data}] if data else []}
+        except Exception as exc:
+            Domoticz.Debug(f"_q_noise failed (non-fatal): {exc!r}")
+            return {"series": []}
+
+    def _q_packets(self, panel: str, t_from: int, t_to: int,
+                   bucket_s: int, nodes_tuple: tuple) -> dict:
+        """Return rx+tx packet volume time-series (per-minute table, bucketed).
+
+        Shape:
+          {
+            "series": [
+              {"name": "rx", "data": [[<bucket_ts>, <sum>], ...]},
+              {"name": "tx", "data": [[<bucket_ts>, <sum>], ...]},
+            ]
+          }
+        """
+        if self._msgdb is None:
+            return {"series": []}
+        try:
+            sql = (
+                "SELECT (ts / ? * ?) AS bucket,"
+                " SUM(rx_count) AS rx, SUM(tx_count) AS tx"
+                " FROM ts_packets_min"
+                " WHERE ts >= ? AND ts < ?"
+                " GROUP BY bucket"
+                " ORDER BY bucket"
+            )
+            with self._msgdb_lock:
+                rows = self._msgdb.execute(sql, (bucket_s, bucket_s, t_from, t_to)).fetchall()
+            rx_data = [[b, r] for b, r, _ in rows]
+            tx_data = [[b, t] for b, _, t in rows]
+            return {"series": [{"name": "rx", "data": rx_data},
+                                {"name": "tx", "data": tx_data}]}
+        except Exception as exc:
+            Domoticz.Debug(f"_q_packets failed (non-fatal): {exc!r}")
+            return {"series": []}
+
+    def _q_packets_hourly(self, panel: str, t_from: int, t_to: int,
+                          bucket_s: int, nodes_tuple: tuple) -> dict:
+        """Return all hourly packet counter rows in time order.
+
+        Shape:
+          {
+            "rows": [
+              {"ts": <hour_ts>, "rx": <int>, "tx": <int>,
+               "flood_rx": <int>, "flood_tx": <int>,
+               "direct_rx": <int>, "direct_tx": <int>},
+              ...
+            ]
+          }
+        """
+        if self._msgdb is None:
+            return {"rows": []}
+        try:
+            sql = (
+                "SELECT hour_ts, rx_count, tx_count,"
+                " flood_rx, flood_tx, direct_rx, direct_tx"
+                " FROM ts_packets_hourly"
+                " WHERE hour_ts >= ? AND hour_ts < ?"
+                " ORDER BY hour_ts"
+            )
+            with self._msgdb_lock:
+                rows = self._msgdb.execute(sql, (t_from, t_to)).fetchall()
+            result = [
+                {"ts": ts, "rx": rx, "tx": tx,
+                 "flood_rx": frx, "flood_tx": ftx,
+                 "direct_rx": drx, "direct_tx": dtx}
+                for ts, rx, tx, frx, ftx, drx, dtx in rows
+            ]
+            return {"rows": result}
+        except Exception as exc:
+            Domoticz.Debug(f"_q_packets_hourly failed (non-fatal): {exc!r}")
+            return {"rows": []}
+
+    def _q_msg_per_channel(self, panel: str, t_from: int, t_to: int,
+                           bucket_s: int, nodes_tuple: tuple) -> dict:
+        """Return message count per channel from the messages table.
+
+        Excludes chan='P' (private/DM messages) so only channel traffic is
+        counted.  Uses epoch TEXT column with strftime comparison.
+
+        Shape:
+          {
+            "rows": [{"chan": <str>, "count": <int>}, ...]
+          }
+        sorted by count descending.
+        """
+        if self._msgdb is None:
+            return {"rows": []}
+        try:
+            t_from_str = time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime(t_from))
+            t_to_str   = time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime(t_to))
+            sql = (
+                "SELECT chan, COUNT(*) AS cnt"
+                " FROM messages"
+                " WHERE chan != 'P'"
+                " AND epoch >= ? AND epoch < ?"
+                " GROUP BY chan"
+                " ORDER BY cnt DESC"
+            )
+            with self._msgdb_lock:
+                rows = self._msgdb.execute(sql, (t_from_str, t_to_str)).fetchall()
+            return {"rows": [{"chan": chan, "count": cnt} for chan, cnt in rows]}
+        except Exception as exc:
+            Domoticz.Debug(f"_q_msg_per_channel failed (non-fatal): {exc!r}")
+            return {"rows": []}
+
+    def _q_hop_histogram(self, panel: str, t_from: int, t_to: int,
+                         bucket_s: int, nodes_tuple: tuple) -> dict:
+        """Return hop-count histogram within the time range.
+
+        Shape:
+          {
+            "rows": [{"hops": <int>, "count": <int>}, ...]
+          }
+        sorted by hops ascending.
+        """
+        if self._msgdb is None:
+            return {"rows": []}
+        try:
+            sql = (
+                "SELECT hops, COUNT(*) AS cnt"
+                " FROM ts_hops"
+                " WHERE ts >= ? AND ts < ?"
+                " GROUP BY hops"
+                " ORDER BY hops"
+            )
+            with self._msgdb_lock:
+                rows = self._msgdb.execute(sql, (t_from, t_to)).fetchall()
+            return {"rows": [{"hops": h, "count": c} for h, c in rows]}
+        except Exception as exc:
+            Domoticz.Debug(f"_q_hop_histogram failed (non-fatal): {exc!r}")
+            return {"rows": []}
+
+    def _q_top_relays(self, panel: str, t_from: int, t_to: int,
+                      bucket_s: int, nodes_tuple: tuple) -> dict:
+        """Return relay-key tallies ordered by count descending.
+
+        nodes_tuple[0] is treated as a limit (int) when provided; defaults to 20.
+
+        Shape:
+          {
+            "rows": [{"hex": <str>, "name": <str|null>, "count": <int>,
+                      "last_seen": <int>}, ...]
+          }
+        """
+        if self._msgdb is None:
+            return {"rows": []}
+        try:
+            limit = int(nodes_tuple[0]) if nodes_tuple else 20
+            sql = (
+                "SELECT hex_key, name, count, last_seen"
+                " FROM ts_relay_keys"
+                " ORDER BY count DESC"
+                " LIMIT ?"
+            )
+            with self._msgdb_lock:
+                rows = self._msgdb.execute(sql, (limit,)).fetchall()
+            return {"rows": [{"hex": h, "name": n, "count": c, "last_seen": ls}
+                              for h, n, c, ls in rows]}
+        except Exception as exc:
+            Domoticz.Debug(f"_q_top_relays failed (non-fatal): {exc!r}")
+            return {"rows": []}
+
+    # Dispatch table for analytics panels.
+    _ANALYTICS_PANELS = {
+        "rssi":     "_q_rssi_snr",
+        "snr":      "_q_rssi_snr",
+        "noise":    "_q_noise",
+        "packets":  "_q_packets",
+        "channels": "_q_msg_per_channel",
+        "hourly":   "_q_packets_hourly",
+        "relays":   "_q_top_relays",
+        "hops":     "_q_hop_histogram",
+    }
+
+    def _handle_analytics_query(self, panel: str, t_from, t_to,
+                                 bucket_s=None,
+                                 nodes: "list | None" = None) -> dict:
+        """Dispatch an analytics query and return a result dict for the dashboard.
+
+        Validation:
+        - panel must be a known key in _ANALYTICS_PANELS;
+        - t_from and t_to must be finite numerics;
+        - t_to - t_from in (0, _TS_MAX_RANGE_S] (30 days);
+        - bucket_s, if provided, must be a positive integer ≤ 90 days.
+
+        Cache:
+        - Results are NOT memoized across calls; each call re-queries SQLite.
+          The cheap dirty-flag set (_ts_dirty_panels) is used by ingestion to
+          signal "fresh data landed since the last query" so callers may
+          decide to refetch — it is not an LRU cache. Add @functools.lru_cache
+          here if profiling shows repeat-query overhead.
+
+        Returns:
+        - {ok: True, panel, t_from, t_to, bucket_s, ...payload}, or
+        - {ok: False, error: <str>} on validation or query failure.
+        """
+        if panel not in self._ANALYTICS_PANELS:
+            return {"ok": False, "error": "unknown panel"}
+        if not isinstance(t_from, (int, float)) or not isinstance(t_to, (int, float)):
+            return {"ok": False, "error": "timestamps must be numeric"}
+        if math.isnan(t_from) or math.isnan(t_to) or math.isinf(t_from) or math.isinf(t_to):
+            return {"ok": False, "error": "timestamps cannot be NaN or Infinity"}
+        t_from = int(t_from); t_to = int(t_to)
+        range_s = t_to - t_from
+        if range_s <= 0 or range_s > self._TS_MAX_RANGE_S:
+            return {"ok": False, "error": "range out of bounds (max 30 days)"}
+        if bucket_s is not None:
+            if not isinstance(bucket_s, int) or isinstance(bucket_s, bool) or bucket_s <= 0 or bucket_s > 86400 * 90:
+                return {"ok": False, "error": "bucket_s must be a positive integer ≤ 90 days"}
+        else:
+            bucket_s = self._ts_default_bucket(range_s)
+        nodes_tuple = tuple(nodes) if nodes else ()
+        fn_name = self._ANALYTICS_PANELS[panel]
+        fn = getattr(self, fn_name)
+        try:
+            payload = fn(panel, t_from, t_to, bucket_s, nodes_tuple)
+        except Exception as exc:
+            Domoticz.Debug(f"_handle_analytics_query({panel}) failed: {exc!r}")
+            return {"ok": False, "error": str(exc)}
+        self._ts_dirty_panels.discard(panel)
+        result = {"ok": True, "panel": panel,
+                  "t_from": t_from, "t_to": t_to, "bucket_s": bucket_s}
+        result.update(payload)
+        return result
 
     def _msg_store_add(self, chan: str, sender: str, body: str, epoch: int,
                        bad: bool = False, snr=None, hops=None, rssi=None,
@@ -1527,6 +2087,43 @@ class BasePlugin:
                 return
 
             # Elevation proxy: local DB + HTTP, no MC connection required.
+            if cmd == "analytics":
+                _panel   = str(payload.get("panel", "")).strip()
+                _t_from  = payload.get("from")
+                _t_to    = payload.get("to")
+                _bucket  = payload.get("bucket")
+                _nodes   = payload.get("nodes")
+                try:
+                    _t_from = int(_t_from)
+                    _t_to   = int(_t_to)
+                except (TypeError, ValueError):
+                    self._push("cmd_result", {
+                        "ok": False, "id": req_id,
+                        "error": "from and to must be integer timestamps",
+                    })
+                    return
+                if _bucket is not None:
+                    try:
+                        _bucket = int(_bucket)
+                    except (TypeError, ValueError):
+                        self._push("cmd_result", {"ok": False, "id": req_id, "error": "bucket must be a positive integer or null"})
+                        return
+                if _nodes is not None:
+                    if not isinstance(_nodes, list):
+                        self._push("cmd_result", {"ok": False, "id": req_id, "error": "nodes must be a list of strings or null"})
+                        return
+                    for _n in _nodes:
+                        if not isinstance(_n, str):
+                            self._push("cmd_result", {"ok": False, "id": req_id, "error": "nodes must be a list of strings or null"})
+                            return
+                result = self._handle_analytics_query(
+                    _panel, _t_from, _t_to,
+                    bucket_s=_bucket, nodes=_nodes,
+                )
+                result["id"] = req_id
+                self._push("cmd_result", result)
+                return
+
             if cmd == "elevation":
                 raw_pts = payload.get("points", [])
                 if not isinstance(raw_pts, list) or len(raw_pts) > 4096:
@@ -3041,6 +3638,7 @@ class BasePlugin:
             last_msg_drain  = time.monotonic()   # connect-time drain just ran
             last_rx_write   = 0.0
             last_elev_prune = time.monotonic()
+            last_ts_prune   = time.monotonic()
 
             while not self._stop_event.is_set():
                 stopped = await self._wait_or_stop(1.0)
@@ -3134,6 +3732,15 @@ class BasePlugin:
                         )
                     except Exception as exc:
                         Domoticz.Debug(f"Periodic elev_prune error: {exc}")
+                # Prune old time-series rows (every 5 min, same cadence).
+                if now - last_ts_prune >= self._ELEV_PRUNE_INTERVAL:
+                    last_ts_prune = now
+                    try:
+                        await asyncio.get_event_loop().run_in_executor(
+                            None, self._ts_prune
+                        )
+                    except Exception as exc:
+                        Domoticz.Debug(f"Periodic ts_prune error: {exc}")
         finally:
             try:
                 self._write_heard()
@@ -3365,6 +3972,30 @@ class BasePlugin:
                 dl.append({"t": t, "path": pp, "snr": snr})
                 if len(dl) > 8:
                     del dl[: len(dl) - 8]
+        # Time-series ingestion for analytics panels.
+        # Use adv_key for ADVERT frames; leave node_key=None for other types
+        # (we can't reliably identify the originating contact from the RX frame).
+        ts_src    = p.get("payload_typename", "rx").lower()
+        ts_nk     = None
+        ts_snr    = p.get("snr")
+        ts_rssi   = p.get("rssi")
+        ts_pl     = p.get("path_len")
+        if p.get("payload_typename") == "ADVERT":
+            ak = p.get("adv_key")
+            if ak:
+                ts_nk = ak[:12]
+            ts_src = "adv"
+        if ts_snr is not None or ts_rssi is not None:
+            self._ts_ingest(ts_src, node_key=ts_nk,
+                            rssi=ts_rssi, snr=ts_snr, path_len=ts_pl)
+        # Hop histogram from RX_LOG frames with a valid path_len.
+        if isinstance(ts_pl, int) and 0 <= ts_pl < HOPS_SENTINEL:
+            self._ts_hops_record(int(t), ts_pl)
+        # Relay-key tally: walk each 2-char hex byte of the path string.
+        if pp:
+            clean_path = re.sub(r"[^0-9a-fA-F]", "", pp).lower()
+            for i in range(0, len(clean_path) - 1, 2):
+                self._ts_relay_observed(clean_path[i:i + 2])
         self._rx_log_dirty = True
 
     async def _refresh_contacts(self, mc):
@@ -4696,6 +5327,14 @@ class BasePlugin:
                 if did is not None:
                     self._set(did, OFF_STATUS, 1, "On")
                 self._write_device_map()
+            # Ingest into analytics store when the advert carries signal data.
+            _adv_pk = ap.get("adv_key") or ap.get("pubkey") or ""
+            _adv_snr  = ap.get("snr") or ap.get("SNR")
+            _adv_rssi = ap.get("rssi")
+            if _adv_snr is not None or _adv_rssi is not None:
+                self._ts_ingest("adv",
+                                node_key=_adv_pk[:12] if _adv_pk else None,
+                                rssi=_adv_rssi, snr=_adv_snr)
         elif kind == "contacts":
             self._handle_contacts(item[1])
             # First contacts batch processed — bump heartbeat back to a
@@ -4906,6 +5545,14 @@ class BasePlugin:
             if self._self_name:
                 self._set(SELF_DID, OFF_STATUS, 0, "Off")
                 self._ws_devices_dirty = True
+            # Reset packet-delta baselines so the first sample after reconnect
+            # does not produce a spurious large delta.
+            self._ts_prev_pkt_recv     = None
+            self._ts_prev_pkt_sent     = None
+            self._ts_prev_pkt_flood_rx = None
+            self._ts_prev_pkt_flood_tx = None
+            self._ts_prev_pkt_dir_rx   = None
+            self._ts_prev_pkt_dir_tx   = None
         elif kind == "ack_result":
             self._handle_ack_result(item[1])
 
@@ -5320,6 +5967,19 @@ class BasePlugin:
             rssi=_msg_rssi, path=_msg_path, ack=None, direction="in",
             peer_key=self._norm_peer_key(prefix),
         )
+        # Ingest signal data for analytics (only when we have a reliable sender id).
+        if prefix and (_msg_snr is not None or _msg_rssi is not None):
+            _ts_pl = _hops if (isinstance(_hops, int) and 0 <= _hops < HOPS_SENTINEL) else None
+            self._ts_ingest("msg", node_key=prefix[:12],
+                            snr=_msg_snr, rssi=_msg_rssi, path_len=_ts_pl)
+        # Record hop count.
+        if isinstance(_hops, int) and 0 <= _hops < HOPS_SENTINEL:
+            self._ts_hops_record(now_i, _hops)
+        # Relay-key tally from the embedded per-message path.
+        if _msg_path:
+            _clean = re.sub(r"[^0-9a-fA-F]", "", str(_msg_path)).lower()
+            for _i in range(0, len(_clean) - 1, 2):
+                self._ts_relay_observed(_clean[_i:_i + 2])
 
         # Persist private (DM) messages to the sender's per-contact Messages
         # device so a favourite's conversation history is never lost.
@@ -5477,6 +6137,44 @@ class BasePlugin:
 
         # Last seen = now (we just got data from it)
         _upd(OFF_LASTSEEN, 0, time.strftime("%Y-%m-%d %H:%M:%S"))
+
+        # Analytics ingestion: radio sample for self node.
+        _s_rssi  = stats.get("last_rssi")
+        _s_snr   = stats.get("last_snr")
+        _s_noise = stats.get("noise_floor")
+        if _s_rssi is not None or _s_snr is not None:
+            self._ts_ingest("rx", node_key="self",
+                            rssi=_s_rssi, snr=_s_snr, noise=_s_noise)
+
+        # Analytics ingestion: packet counter deltas for self node.
+        _now_ts  = int(time.time())
+        _pkt_rx  = stats.get("recv")
+        _pkt_tx  = stats.get("sent")
+        _pkt_frx = stats.get("flood_rx")
+        _pkt_ftx = stats.get("flood_tx")
+        _pkt_drx = stats.get("direct_rx")
+        _pkt_dtx = stats.get("direct_tx")
+        if _pkt_rx is not None and _pkt_tx is not None:
+            def _wrap_delta(cur, prev):
+                if prev is None:
+                    return 0
+                d = cur - prev
+                return d if d >= 0 else cur  # wrap-around: treat as absolute gain
+
+            drx = _wrap_delta(_pkt_rx, self._ts_prev_pkt_recv)
+            dtx = _wrap_delta(_pkt_tx, self._ts_prev_pkt_sent)
+            dfrx = _wrap_delta(_pkt_frx, self._ts_prev_pkt_flood_rx) if _pkt_frx is not None else 0
+            dftx = _wrap_delta(_pkt_ftx, self._ts_prev_pkt_flood_tx) if _pkt_ftx is not None else 0
+            ddrx = _wrap_delta(_pkt_drx, self._ts_prev_pkt_dir_rx)  if _pkt_drx is not None else 0
+            ddtx = _wrap_delta(_pkt_dtx, self._ts_prev_pkt_dir_tx)  if _pkt_dtx is not None else 0
+            if drx or dtx:
+                self._ts_packets_add(_now_ts, drx, dtx, dfrx, dftx, ddrx, ddtx)
+            self._ts_prev_pkt_recv     = _pkt_rx
+            self._ts_prev_pkt_sent     = _pkt_tx
+            self._ts_prev_pkt_flood_rx = _pkt_frx
+            self._ts_prev_pkt_flood_tx = _pkt_ftx
+            self._ts_prev_pkt_dir_rx   = _pkt_drx
+            self._ts_prev_pkt_dir_tx   = _pkt_dtx
 
         Domoticz.Debug(f"Self stats updated: bat={bat_mv}mV uptime={uptime_s}s rssi={rssi} snr={stats.get('last_snr')}")
         self._write_device_map()
