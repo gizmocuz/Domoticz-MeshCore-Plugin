@@ -11076,14 +11076,16 @@ Larger = more reliable routing but smaller mesh diameter.">Path hash size</label
         const _analyticsColorCache = {};
 
         // Returns a hash-stable HSL colour string for a node key.
+        // Lightness varies with the high byte of the hash so adjacent
+        // hue-space neighbours don't collide visually — matches the
+        // pattern used by _chanColour for channel bars.
         function _nodePalette(pk) {
             if (_analyticsColorCache[pk]) return _analyticsColorCache[pk];
             let h = 0;
             for (let i = 0; i < pk.length; i++) {
                 h = (h * 31 + pk.charCodeAt(i)) >>> 0;
             }
-            const hue = h % 360;
-            const col = `hsl(${hue}, 65%, 58%)`;
+            const col = `hsl(${h % 360}, 65%, ${45 + ((h >> 8) % 20)}%)`;
             _analyticsColorCache[pk] = col;
             return col;
         }
