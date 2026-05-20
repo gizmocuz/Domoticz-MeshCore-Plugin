@@ -628,6 +628,29 @@
             .topo-map-tool-btn .topo-tool-label { display: none; }
         }
 
+        /* Heatmap window selector — inline <select> next to the Heat button */
+        .topo-heat-window {
+            height: 22px;
+            padding: 0 4px;
+            font-size: 0.62rem;
+            font-weight: 600;
+            color: var(--text);
+            background: rgba(0, 0, 0, 0.55);
+            border: 1px solid var(--border);
+            border-radius: 11px;
+            cursor: pointer;
+            display: none;
+        }
+        .topo-heat-window.visible { display: inline-block; }
+        /* Empty-state note inside the toolbar */
+        #topo-heatmap-empty {
+            font-size: 0.60rem;
+            color: var(--muted);
+            white-space: nowrap;
+            display: none;
+        }
+        #topo-heatmap-empty.visible { display: inline; }
+
         /* Delete button inside Leaflet topology popups */
         .topo-popup-del {
             margin-top: 6px;
@@ -645,6 +668,222 @@
         .topo-popup-del:hover { background: #ef4444; color: #fff; }
         .topo-popup-del[disabled] { opacity: 0.55; cursor: not-allowed; }
 
+        /* LoS / Coverage popup buttons (shared styling) */
+        .topo-popup-los, .topo-popup-cov {
+            margin-top: 4px;
+            display: inline-flex;
+            align-items: center;
+            gap: 5px;
+            padding: 3px 8px;
+            font-size: 0.72rem;
+            background: transparent;
+            border: 1px solid var(--accent);
+            color: var(--accent);
+            border-radius: 6px;
+            cursor: pointer;
+        }
+        .topo-popup-los:hover, .topo-popup-cov:hover { background: var(--accent); color: #fff; }
+
+        /* ── LoS pane (replaces .topo-radar-wrap when LoS is active) ──────── */
+        .topo-los-pane {
+            flex: 0 0 auto;
+            height: 320px;
+            border-top: 1px solid var(--border);
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+        }
+        .topo-los-hdr {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            padding: 6px 10px;
+            border-bottom: 1px solid var(--border);
+            flex-shrink: 0;
+            flex-wrap: wrap;
+        }
+        .topo-los-title {
+            font-size: 0.65rem;
+            text-transform: uppercase;
+            letter-spacing: 0.08em;
+            color: var(--muted);
+            margin-right: auto;
+        }
+        .topo-los-body {
+            flex: 1;
+            overflow-y: auto;
+            padding: 6px 8px;
+            display: flex;
+            flex-direction: column;
+            gap: 6px;
+            min-height: 0;
+        }
+        .topo-los-banner {
+            font-size: 0.72rem;
+            color: var(--muted);
+            background: rgba(78,154,241,0.08);
+            border: 1px solid rgba(78,154,241,0.25);
+            border-radius: 6px;
+            padding: 5px 8px;
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+        .topo-los-banner.error { background: rgba(224,85,85,0.08); border-color: rgba(224,85,85,0.25); color: var(--red); }
+        .topo-los-pin-list { display: flex; flex-direction: column; gap: 4px; }
+        .topo-los-pin-row {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            font-size: 0.72rem;
+        }
+        .topo-los-pin-num {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            width: 18px; height: 18px;
+            border-radius: 50%;
+            background: var(--accent);
+            color: #fff;
+            font-size: 0.65rem;
+            font-weight: 700;
+            flex-shrink: 0;
+        }
+        .topo-los-pin-coords {
+            flex: 1;
+            color: var(--muted);
+            font-family: monospace;
+            font-size: 0.68rem;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+        .topo-los-pin-h {
+            width: 52px;
+            background: var(--surface);
+            border: 1px solid var(--border);
+            color: var(--text);
+            border-radius: 4px;
+            padding: 1px 4px;
+            font-size: 0.7rem;
+            text-align: right;
+        }
+        .topo-los-pin-h:focus { border-color: var(--accent); outline: none; }
+        .topo-los-pin-hlabel { font-size: 0.68rem; color: var(--muted); white-space: nowrap; }
+        .topo-los-pin-del {
+            background: transparent;
+            border: none;
+            color: var(--muted);
+            cursor: pointer;
+            padding: 2px 4px;
+            border-radius: 3px;
+            font-size: 0.75rem;
+        }
+        .topo-los-pin-del:hover { color: var(--red); background: rgba(224,85,85,0.1); }
+        @media (max-width: 480px) {
+            .topo-los-pin-row { flex-wrap: wrap; }
+            .topo-los-pin-coords { flex-basis: 100%; order: 2; margin-left: 24px; }
+            .topo-los-pin-num { order: 1; }
+            .topo-los-pin-h, .topo-los-pin-hlabel, .topo-los-pin-del { order: 3; }
+        }
+        .topo-los-actions {
+            display: flex;
+            gap: 8px;
+            align-items: center;
+            font-size: 0.7rem;
+        }
+        .topo-los-hint {
+            color: var(--muted);
+            font-style: italic;
+            flex: 1;
+        }
+        .topo-los-clear {
+            background: transparent;
+            border: 1px solid var(--border);
+            color: var(--muted);
+            border-radius: 4px;
+            padding: 2px 8px;
+            font-size: 0.7rem;
+            cursor: pointer;
+        }
+        .topo-los-clear:hover { border-color: var(--red); color: var(--red); }
+        #topo-los-chart { flex: 1; min-height: 80px; position: relative; }
+        .topo-los-verdicts {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 5px;
+            padding: 2px 0;
+        }
+        .topo-los-chip {
+            display: inline-flex;
+            align-items: center;
+            gap: 4px;
+            font-size: 0.65rem;
+            font-weight: 700;
+            padding: 2px 8px;
+            border-radius: 10px;
+        }
+        .topo-los-chip.clear   { background: rgba(76,175,125,0.18); color: var(--green); cursor: pointer; }
+        .topo-los-chip.grazing { background: rgba(240,168,50,0.18);  color: var(--yellow); cursor: pointer; }
+        .topo-los-chip.blocked { background: rgba(224,85,85,0.18);   color: var(--red); cursor: pointer; }
+        .topo-los-chip.selected { outline: 2px solid currentColor; outline-offset: 1px; }
+        .topo-los-seg-status {
+            font-size: 0.72rem;
+            padding: 4px 8px;
+            border-radius: 6px;
+            border: 1px solid var(--border);
+            background: rgba(78,154,241,0.06);
+            color: var(--text);
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            display: none;
+        }
+        .topo-los-seg-status.visible { display: block; }
+        .topo-los-seg-status .seg-verdict { font-weight: 700; padding: 1px 6px; border-radius: 8px; margin-left: 4px; }
+        .topo-los-seg-status .seg-verdict.clear   { background: rgba(76,175,125,0.22); color: var(--green); }
+        .topo-los-seg-status .seg-verdict.grazing { background: rgba(240,168,50,0.22); color: var(--yellow); }
+        .topo-los-seg-status .seg-verdict.blocked { background: rgba(224,85,85,0.22);  color: var(--red); }
+        .topo-los-seg-heights {
+            display: none;
+            gap: 6px;
+            align-items: center;
+            flex-wrap: wrap;
+            font-size: 0.72rem;
+        }
+        .topo-los-seg-heights.visible { display: flex; }
+        .topo-los-seg-heights label { color: var(--muted); white-space: nowrap; }
+        .topo-los-seg-h {
+            width: 56px;
+            background: var(--surface);
+            border: 1px solid var(--border);
+            color: var(--text);
+            border-radius: 4px;
+            padding: 2px 4px;
+            font-size: 0.72rem;
+            text-align: right;
+        }
+        .topo-los-seg-h:focus { border-color: var(--accent); outline: none; }
+        .topo-los-pin-row.seg-selected { background: rgba(78,154,241,0.08); border-radius: 4px; }
+
+        /* When LoS tool is active, existing topology markers fade */
+        #map-canvas.los-active .mc-pin-inner { opacity: 0.6; }
+
+        /* Numbered LoS pin divIcon */
+        .los-pin-icon {
+            width: 22px; height: 22px;
+            border-radius: 50%;
+            background: var(--yellow);
+            border: 2px solid #fff;
+            color: #000;
+            font-size: 0.65rem;
+            font-weight: 800;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            box-shadow: 0 2px 6px rgba(0,0,0,0.55);
+        }
+
         /* ── Live-flash pulse keyframe ────────────────────────────────────── */
         @keyframes topoLivePulse {
             0%   { transform: rotate(-45deg) scale(1); }
@@ -653,6 +892,119 @@
         }
         .mc-pin-inner.live-flash {
             animation: topoLivePulse 2s ease-in-out 1;
+        }
+
+        /* ── Coverage / propagation heatmap ──────────────────────────────── */
+        .topo-coverage-drawer {
+            flex: 0 0 auto;
+            background: var(--surface);
+            border-bottom: 1px solid var(--border);
+            padding: 6px 10px;
+            display: flex;
+            flex-wrap: wrap;
+            gap: 6px 12px;
+            align-items: center;
+            font-size: 0.68rem;
+        }
+        .topo-cov-row {
+            display: flex;
+            align-items: center;
+            gap: 5px;
+            white-space: nowrap;
+        }
+        .topo-cov-row label {
+            color: var(--muted);
+            font-size: 0.65rem;
+        }
+        .topo-cov-ctrl {
+            height: 20px;
+            padding: 0 4px;
+            font-size: 0.65rem;
+            background: rgba(0,0,0,0.45);
+            border: 1px solid var(--border);
+            border-radius: 4px;
+            color: var(--text);
+            min-width: 56px;
+        }
+        .topo-cov-ctrl:focus { border-color: var(--accent); outline: none; }
+        .topo-cov-progress {
+            font-size: 0.63rem;
+            color: var(--muted);
+            white-space: nowrap;
+        }
+        .topo-cov-progress i { margin-right: 3px; }
+
+        /* Origin-node pulsing halo */
+        @keyframes covOriginPulse {
+            0%   { transform: translate(-50%, -50%) scale(0.6); opacity: 0.9; }
+            100% { transform: translate(-50%, -50%) scale(2.0); opacity: 0; }
+        }
+        .cov-origin-halo {
+            position: absolute;
+            width: 24px; height: 24px;
+            border-radius: 50%;
+            border: 3px solid #22c55e;
+            top: 50%; left: 50%;
+            transform: translate(-50%, -50%);
+            animation: covOriginPulse 1.6s ease-out infinite;
+            pointer-events: none;
+        }
+        .cov-origin-wrap {
+            position: relative;
+            width: 24px; height: 24px;
+        }
+        .cov-origin-inner {
+            position: absolute;
+            top: 50%; left: 50%;
+            transform: translate(-50%, -50%);
+            width: 12px; height: 12px;
+            border-radius: 50%;
+            background: #22c55e;
+            border: 2px solid #fff;
+            box-shadow: 0 1px 4px rgba(0,0,0,0.6);
+        }
+
+        /* Coverage legend */
+        #topo-cov-legend {
+            position: absolute;
+            bottom: 28px; right: 8px;
+            z-index: 900;
+            background: rgba(20,22,30,0.82);
+            border: 1px solid var(--border);
+            border-radius: 7px;
+            padding: 6px 8px;
+            font-size: 0.6rem;
+            color: var(--text);
+            backdrop-filter: blur(4px);
+            pointer-events: none;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: 3px;
+        }
+        #topo-cov-legend .cov-leg-bar {
+            width: 14px;
+            height: 80px;
+            border-radius: 3px;
+            /* gradient set inline by JS */
+        }
+        #topo-cov-legend .cov-leg-labels {
+            display: flex;
+            flex-direction: column;
+            justify-content: space-between;
+            height: 80px;
+            font-size: 0.58rem;
+            color: var(--muted);
+        }
+        #topo-cov-legend .cov-leg-inner {
+            display: flex;
+            gap: 4px;
+            align-items: stretch;
+        }
+        #topo-cov-legend .cov-leg-title {
+            font-size: 0.58rem;
+            color: var(--muted);
+            text-align: center;
         }
 
         /* Floating favorite toggle — bottom-right overlay on contact cards */
@@ -2243,7 +2595,17 @@
             const s = document.createElement("script");
             s.src = "/templates/leaflet/leaflet.js";
             s.setAttribute("data-leaflet", "1");
-            s.onload = s.onerror = () => { window.define = _define; };
+            s.onload = () => {
+                window.define = _define;
+                // Load leaflet-heat after Leaflet itself so L is available.
+                if (!document.querySelector('script[data-leaflet-heat]')) {
+                    const sh = document.createElement("script");
+                    sh.src = "/templates/leaflet/leaflet-heat.js";
+                    sh.setAttribute("data-leaflet-heat", "1");
+                    document.head.appendChild(sh);
+                }
+            };
+            s.onerror = () => { window.define = _define; };
             document.head.appendChild(s);
         }
     })();
@@ -2640,6 +3002,7 @@
                     _renderTrafficIfOpen();
                     _renderChannelsIfOpen();
                     _refreshCardSparklines();
+                    if (_topoGet("heatmap", false) && _isOpen("topology")) _renderActivityHeatmap();
                 }
             } else if (t === 'rxlog_delta') {
                 // Incremental update: append new entries and merge stats.
@@ -2669,6 +3032,15 @@
                 _renderTrafficIfOpen();
                 _renderChannelsIfOpen();
                 _refreshCardSparklines();
+                // Throttled heatmap redraw: ≤ 1 Hz while the heatmap is active.
+                if (_topoGet("heatmap", false) && _isOpen("topology")) {
+                    if (!_heatmapDeltaTimer) {
+                        _heatmapDeltaTimer = setTimeout(() => {
+                            _heatmapDeltaTimer = null;
+                            _renderActivityHeatmap();
+                        }, 1000);
+                    }
+                }
             } else if (t === 'inbox_page') {
                 _onInboxPage(msg);
             }
@@ -5043,6 +5415,14 @@
             if (_prevView === "topology" && view !== "topology") {
                 if (_radarChart) { try { _radarChart.destroy(); } catch (_) {} _radarChart = null; }
                 if (_radarThrottleTimer) { clearTimeout(_radarThrottleTimer); _radarThrottleTimer = null; }
+                _stopHeatmapAutoFade();
+                if (_heatmapLayer && _leafletMap) { try { _leafletMap.removeLayer(_heatmapLayer); } catch (_) {} _heatmapLayer = null; }
+                if (_losLayer && _leafletMap) { try { _leafletMap.removeLayer(_losLayer); } catch (_) {} _losLayer = null; }
+                if (_losChart) { try { _losChart.destroy(); } catch (_) {} _losChart = null; }
+                if (_losProfileDebounce) { clearTimeout(_losProfileDebounce); _losProfileDebounce = null; }
+                _losPins = [];
+                _losLastElevations = null;
+                _propTeardown();
                 body.classList.remove("topo-layout");
                 // Reset fit-done flag so next open auto-fits bounds again.
                 _topoFitDone = false;
@@ -5341,6 +5721,7 @@
                     },
                     title: { text: "" },
                     credits: { enabled: false },
+                    exporting: { enabled: false },
                     tooltip: { pointFormat: "<b>{point.y}</b> ({point.percentage:.1f}%)" },
                     legend: {
                         enabled: true,
@@ -5566,7 +5947,7 @@
             let listWrap = document.getElementById("heard-list-wrap");
             if (!listWrap) {
                 // Fresh shell — any prior Leaflet instance is now orphaned.
-                if (_heardMap) { try { _heardMap.remove(); } catch (_) {} _heardMap = null; }
+                if (_heardMap) { try { _heardMap.remove(); } catch (_) {} _liveMaps.delete(_heardMap); _heardMap = null; }
                 view.innerHTML = `
                     <div style="font-size:0.82rem;color:var(--text);opacity:0.85;line-height:1.5">
                         Nodes heard over the air whose pubkey isn't in your
@@ -5718,9 +6099,8 @@
                 const fresh = !_heardMap;
                 if (fresh) {
                     _heardMap = L.map(el, { zoomControl: true }).setView([node.lat, node.lon], 12);
-                    L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
-                        attribution: '&copy; OpenStreetMap', maxZoom: 19,
-                    }).addTo(_heardMap);
+                    _liveMaps.add(_heardMap);
+                    _applyTileMode(_heardMap, _topoGetStr("tile", "light"));
                 }
                 // Only (re)center + (re)place the marker when the displayed
                 // node actually changes or the user explicitly clicked the
@@ -6063,6 +6443,7 @@
                     },
                     title:   { text: null },
                     credits: { enabled: false },
+                    exporting: { enabled: false },
                     legend:  { enabled: false },
                     tooltip: {
                         useHTML: true,
@@ -6147,10 +6528,29 @@
         const LS_TOPO = {
             contacts: "meshcore.topo.show_contacts",
             repeaters: "meshcore.topo.show_repeaters",
+            rooms:     "meshcore.topo.show_rooms",
             heard:     "meshcore.topo.show_heard",
             lines:     "meshcore.topo.show_lines",
             live:      "meshcore.topo.live",
             audio:     "meshcore.topo.audio",
+            tile:      "meshcore.topo.tile",
+            heatmap:          "meshcore.topo.heatmap",
+            "heatmap-window": "meshcore.topo.heatmap-window",
+            los:       "meshcore.topo.los",
+            coverage:  "meshcore.topo.coverage",
+            "coverage:origin":       "meshcore.topo.coverage.origin",
+            "coverage:txPower":      "meshcore.topo.coverage.txPower",
+            "coverage:gainTx":       "meshcore.topo.coverage.gainTx",
+            "coverage:gainRx":       "meshcore.topo.coverage.gainRx",
+            "coverage:rxHeight":     "meshcore.topo.coverage.rxHeight",
+            "coverage:noiseFigure":  "meshcore.topo.coverage.noiseFigure",
+            "coverage:fadeMargin":   "meshcore.topo.coverage.fadeMargin",
+            "coverage:freq":         "meshcore.topo.coverage.freq",
+            "coverage:bw":           "meshcore.topo.coverage.bw",
+            "coverage:sf":           "meshcore.topo.coverage.sf",
+            "coverage:cr":           "meshcore.topo.coverage.cr",
+            "coverage:model":        "meshcore.topo.coverage.model",
+            "coverage:useTerrain":   "meshcore.topo.coverage.useTerrain",
         };
         function _topoGet(key, def) {
             const v = localStorage.getItem(LS_TOPO[key]);
@@ -6159,6 +6559,48 @@
         }
         function _topoSet(key, val) {
             try { localStorage.setItem(LS_TOPO[key], val ? "1" : "0"); } catch (_) {}
+        }
+        function _topoGetStr(key, def) {
+            const storageKey = LS_TOPO[key];
+            if (!storageKey) return def;
+            try { const v = localStorage.getItem(storageKey); return v !== null ? v : def; } catch (_) { return def; }
+        }
+        function _topoSetStr(key, val) {
+            const storageKey = LS_TOPO[key];
+            if (!storageKey) return;
+            try { localStorage.setItem(storageKey, val); } catch (_) {}
+        }
+        function _updateTileIcon(btn, mode) {
+            const icon = btn && btn.querySelector("i");
+            if (icon) icon.className = mode === "dark" ? "fa-solid fa-sun" : "fa-solid fa-moon";
+        }
+
+        // ── Tile layer helpers ────────────────────────────────────────────────
+        const _TILE_LAYERS = {
+            light: () => L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+                attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors',
+                maxZoom: 19,
+            }),
+            dark: () => L.tileLayer("https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png", {
+                attribution: '&copy; OpenStreetMap, &copy; <a href="https://carto.com/attributions">CARTO</a>',
+                subdomains: "abcd",
+                maxZoom: 19,
+            }),
+        };
+        const _liveMaps = new Set();
+        const _mapBaseLayer = new WeakMap();
+
+        function _applyTileMode(map, mode) {
+            if (!map) return;
+            const prev = _mapBaseLayer.get(map);
+            if (prev) { map.removeLayer(prev); }
+            const layer = (_TILE_LAYERS[mode] || _TILE_LAYERS.light)();
+            layer.addTo(map);
+            _mapBaseLayer.set(map, layer);
+        }
+
+        function _applyTileModeAll(mode) {
+            for (const m of _liveMaps) { _applyTileMode(m, mode); }
         }
 
         // Whether the first-fit-bounds has been done for the current topology session.
@@ -6178,6 +6620,848 @@
 
         // Per-node in-flight pulse guard: set of node keys with an active pulse.
         const _topoLivePulsing = new Set();
+
+        // Activity heatmap (leaflet.heat overlay, lives outside _topologyLayer).
+        let _heatmapLayer = null;
+        let _heatmapTimer = null;       // setInterval handle for auto-fade redraws
+        let _heatmapDeltaTimer = null;  // setTimeout handle for throttled delta redraw
+        function _heatmapZoomListener() {
+            if (!_topoGet("heatmap", false)) return;
+            _renderActivityHeatmap();
+        }
+
+        // LoS tool — lives outside _topologyLayer so it survives layer-group rebuilds.
+        let _losLayer = null;           // L.LayerGroup for pins + polyline
+        let _losPins = [];              // [{ id, lat, lon, h, label }]
+        let _losNextId = 1;
+        let _losProfileDebounce = null; // setTimeout handle for debounced profile fetch
+        let _losChart = null;           // Highcharts instance for elevation profile
+        const _LOS_SAMPLES = 256;       // interpolated points per segment
+        const _LOS_FREQ_GHZ = 0.910525;
+        const _LOS_MAX_SEG_KM = 1000;   // refuse pins more than this apart
+        let _losElevCmdId = 0;          // monotonic counter for elevation cmd correlation
+        let _losGeneration = 0;         // incremented on pin layout change; guards stale callbacks
+        let _losSelectedSeg = 0;        // currently-selected segment index (0 = first segment)
+
+        // ── Coverage / propagation heatmap ───────────────────────────────────
+        let _propLayer = null;          // L.GridLayer subclass — canvas overlay
+        let _propWorker = null;         // Web Worker (inline blob)
+        let _propSnrGrid = null;        // Float32Array(200*200) latest result
+        let _propGrid = null;           // { originLat, originLon, halfSpanKm, cols, rows }
+        let _propDebounce = null;       // setTimeout handle for 500 ms debounce
+        let _propElevCmdId = 0;         // monotonic cmd correlation counter
+        let _propGeneration = 0;        // incremented on cancel; guards stale callbacks
+        let _propOriginMarker = null;   // L.Marker with pulsing halo for the origin
+
+        // SX1276 receiver sensitivity (dBm): _LORA_THRESHOLD[bw_kHz][sf]
+        // Values from Semtech SX1276 datasheet table 23 (RSSI sensitivity).
+        // Wider bandwidth degrades sensitivity by ~3 dB per BW doubling.
+        const _LORA_THRESHOLD = {
+            7.8:   { 7:-126, 8:-129, 9:-132, 10:-135, 11:-137, 12:-140 },
+            15.6:  { 7:-124, 8:-127, 9:-130, 10:-133, 11:-135, 12:-138 },
+            31.25: { 7:-124, 8:-127, 9:-130, 10:-133, 11:-135, 12:-138 },
+            62.5:  { 7:-123, 8:-126, 9:-129, 10:-132, 11:-133, 12:-136 },
+            125:   { 7:-123, 8:-126, 9:-129, 10:-132, 11:-134.5, 12:-137 },
+            250:   { 7:-120, 8:-123, 9:-126, 10:-129, 11:-131.5, 12:-134 },
+            500:   { 7:-117, 8:-120, 9:-123, 10:-126, 11:-128.5, 12:-131 },
+        };
+
+        // Clutter-loss additive constants per propagation model.
+        const _CLUTTER_LOSS = { fs: 0, terrain: 0, suburban: 5, urban: 15, indoor: 25 };
+
+        // Coverage gradient stops (same palette as activity heatmap).
+        const _COV_GRADIENT = [
+            [0,    "#3b82f6"],
+            [0.33, "#22c55e"],
+            [0.66, "#f59e0b"],
+            [1.0,  "#ef4444"],
+        ];
+
+        // Build the worker source as a template literal.
+        // The worker receives one message: { type:'compute', ... } and
+        // posts back { type:'result', snr: Float32Array } or { type:'error', msg }.
+        const _PROP_WORKER_SRC = `
+"use strict";
+// Haversine distance (m) between two lat/lon pairs.
+function haversineM(lat1,lon1,lat2,lon2){
+    const R=6371000,d2r=Math.PI/180;
+    const p1=lat1*d2r,p2=lat2*d2r;
+    const dp=(lat2-lat1)*d2r,dl=(lon2-lon1)*d2r;
+    const a=Math.sin(dp/2)**2+Math.cos(p1)*Math.cos(p2)*Math.sin(dl/2)**2;
+    return 2*R*Math.atan2(Math.sqrt(a),Math.sqrt(1-a));
+}
+// Bullington single-equivalent knife-edge diffraction loss (dB).
+// samples: array of terrain heights along the path (including endpoints),
+// heights: [h_tx, h_rx] antenna AGL heights, d: total path length in metres.
+// Returns extra diffraction loss in dB (0 if clear LOS).
+function bullingtonLoss(samples, hTx, hRx, d){
+    const n=samples.length;
+    if(n<3)return 0;
+    const elev0=samples[0]||0,elevN=samples[n-1]||0;
+    const antTx=elev0+hTx, antRx=elevN+hRx;
+    let maxNu=-Infinity;
+    for(let i=1;i<n-1;i++){
+        const frac=i/(n-1);
+        const dFrac=frac*d;
+        const dRem=(1-frac)*d;
+        const losH=antTx+frac*(antRx-antTx);
+        const h=(samples[i]||0)-losH;
+        if(h<=0)continue;
+        // Knife-edge nu per ITU-R P.526; lambda = c/f
+        const lambda=299792458/freqHz;
+        const nu=h*Math.sqrt(2*(dFrac+dRem)/(lambda*dFrac*dRem));
+        if(nu>maxNu)maxNu=nu;
+    }
+    if(maxNu<=0)return 0;
+    if(maxNu<=1)return 6.02+9.11*maxNu+1.27*maxNu*maxNu;
+    return 13.26+20*Math.log10(maxNu);
+}
+onmessage=function(ev){
+    const d=ev.data;
+    if(d.type!=='compute')return;
+    const {cols,rows,originElev,txPower,gainTx,gainRx,rxHeight,
+           freqHz,threshold,fadeMargin,useTerrain,clutterLoss,
+           originLat,originLon}=d;
+    // Reconstruct typed arrays from transferred ArrayBuffers.
+    const cellLats=new Float64Array(d.cellLats);
+    const cellLons=new Float64Array(d.cellLons);
+    const cellElevs=useTerrain && d.cellElevs ? new Float64Array(d.cellElevs) : null;
+    const N=cols*rows;
+    const snr=new Float32Array(N);
+    const TERRAIN_SAMPLES=32;
+    for(let i=0;i<N;i++){
+        const cLat=cellLats[i], cLon=cellLons[i];
+        const distM=haversineM(originLat,originLon,cLat,cLon);
+        if(distM<1){snr[i]=30;continue;}
+        if(distM>50000){snr[i]=-999;continue;}
+        // Free-space path loss
+        const Lfs=20*Math.log10(distM)+20*Math.log10(freqHz)-147.55;
+        // Terrain attenuation
+        let Lterrain=0;
+        if(cellElevs){
+            // Elevation profile packed as [i*TERRAIN_SAMPLES ... +TERRAIN_SAMPLES-1]
+            const offsets=new Float64Array(TERRAIN_SAMPLES);
+            for(let k=0;k<TERRAIN_SAMPLES;k++){
+                offsets[k]=cellElevs[i*TERRAIN_SAMPLES+k]||0;
+            }
+            Lterrain=bullingtonLoss(offsets,0,rxHeight,distM);
+        }
+        const RX=txPower+gainTx+gainRx-Lfs-Lterrain-clutterLoss;
+        snr[i]=RX-threshold-fadeMargin;
+    }
+    postMessage({type:'result',snr:snr.buffer},[snr.buffer]);
+};
+`;
+
+        function _propGetSetting(key, def) {
+            const k = "coverage:" + key;
+            return _topoGetStr(k, String(def));
+        }
+        function _propSetSetting(key, val) {
+            const k = "coverage:" + key;
+            _topoSetStr(k, String(val));
+        }
+
+        // Return the LoRa sensitivity threshold for given bw (kHz string) and sf (int).
+        function _loraThr(bwStr, sf) {
+            const bwNum = parseFloat(bwStr);
+            const row = _LORA_THRESHOLD[bwNum] || _LORA_THRESHOLD[62.5];
+            return row[sf] !== undefined ? row[sf] : -120;
+        }
+
+        // Gather settings from localStorage, returning a plain object.
+        function _propSettings() {
+            const sf = parseInt(_propGetSetting("sf", 7), 10);
+            const bw = _propGetSetting("bw", "62.5");
+            const cr = _propGetSetting("cr", "4/8");
+            return {
+                origin:      _propGetSetting("origin", "self"),
+                txPower:     parseFloat(_propGetSetting("txPower", "20")),
+                gainTx:      parseFloat(_propGetSetting("gainTx", "2")),
+                gainRx:      parseFloat(_propGetSetting("gainRx", "2")),
+                rxHeight:    parseFloat(_propGetSetting("rxHeight", "2")),
+                noiseFigure: parseFloat(_propGetSetting("noiseFigure", "6")),
+                fadeMargin:  parseFloat(_propGetSetting("fadeMargin", "10")),
+                freq:        parseFloat(_propGetSetting("freq", "910.525")),
+                bw, sf, cr,
+                model:       _propGetSetting("model", "terrain"),
+                useTerrain:  _propGetSetting("useTerrain", "1") !== "0",
+                threshold:   _loraThr(bw, sf),
+            };
+        }
+
+        // Resolve origin name → { lat, lon, elev? }.
+        function _propOriginCoords(originName) {
+            let coords = null;
+            if (!originName || originName === "self") {
+                const si = _deviceMap && _deviceMap.self_info;
+                if (si && si.adv_lat != null && (si.adv_lat || si.adv_lon))
+                    coords = { lat: si.adv_lat, lon: si.adv_lon };
+                else if (_domoticzLocation && _domoticzLocation.lat != null)
+                    coords = { lat: _domoticzLocation.lat, lon: _domoticzLocation.lon };
+            } else {
+                const idx = _buildNodeCoordIndex();
+                coords = idx[originName] || null;
+            }
+            if (!coords) return null;
+            const { lat, lon } = coords;
+            if (lat < -90 || lat > 90 || lon < -180 || lon > 180) return null;
+            return coords;
+        }
+
+        // Build the 200×200 lat/lon grid centred on origin, span = 2× horizon.
+        // Coverage grid resolution. 100 × 100 = 10 000 cells × 16 terrain
+        // samples per ray = 160 000 elevation points; chunked at 1 000/cmd
+        // that is ~160 WS round-trips — feasible in 10-30 s on a cold cache
+        // and a couple of seconds when fully cache-warm. At 200 × 200 × 32
+        // it was 1.28 M points and 1 280 round-trips, which the user saw as
+        // the slow "X / 40000" progress climb.
+        const _PROP_COLS = 100, _PROP_ROWS = 100;
+        const _PROP_MAX_KM = 50;
+
+        function _propBuildGrid(originLat, originLon) {
+            const R = 6371.0;
+            const halfSpanKm = _PROP_MAX_KM;
+            const halfSpanLat = (halfSpanKm / R) * (180 / Math.PI);
+            const halfSpanLon = (halfSpanKm / (R * Math.cos(originLat * Math.PI / 180))) * (180 / Math.PI);
+            const lats = new Float64Array(_PROP_COLS * _PROP_ROWS);
+            const lons = new Float64Array(_PROP_COLS * _PROP_ROWS);
+            for (let r = 0; r < _PROP_ROWS; r++) {
+                for (let c = 0; c < _PROP_COLS; c++) {
+                    const lat = originLat + halfSpanLat * (1 - 2 * r / (_PROP_ROWS - 1));
+                    const lon = originLon + halfSpanLon * (-1 + 2 * c / (_PROP_COLS - 1));
+                    const idx = r * _PROP_COLS + c;
+                    lats[idx] = lat;
+                    lons[idx] = lon;
+                }
+            }
+            return { originLat, originLon, halfSpanKm, halfSpanLat, halfSpanLon, cols: _PROP_COLS, rows: _PROP_ROWS, lats, lons };
+        }
+
+        // Update the progress label in the drawer.
+        function _propSetProgress(text) {
+            const el = document.getElementById("topo-cov-progress");
+            if (el) el.innerHTML = text ? `<i class="fa-solid fa-spinner fa-spin"></i> ${text}` : "";
+        }
+
+        // Cancel any in-flight computation (worker + pending callbacks).
+        function _propCancel() {
+            ++_propGeneration;
+            if (_propDebounce) { clearTimeout(_propDebounce); _propDebounce = null; }
+            if (_propWorker) { try { _propWorker.terminate(); } catch (_) {} _propWorker = null; }
+            _propSetProgress("");
+        }
+
+        // Fetch terrain profile samples along each ray (origin → each cell) in
+        // TERRAIN_SAMPLES points. We pack them into a Float64Array and ship to worker.
+        // Returns a Float64Array(N * TERRAIN_SAMPLES) or null on failure.
+        const _PROP_TERRAIN_SAMPLES = 16;
+        // Domoticz caps `plugin_command` WebSocket frames at 65 536 bytes.
+        // Coords are rounded to 4 dp before serialising (the elevation cache
+        // already quantises at 4 dp ≈ 11 m, so this is lossless from the
+        // cache's perspective). With 4-dp coords each point serialises to
+        // roughly 17 bytes, so 1000 points ≈ 17 KB — well under the cap.
+        const _PROP_CHUNK = 1000;
+
+        async function _propFetchTerrainProfiles(grid, gen) {
+            const N = grid.cols * grid.rows;
+            const SAMP = _PROP_TERRAIN_SAMPLES;
+            // Build list of all sample lat/lons (N * SAMP points total).
+            // For each cell, we sample SAMP points linearly from origin to cell.
+            const allLats = new Float64Array(N * SAMP);
+            const allLons = new Float64Array(N * SAMP);
+            for (let i = 0; i < N; i++) {
+                const cLat = grid.lats[i], cLon = grid.lons[i];
+                for (let k = 0; k < SAMP; k++) {
+                    const f = k / (SAMP - 1);
+                    allLats[i * SAMP + k] = grid.originLat + f * (cLat - grid.originLat);
+                    allLons[i * SAMP + k] = grid.originLon + f * (cLon - grid.originLon);
+                }
+            }
+            const total = N * SAMP;
+            const result = new Float64Array(total);
+            let fetched = 0;
+            while (fetched < total) {
+                if (_propGeneration !== gen) return null;
+                const end = Math.min(fetched + _PROP_CHUNK, total);
+                const chunk = [];
+                for (let j = fetched; j < end; j++) {
+                    // Round to 4 dp (~11 m grid) to match the elevation cache
+                    // quantisation; further precision is discarded server-side
+                    // anyway and only wastes WS frame bytes.
+                    chunk.push([
+                        Math.round(allLats[j] * 1e4) / 1e4,
+                        Math.round(allLons[j] * 1e4) / 1e4,
+                    ]);
+                }
+                const id = ++_propElevCmdId;
+                let elevs;
+                try {
+                    const res = await new Promise((resolve, reject) => {
+                        let unsub;
+                        const timer = setTimeout(() => { unsub && unsub(); reject(new Error("timeout")); }, 45000);
+                        unsub = _pluginWS.onPluginMessage(msg => {
+                            if (msg && msg.t === "cmd_result" && msg.id === id) {
+                                clearTimeout(timer); unsub();
+                                if (msg.ok) resolve(msg);
+                                else reject(new Error(msg.error || "elevation failed"));
+                            }
+                        });
+                        _pluginWS.sendPluginCommand({ t: "cmd", cmd: "elevation", points: chunk, id });
+                    });
+                    elevs = res.elevations;
+                } catch (_) {
+                    return null; // elevation service unavailable
+                }
+                if (_propGeneration !== gen) return null;
+                for (let j = 0; j < (elevs ? elevs.length : 0); j++) {
+                    result[fetched + j] = elevs[j] != null ? elevs[j] : 0;
+                }
+                fetched = end;
+                const done = Math.round(fetched / (SAMP)); // cells done
+                _propSetProgress(`Computing coverage… ${done.toLocaleString()} / ${N.toLocaleString()}`);
+            }
+            return result;
+        }
+
+        // Spawn worker, send compute message, await result.
+        async function _propRunWorker(grid, cellElevs, settings, originElevM, gen) {
+            if (_propWorker) { try { _propWorker.terminate(); } catch (_) {} _propWorker = null; }
+            const blob = new Blob([_PROP_WORKER_SRC], { type: "application/javascript" });
+            const url = URL.createObjectURL(blob);
+            const worker = _propWorker = new Worker(url);
+            URL.revokeObjectURL(url);
+
+            const freqHz = settings.freq * 1e6;
+            const clutterLoss = _CLUTTER_LOSS[settings.model] || 0;
+            const useTerrain = settings.useTerrain && !!cellElevs;
+
+            const N = grid.cols * grid.rows;
+            // Transfer typed arrays for zero-copy. We need plain arrays for lats/lons.
+            const cellLats = new Float64Array(grid.lats);
+            const cellLons = new Float64Array(grid.lons);
+            const msg = {
+                type: "compute",
+                cols: grid.cols, rows: grid.rows,
+                originLat: grid.originLat, originLon: grid.originLon,
+                originElev: originElevM,
+                txPower:    settings.txPower,
+                gainTx:     settings.gainTx,
+                gainRx:     settings.gainRx,
+                rxHeight:   settings.rxHeight,
+                freqHz,
+                threshold:  settings.threshold,
+                fadeMargin: settings.fadeMargin,
+                useTerrain,
+                clutterLoss,
+                cellElevs:  useTerrain ? cellElevs.buffer : null,
+                cellLats:   cellLats.buffer,
+                cellLons:   cellLons.buffer,
+            };
+            const transfers = [cellLats.buffer, cellLons.buffer];
+            if (useTerrain && cellElevs) transfers.push(cellElevs.buffer);
+
+            return new Promise((resolve, reject) => {
+                worker.onmessage = ev => {
+                    const d = ev.data;
+                    if (d.type === "result") {
+                        const snr = new Float32Array(d.snr);
+                        resolve(snr);
+                    } else {
+                        reject(new Error(d.msg || "worker error"));
+                    }
+                };
+                worker.onerror = e => reject(e);
+                worker.postMessage(msg, transfers);
+            });
+        }
+
+        // Main entry: schedule (debounce) a coverage recompute.
+        function _propScheduleRecompute() {
+            _propCancel();
+            if (!_topoGet("coverage", false)) return;
+            _propDebounce = setTimeout(_propRecompute, 500);
+        }
+
+        async function _propRecompute() {
+            _propDebounce = null;
+            const gen = ++_propGeneration;
+            const settings = _propSettings();
+
+            // Clamp freq to valid range; warn if outside typical LoRa bands.
+            settings.freq = Math.max(400, Math.min(2500, settings.freq));
+            if (settings.freq < 800 || settings.freq > 1000)
+                console.warn("Coverage: freq", settings.freq, "MHz is outside typical LoRa bands [800, 1000]");
+
+            const originCoords = _propOriginCoords(settings.origin);
+            if (!originCoords) {
+                _propSetProgress("Origin has no coordinates");
+                return;
+            }
+            const { lat: oLat, lon: oLon } = originCoords;
+
+            _propSetProgress("Building grid…");
+            const grid = _propBuildGrid(oLat, oLon);
+            _propGrid = grid;
+
+            // Update origin marker.
+            _propUpdateOriginMarker(oLat, oLon);
+
+            // Fetch terrain if needed.
+            let cellElevs = null;
+            if (settings.useTerrain) {
+                _propSetProgress("Fetching terrain… 0 / 40 000");
+                cellElevs = await _propFetchTerrainProfiles(grid, gen);
+                if (_propGeneration !== gen) return;
+                if (!cellElevs) {
+                    _propSetProgress("Terrain unavailable — using free-space");
+                }
+            }
+
+            // Fetch origin elevation.
+            let originElevM = 0;
+            if (settings.useTerrain) {
+                try {
+                    const id = ++_propElevCmdId;
+                    const r = await new Promise((resolve, reject) => {
+                        let unsub;
+                        const t = setTimeout(() => { unsub && unsub(); reject(new Error("timeout")); }, 15000);
+                        unsub = _pluginWS.onPluginMessage(msg => {
+                            if (msg && msg.t === "cmd_result" && msg.id === id) {
+                                clearTimeout(t); unsub();
+                                if (msg.ok) resolve(msg); else reject(new Error("fail"));
+                            }
+                        });
+                        _pluginWS.sendPluginCommand({ t: "cmd", cmd: "elevation", points: [[oLat, oLon]], id });
+                    });
+                    if (_propGeneration === gen && r.elevations && r.elevations[0] != null)
+                        originElevM = r.elevations[0];
+                } catch (_) { /* use 0 */ }
+            }
+            if (_propGeneration !== gen) return;
+
+            _propSetProgress("Computing propagation…");
+            let snr;
+            try {
+                snr = await _propRunWorker(grid, cellElevs, settings, originElevM, gen);
+            } catch (e) {
+                if (_propGeneration !== gen) return;
+                _propSetProgress("Computation failed");
+                return;
+            }
+            if (_propGeneration !== gen) return;
+            _propWorker = null;
+
+            _propSnrGrid = snr;
+            _propSetProgress("");
+            _propRedrawLayer();
+            _propShowLegend(true);
+        }
+
+        // Create/update the pulsing origin marker.
+        function _propUpdateOriginMarker(lat, lon) {
+            if (!_leafletMap) return;
+            const icon = L.divIcon({
+                className: "",
+                html: `<div class="cov-origin-wrap"><div class="cov-origin-halo"></div><div class="cov-origin-inner"></div></div>`,
+                iconSize: [24, 24],
+                iconAnchor: [12, 12],
+            });
+            if (_propOriginMarker) {
+                try { _propOriginMarker.setLatLng([lat, lon]); } catch (_) {}
+            } else {
+                _propOriginMarker = L.marker([lat, lon], { icon, interactive: false, zIndexOffset: -10 });
+                _propOriginMarker.addTo(_leafletMap);
+            }
+        }
+
+        // Convert SNR 0..30 dB to RGBA using the coverage gradient.
+        function _propSnrToRgba(snr) {
+            if (snr <= 0) return null;
+            const t = Math.min(snr / 30, 1.0);
+            // Parse gradient stops to RGB.
+            const stops = _COV_GRADIENT;
+            let lo = stops[0], hi = stops[stops.length - 1];
+            for (let i = 0; i < stops.length - 1; i++) {
+                if (t >= stops[i][0] && t <= stops[i + 1][0]) { lo = stops[i]; hi = stops[i + 1]; break; }
+            }
+            const f = (t - lo[0]) / Math.max(0.001, hi[0] - lo[0]);
+            const hexToRgb = h => {
+                const r = parseInt(h.slice(1, 3), 16);
+                const g = parseInt(h.slice(3, 5), 16);
+                const b = parseInt(h.slice(5, 7), 16);
+                return [r, g, b];
+            };
+            const [r1, g1, b1] = hexToRgb(lo[1]);
+            const [r2, g2, b2] = hexToRgb(hi[1]);
+            return [
+                Math.round(r1 + f * (r2 - r1)),
+                Math.round(g1 + f * (g2 - g1)),
+                Math.round(b1 + f * (b2 - b1)),
+            ];
+        }
+
+        // Build and add the GridLayer overlay.
+        function _propRedrawLayer() {
+            if (!_leafletMap) return;
+            if (_propLayer) {
+                try { _leafletMap.removeLayer(_propLayer); } catch (_) {}
+                _propLayer = null;
+            }
+            if (!_propSnrGrid || !_propGrid) return;
+
+            const snr = _propSnrGrid;
+            const g = _propGrid;
+
+            // Pre-parse gradient stops for fast per-pixel colour lookup.
+            const _covStops = _COV_GRADIENT.map(([t, hex]) => ({
+                t,
+                r: parseInt(hex.slice(1, 3), 16),
+                g: parseInt(hex.slice(3, 5), 16),
+                b: parseInt(hex.slice(5, 7), 16),
+            }));
+            function _covSnrToRgb(sv) {
+                const t = Math.min(sv / 30, 1.0);
+                let lo = _covStops[0], hi = _covStops[_covStops.length - 1];
+                for (let i = 0; i < _covStops.length - 1; i++) {
+                    if (t >= _covStops[i].t && t <= _covStops[i + 1].t) { lo = _covStops[i]; hi = _covStops[i + 1]; break; }
+                }
+                const f = (t - lo.t) / Math.max(0.001, hi.t - lo.t);
+                return [
+                    Math.round(lo.r + f * (hi.r - lo.r)),
+                    Math.round(lo.g + f * (hi.g - lo.g)),
+                    Math.round(lo.b + f * (hi.b - lo.b)),
+                ];
+            }
+
+            const CovLayer = L.GridLayer.extend({
+                createTile(coords) {
+                    const tile = document.createElement("canvas");
+                    tile.width = tile.height = 256;
+                    const ctx = tile.getContext("2d");
+                    const tileSize = 256;
+                    const imgData = ctx.createImageData(tileSize, tileSize);
+                    const data = imgData.data;
+                    const nwX = coords.x * tileSize;
+                    const nwY = coords.y * tileSize;
+                    const zoom = coords.z;
+                    const proj = this._map.options.crs || L.CRS.EPSG3857;
+                    const ALPHA = Math.round(0.55 * 255);
+                    for (let py = 0; py < tileSize; py++) {
+                        for (let px = 0; px < tileSize; px++) {
+                            const ll = proj.pointToLatLng(L.point(nwX + px, nwY + py), zoom);
+                            if (!ll) continue;
+                            const lat = ll.lat, lon = ll.lng;
+                            const normC = (lon - (g.originLon - g.halfSpanLon)) / (2 * g.halfSpanLon);
+                            const normR = ((g.originLat + g.halfSpanLat) - lat) / (2 * g.halfSpanLat);
+                            if (normC < 0 || normC > 1 || normR < 0 || normR > 1) continue;
+                            const gc = normC * (g.cols - 1);
+                            const gr = normR * (g.rows - 1);
+                            const c0 = Math.floor(gc), r0 = Math.floor(gr);
+                            const c1 = Math.min(c0 + 1, g.cols - 1), r1 = Math.min(r0 + 1, g.rows - 1);
+                            const fc = gc - c0, fr = gr - r0;
+                            const s00 = snr[r0 * g.cols + c0];
+                            const s10 = snr[r0 * g.cols + c1];
+                            const s01 = snr[r1 * g.cols + c0];
+                            const s11 = snr[r1 * g.cols + c1];
+                            const sv = s00*(1-fc)*(1-fr) + s10*fc*(1-fr) + s01*(1-fc)*fr + s11*fc*fr;
+                            if (sv <= 0) continue;
+                            const rgb = _covSnrToRgb(sv);
+                            const off = (py * tileSize + px) * 4;
+                            data[off]   = rgb[0];
+                            data[off+1] = rgb[1];
+                            data[off+2] = rgb[2];
+                            data[off+3] = ALPHA;
+                        }
+                    }
+                    ctx.putImageData(imgData, 0, 0);
+                    return tile;
+                },
+            });
+
+            _propLayer = new CovLayer({ tileSize: 256, opacity: 1, zIndex: 350, pane: "overlayPane" });
+            _propLayer.addTo(_leafletMap);
+
+            // Ensure the origin marker is on the map above the overlay.
+            if (_propOriginMarker) {
+                try { _propOriginMarker.addTo(_leafletMap); } catch (_) {}
+            }
+        }
+
+        // Show or hide the coverage legend.
+        function _propShowLegend(show) {
+            const wrap = document.getElementById("map-canvas");
+            if (!wrap) return;
+            let leg = wrap.querySelector("#topo-cov-legend");
+            if (!show) { if (leg) leg.remove(); return; }
+            if (!leg) {
+                leg = document.createElement("div");
+                leg.id = "topo-cov-legend";
+                wrap.style.position = "relative";
+                wrap.appendChild(leg);
+            }
+            // Build CSS gradient string.
+            const stops = _COV_GRADIENT.map(([t, c]) => `${c} ${Math.round(t * 100)}%`).join(", ");
+            leg.innerHTML = `
+                <div class="cov-leg-title">SNR above<br>threshold (dB)</div>
+                <div class="cov-leg-inner">
+                    <div class="cov-leg-bar" style="background:linear-gradient(to bottom,${stops})"></div>
+                    <div class="cov-leg-labels">
+                        <span>30</span><span>20</span><span>10</span><span>0</span>
+                    </div>
+                </div>`;
+        }
+
+        // Rebuild origin selector options (called when opening the drawer).
+        function _propBuildOriginOptions(currentOrigin) {
+            let opts = `<option value="self"${currentOrigin === "self" ? " selected" : ""}>Self (observer)</option>`;
+            const idx = _buildNodeCoordIndex();
+            // Add contacts with coords
+            const nodes = (_deviceMap && _deviceMap.nodes) || {};
+            for (const [name, node] of Object.entries(nodes)) {
+                if (!node || node.lat == null || (!node.lat && !node.lon)) continue;
+                const sel = currentOrigin === name ? " selected" : "";
+                opts += `<option value="${escHtml(name)}"${sel}>${escHtml(name)}</option>`;
+            }
+            // Heard nodes with coords
+            const hn = (_heard && _heard.nodes) || {};
+            for (const [pk, node] of Object.entries(hn)) {
+                if (!node || node.lat == null || (!node.lat && !node.lon)) continue;
+                const hName = node.name || pk.slice(0, 12);
+                const sel = currentOrigin === hName ? " selected" : "";
+                opts += `<option value="${escHtml(hName)}"${sel}>${escHtml(hName)}</option>`;
+            }
+            return opts;
+        }
+
+        // Render (or re-render) the settings drawer.
+        function _propRenderDrawer() {
+            const toolbar = document.getElementById("topo-toolbar");
+            if (!toolbar) return;
+            const s = _propSettings();
+            let drawer = document.getElementById("topo-cov-drawer");
+            if (!_topoGet("coverage", false)) {
+                if (drawer) drawer.remove();
+                return;
+            }
+            if (!drawer) {
+                drawer = document.createElement("div");
+                drawer.id = "topo-cov-drawer";
+                drawer.className = "topo-coverage-drawer";
+                toolbar.insertAdjacentElement("afterend", drawer);
+            }
+            const bwOpts = ["7.8","15.6","31.25","62.5","125","250","500"]
+                .map(v => `<option value="${v}"${s.bw === v ? " selected" : ""}>${v}</option>`).join("");
+            const sfOpts = [7,8,9,10,11,12]
+                .map(v => `<option value="${v}"${s.sf === v ? " selected" : ""}>${v}</option>`).join("");
+            const crOpts = ["4/5","4/6","4/7","4/8"]
+                .map(v => `<option value="${v}"${s.cr === v ? " selected" : ""}>${v}</option>`).join("");
+            const modelOpts = [
+                ["fs","Free-space"],["terrain","FS + terrain"],
+                ["suburban","+ Suburban"],["urban","+ Urban"],["indoor","+ Indoor"]
+            ].map(([v,l]) => `<option value="${v}"${s.model === v ? " selected" : ""}>${l}</option>`).join("");
+
+            drawer.innerHTML = `
+                <div class="topo-cov-row">
+                    <label>Origin</label>
+                    <select class="topo-cov-ctrl" id="cov-origin" style="min-width:110px">${_propBuildOriginOptions(s.origin)}</select>
+                </div>
+                <div class="topo-cov-row">
+                    <label>TX (dBm)</label>
+                    <input class="topo-cov-ctrl" type="number" id="cov-txPower" min="0" max="30" step="1" value="${s.txPower}" style="width:46px">
+                </div>
+                <div class="topo-cov-row">
+                    <label>G<sub>tx</sub> (dBi)</label>
+                    <input class="topo-cov-ctrl" type="number" id="cov-gainTx" min="0" max="20" step="0.5" value="${s.gainTx}" style="width:46px">
+                </div>
+                <div class="topo-cov-row">
+                    <label>G<sub>rx</sub> (dBi)</label>
+                    <input class="topo-cov-ctrl" type="number" id="cov-gainRx" min="0" max="20" step="0.5" value="${s.gainRx}" style="width:46px">
+                </div>
+                <div class="topo-cov-row">
+                    <label>RX h (m)</label>
+                    <input class="topo-cov-ctrl" type="number" id="cov-rxHeight" min="0" max="100" step="1" value="${s.rxHeight}" style="width:46px">
+                </div>
+                <div class="topo-cov-row">
+                    <label>NF (dB)</label>
+                    <input class="topo-cov-ctrl" type="number" id="cov-noiseFigure" min="0" max="20" step="1" value="${s.noiseFigure}" style="width:46px">
+                </div>
+                <div class="topo-cov-row">
+                    <label>Fade (dB)</label>
+                    <input class="topo-cov-ctrl" type="number" id="cov-fadeMargin" min="0" max="30" step="1" value="${s.fadeMargin}" style="width:46px">
+                </div>
+                <div class="topo-cov-row">
+                    <label>Freq (MHz)</label>
+                    <input class="topo-cov-ctrl" type="number" id="cov-freq" min="100" max="2500" step="0.001" value="${s.freq}" style="width:72px">
+                </div>
+                <div class="topo-cov-row">
+                    <label>BW (kHz)</label>
+                    <select class="topo-cov-ctrl" id="cov-bw">${bwOpts}</select>
+                </div>
+                <div class="topo-cov-row">
+                    <label>SF</label>
+                    <select class="topo-cov-ctrl" id="cov-sf" style="min-width:44px">${sfOpts}</select>
+                </div>
+                <div class="topo-cov-row">
+                    <label>CR</label>
+                    <select class="topo-cov-ctrl" id="cov-cr" style="min-width:44px">${crOpts}</select>
+                </div>
+                <div class="topo-cov-row">
+                    <label>Model</label>
+                    <select class="topo-cov-ctrl" id="cov-model" style="min-width:110px">${modelOpts}</select>
+                </div>
+                <div class="topo-cov-row">
+                    <label title="Include terrain diffraction loss in the model">
+                        <input type="checkbox" id="cov-useTerrain"${s.useTerrain ? " checked" : ""}> Terrain
+                    </label>
+                </div>
+                <span class="topo-cov-progress" id="topo-cov-progress"></span>`;
+
+            // Wire all controls: persist + debounce recompute.
+            const wire = (id, key, getter) => {
+                const el = drawer.querySelector("#" + id);
+                if (!el) return;
+                el.addEventListener("change", () => {
+                    _propSetSetting(key, getter(el));
+                    _propScheduleRecompute();
+                });
+            };
+            wire("cov-origin",      "origin",      el => el.value);
+            wire("cov-txPower",     "txPower",     el => el.value);
+            wire("cov-gainTx",      "gainTx",      el => el.value);
+            wire("cov-gainRx",      "gainRx",      el => el.value);
+            wire("cov-rxHeight",    "rxHeight",    el => el.value);
+            wire("cov-noiseFigure", "noiseFigure", el => el.value);
+            wire("cov-fadeMargin",  "fadeMargin",  el => el.value);
+            wire("cov-freq",        "freq",        el => el.value);
+            wire("cov-bw",          "bw",          el => el.value);
+            wire("cov-sf",          "sf",          el => el.value);
+            wire("cov-cr",          "cr",          el => el.value);
+            wire("cov-model",       "model",       el => el.value);
+            const utEl = drawer.querySelector("#cov-useTerrain");
+            if (utEl) {
+                utEl.addEventListener("change", () => {
+                    _propSetSetting("useTerrain", utEl.checked ? "1" : "0");
+                    _propScheduleRecompute();
+                });
+            }
+        }
+
+        // Tear down coverage: cancel worker, remove layer + legend + marker + drawer.
+        function _propTeardown() {
+            _propCancel();
+            if (_propLayer && _leafletMap) { try { _leafletMap.removeLayer(_propLayer); } catch (_) {} _propLayer = null; }
+            if (_propOriginMarker && _leafletMap) { try { _leafletMap.removeLayer(_propOriginMarker); } catch (_) {} _propOriginMarker = null; }
+            _propSnrGrid = null;
+            _propGrid = null;
+            _propShowLegend(false);
+            const drawer = document.getElementById("topo-cov-drawer");
+            if (drawer) drawer.remove();
+        }
+
+        // Build a name→{lat,lon} index from all available coordinate sources so
+        // rxlog src/from fields (which may be a node name, pubkey prefix, or
+        // 1-byte path hash) can be resolved to a map position.
+        function _buildNodeCoordIndex() {
+            const idx = {};
+            const nodes = (_deviceMap && _deviceMap.nodes) || {};
+            // Contact nodes
+            for (const [name, node] of Object.entries(nodes)) {
+                if (node && node.lat != null && node.lon != null && (node.lat || node.lon)) {
+                    idx[name] = { lat: node.lat, lon: node.lon };
+                    if (node.pubkey_prefix) idx[node.pubkey_prefix] = { lat: node.lat, lon: node.lon };
+                    if (node.pubkey)        idx[String(node.pubkey).toLowerCase()] = { lat: node.lat, lon: node.lon };
+                }
+            }
+            // Self node (observer)
+            const selfName = _deviceMap && _deviceMap.self;
+            if (selfName) {
+                const si = _deviceMap && _deviceMap.self_info;
+                let sLat = null, sLon = null;
+                if (si && si.adv_lat != null && si.adv_lon != null && (si.adv_lat || si.adv_lon)) {
+                    sLat = si.adv_lat; sLon = si.adv_lon;
+                } else if (nodes[selfName] && nodes[selfName].lat != null) {
+                    sLat = nodes[selfName].lat; sLon = nodes[selfName].lon;
+                } else if (_domoticzLocation && _domoticzLocation.lat != null) {
+                    sLat = _domoticzLocation.lat; sLon = _domoticzLocation.lon;
+                }
+                if (sLat != null) {
+                    idx[selfName] = { lat: sLat, lon: sLon };
+                    if (si && si.public_key) idx[String(si.public_key).toLowerCase()] = { lat: sLat, lon: sLon };
+                }
+            }
+            // Heard nodes (non-contact)
+            const hn = (_heard && _heard.nodes) || {};
+            for (const [pk, node] of Object.entries(hn)) {
+                if (node && node.lat != null && node.lon != null && (node.lat || node.lon)) {
+                    idx[pk] = { lat: node.lat, lon: node.lon };
+                    const hName = node.name || pk.slice(0, 12);
+                    if (hName) idx[hName] = { lat: node.lat, lon: node.lon };
+                }
+            }
+            return idx;
+        }
+
+        function _renderActivityHeatmap() {
+            if (!_leafletMap) return;
+            if (_heatmapLayer) { try { _leafletMap.removeLayer(_heatmapLayer); } catch (_) {} _heatmapLayer = null; }
+            const heatmapOn = _topoGet("heatmap", false);
+            const emptyNote = document.getElementById("topo-heatmap-empty");
+            if (!heatmapOn) {
+                if (emptyNote) emptyNote.classList.remove("visible");
+                return;
+            }
+
+            const windowMin = parseInt(_topoGetStr("heatmap-window", "10"), 10) || 10;
+            const windowMs  = windowMin * 60_000;
+            const now       = Date.now();
+            const cutoff    = now - windowMs;
+
+            const coordIdx = _buildNodeCoordIndex();
+            const points   = [];
+
+            for (const entry of ((_rxLog && _rxLog.entries) || [])) {
+                const ts = entry._t || entry.ts;
+                if (!ts || ts * 1000 < cutoff) continue;
+                const src = entry.src || entry.from || entry.adv_name;
+                if (!src) continue;
+                let xy = coordIdx[src] || coordIdx[String(src).toLowerCase()];
+                // Fallback: try resolving as a 1-byte path hash
+                if (!xy) {
+                    const resolved = _resolvePathHop(src);
+                    if (resolved) xy = coordIdx[resolved];
+                }
+                if (!xy) continue;
+                const age = (now - ts * 1000) / windowMs;
+                const w   = Math.max(0.2, 1 - age);
+                points.push([xy.lat, xy.lon, w]);
+            }
+
+            const zoom   = _leafletMap.getZoom() || 7;
+            const radius = Math.min(35, Math.max(8, 22 - (15 - zoom) * 2));
+
+            _heatmapLayer = L.heatLayer(points, {
+                radius,
+                blur: 18,
+                maxZoom: 17,
+                gradient: { 0.2: "#3b82f6", 0.5: "#22c55e", 0.8: "#f59e0b", 1.0: "#ef4444" },
+            }).addTo(_leafletMap);
+
+            if (emptyNote) {
+                emptyNote.textContent = points.length === 0 ? `No traffic in the last ${windowMin} min` : "";
+                emptyNote.classList.toggle("visible", points.length === 0);
+            }
+        }
+
+        function _startHeatmapAutoFade() {
+            if (_heatmapTimer) return;
+            _heatmapTimer = setInterval(_renderActivityHeatmap, 30_000);
+        }
+
+        function _stopHeatmapAutoFade() {
+            if (_heatmapTimer) { clearInterval(_heatmapTimer); _heatmapTimer = null; }
+            if (_heatmapDeltaTimer) { clearTimeout(_heatmapDeltaTimer); _heatmapDeltaTimer = null; }
+        }
 
         // Audio context (lazily created on first user gesture → Live toggle click).
         let _topoAudioCtx = null;
@@ -6308,16 +7592,33 @@
                     // corner; the filter toolbar is now its own row above
                     // the map, so the corner is free.
                     _leafletMap = L.map(canvas, { zoomControl: true }).setView([52, 5], 7);
-                    L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
-                        attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors',
-                        maxZoom: 19,
-                    }).addTo(_leafletMap);
+                    _liveMaps.add(_leafletMap);
+                    _applyTileMode(_leafletMap, _topoGetStr("tile", "light"));
+                    // Re-render heatmap on zoom changes (radius is zoom-aware).
+                    // Named listener registered once; early-return guard handles heatmap-off state.
+                    _leafletMap.on("zoomend", _heatmapZoomListener);
                 } else if (_leafletMap.zoomControl) {
                     try { _leafletMap.zoomControl.setPosition("topleft"); } catch (_) {}
                 }
                 // Drop any prior topology overlay so a refresh doesn't pile up
                 if (_topologyLayer) { _topologyLayer.remove(); _topologyLayer = null; }
                 _topologyLayer = L.layerGroup().addTo(_leafletMap);
+
+                // Re-add overlay layers so they survive the topology layer rebuild
+                // (same lifecycle pattern as _heatmapLayer).
+                if (_propLayer) _propLayer.addTo(_leafletMap);
+                if (_propOriginMarker) { try { _propOriginMarker.addTo(_leafletMap); } catch (_) {} }
+                if (_losLayer) _losLayer.addTo(_leafletMap);
+
+                // Apply dimming class to the canvas when LoS mode is active.
+                const canvas2 = document.getElementById("map-canvas");
+                const losActive = _topoGet("los", false);
+                if (canvas2) canvas2.classList.toggle("los-active", losActive);
+
+                // Map-click handler for LoS pin drops (named function so Leaflet
+                // does not accumulate duplicate listeners across topology rebuilds).
+                _leafletMap.off("click", _losMapClickHandler);
+                _leafletMap.on("click", _losMapClickHandler);
 
                 // Stop the floating toolbar's clicks from reaching Leaflet
                 // (without this, Leaflet's drag handler runs on the toolbar
@@ -6445,6 +7746,8 @@
                             `Hops: ${h != null && !isNaN(h) ? h : "?"}<br>` +
                             `Type: ${typeLabel}` +
                             distLine +
+                            `<br><button class="topo-popup-los" data-los-lat="${node.lat}" data-los-lon="${node.lon}" data-los-label="${escHtml(name)}" title="Open LoS tool for a path to this node"><i class="fa-solid fa-ruler"></i> LoS to here</button>` +
+                            `<br><button class="topo-popup-cov" data-cov-origin="${escHtml(name)}" title="Show predicted coverage from this node"><i class="fa-solid fa-tower-broadcast"></i> Coverage from here</button>` +
                             `<br><button class="topo-popup-del" data-kind="contact" data-name="${escHtml(name)}"${_pkAttr} title="Permanently remove from the system"><i class="fa-solid fa-trash"></i> Delete</button>`
                         );
                     if (showLines && selfLoc) {
@@ -6546,6 +7849,8 @@
                                 `Heard (not a contact)<br>` +
                                 `Last heard: ${lastHearTx}` +
                                 distLine +
+                                `<br><button class="topo-popup-los" data-los-lat="${lat}" data-los-lon="${lon}" data-los-label="${escHtml(hName)}" title="Open LoS tool for a path to this node"><i class="fa-solid fa-ruler"></i> LoS to here</button>` +
+                                `<br><button class="topo-popup-cov" data-cov-origin="${escHtml(hName)}" title="Show predicted coverage from this node"><i class="fa-solid fa-tower-broadcast"></i> Coverage from here</button>` +
                                 `<br><button class="topo-popup-del" data-kind="heard" data-pk="${escHtml(pk)}" data-name="${escHtml(hName)}" title="Permanently remove from the heard list"><i class="fa-solid fa-trash"></i> Delete</button>`
                             );
                         bounds.push(ll);
@@ -6602,10 +7907,682 @@
                     _leafletMap.setView(selfLoc, Math.max(_leafletMap.getZoom() || 11, 11));
                 }
 
+                // Activity heatmap lives outside _topologyLayer so it survives
+                // the layer rebuild above.  Subscribe to rxlog if needed so
+                // the heatmap has data even when no heavy panel is open.
+                const heatmapOn = _topoGet("heatmap", false);
+                if (heatmapOn) {
+                    if (_rxLogOpenPanels.size === 0 && _rxLogSeq === -1) _rxLogSubscribe();
+                    _startHeatmapAutoFade();
+                } else {
+                    _stopHeatmapAutoFade();
+                    if (_heatmapLayer) { try { _leafletMap.removeLayer(_heatmapLayer); } catch (_) {} _heatmapLayer = null; }
+                }
+                _renderActivityHeatmap();
+
                 // Force Leaflet to recompute container size after the panel animation
                 setTimeout(() => _leafletMap.invalidateSize(), 280);
             };
             init();
+        }
+
+        // ── LoS tool helpers ──────────────────────────────────────────────────
+
+        // Named map-click handler for LoS pin drops (reused reference so
+        // _leafletMap.off() can remove the exact same handler on each rebuild).
+        function _losMapClickHandler(ev) {
+            if (!_topoGet("los", false)) return;
+            const ll = ev.latlng;
+            if (_losPins.length > 0) {
+                const last = _losPins[_losPins.length - 1];
+                const segKm = _haversineKm(last.lat, last.lon, ll.lat, ll.lng);
+                if (segKm > _LOS_MAX_SEG_KM) {
+                    alert(`Pins cannot be more than ${_LOS_MAX_SEG_KM} km apart. This segment would be ${Math.round(segKm)} km.`);
+                    return;
+                }
+            }
+            _losPins.push({ id: _losNextId++, lat: ll.lat, lon: ll.lng, h: _losPins.length === 0 ? 2 : 8, label: "" });
+            _renderLosOverlay();
+            _renderLosPanel();
+            _scheduleLosProfile();
+        }
+
+        // Swap the bottom pane between radar and LoS panel; apply map cursor + dimming.
+        function _applyLosActiveState(on) {
+            const body = document.getElementById("map-panel-body");
+            const canvas = document.getElementById("map-canvas");
+            if (canvas) {
+                canvas.classList.toggle("los-active", on);
+                canvas.style.cursor = on ? "crosshair" : "";
+            }
+            if (!body) return;
+            if (on) {
+                // Replace or create the LoS pane.
+                let radar = body.querySelector(".topo-radar-wrap");
+                if (radar) {
+                    radar.style.display = "none";
+                    // Insert LoS pane right after radar wrap (or append to body).
+                    let losPaneEl = body.querySelector("#topo-los-pane");
+                    if (!losPaneEl) {
+                        losPaneEl = document.createElement("div");
+                        losPaneEl.id = "topo-los-pane";
+                        losPaneEl.className = "topo-los-pane";
+                        radar.after(losPaneEl);
+                    }
+                    losPaneEl.style.display = "";
+                }
+                _renderLosPanel();
+                if (_losPins.length >= 2) _scheduleLosProfile();
+            } else {
+                // Restore radar pane; destroy LoS chart.
+                const radar = body.querySelector(".topo-radar-wrap");
+                const losPaneEl = body.querySelector("#topo-los-pane");
+                if (radar) radar.style.display = "";
+                if (losPaneEl) losPaneEl.style.display = "none";
+                if (_losChart) { try { _losChart.destroy(); } catch (_) {} _losChart = null; }
+                if (_losLayer && _leafletMap) { try { _leafletMap.removeLayer(_losLayer); } catch (_) {} _losLayer = null; }
+                _losPins = [];
+                _losLastElevations = null;
+                _renderRadar();
+            }
+        }
+
+        // Render the LoS panel content (pin list + hint + chart placeholder).
+        function _renderLosPanel() {
+            const body = document.getElementById("map-panel-body");
+            let pane = body && body.querySelector("#topo-los-pane");
+            if (!pane) return;
+
+            const hasObsLoc = (() => {
+                const si = _deviceMap && _deviceMap.self_info;
+                if (si && si.adv_lat != null && (si.adv_lat || si.adv_lon)) return true;
+                if (_deviceMap && _deviceMap.nodes && _deviceMap.self) {
+                    const sn = _deviceMap.nodes[_deviceMap.self];
+                    if (sn && sn.lat != null && (sn.lat || sn.lon)) return true;
+                }
+                if (_domoticzLocation && _domoticzLocation.lat != null) return true;
+                return false;
+            })();
+
+            // Clamp selected segment to valid range
+            const numSegs = Math.max(0, _losPins.length - 1);
+            if (_losSelectedSeg >= numSegs) _losSelectedSeg = Math.max(0, numSegs - 1);
+
+            let pinsHtml = "";
+            _losPins.forEach((pin, i) => {
+                // A pin "starts" segment i (between pins i and i+1), so clicking it selects that seg.
+                // Pin 0 → seg 0, pin 1 → seg 1 (if exists), last pin → last seg.
+                const segForRow = (i < numSegs) ? i : Math.max(0, numSegs - 1);
+                const rowSelected = (numSegs >= 2 && segForRow === _losSelectedSeg) ? " seg-selected" : "";
+                pinsHtml += `<div class="topo-los-pin-row${rowSelected}" data-pin-id="${pin.id}" data-seg-idx="${segForRow}" style="cursor:${numSegs>=2?'pointer':'default'}">
+                    <span class="topo-los-pin-num">${i + 1}</span>
+                    <span class="topo-los-pin-coords">${pin.lat.toFixed(5)}, ${pin.lon.toFixed(5)}</span>
+                    <input class="topo-los-pin-h" type="number" min="0" max="100" step="0.5" value="${pin.h}" title="Antenna height (m AGL)" data-pin-id="${pin.id}">
+                    <span class="topo-los-pin-hlabel">m</span>
+                    <button class="topo-los-pin-del" data-pin-id="${pin.id}" title="Remove this pin"><i class="fa-solid fa-xmark"></i></button>
+                </div>`;
+            });
+
+            const bannerHtml = !hasObsLoc
+                ? `<div class="topo-los-banner error"><i class="fa-solid fa-triangle-exclamation"></i> Set observer location in Domoticz Settings to use the LoS tool.</div>`
+                : (_losPins.length === 0
+                    ? `<div class="topo-los-banner" id="topo-los-hint"><i class="fa-solid fa-map-pin"></i> Click on the map to add LoS pins; click a marker's popup to use it as a pin.</div>`
+                    : "");
+
+            // Segment-height editor (shown when ≥2 pins; bound to selected segment)
+            const showSegEdit = numSegs >= 2;
+            const segStartPin = showSegEdit ? _losPins[_losSelectedSeg] : null;
+            const segEndPin   = showSegEdit ? _losPins[_losSelectedSeg + 1] : null;
+            const segHeightsHtml = `<div class="topo-los-seg-heights${showSegEdit ? " visible" : ""}" id="topo-los-seg-heights">
+                <label>Start pin (${_losSelectedSeg + 1}) height (m):</label>
+                <input class="topo-los-seg-h" type="number" min="0" max="100" step="0.5"
+                    id="topo-los-seg-h-start" value="${segStartPin ? segStartPin.h : 0}">
+                <label style="margin-left:8px;">End pin (${_losSelectedSeg + 2}) height (m):</label>
+                <input class="topo-los-seg-h" type="number" min="0" max="100" step="0.5"
+                    id="topo-los-seg-h-end" value="${segEndPin ? segEndPin.h : 0}">
+            </div>`;
+
+            const statusHtml = `<div class="topo-los-seg-status${showSegEdit ? " visible" : ""}" id="topo-los-seg-status">
+                Select a segment to see LoS status
+            </div>`;
+
+            const verdictsHtml = `<div class="topo-los-verdicts" id="topo-los-verdicts"></div>`;
+
+            const chartPlaceholder = _losPins.length < 2
+                ? `<div style="display:flex;align-items:center;justify-content:center;height:80px;color:var(--muted);font-size:0.72rem;font-style:italic;">Drop at least 2 pins to see the elevation profile</div>`
+                : "";
+
+            pane.innerHTML = `
+                <div class="topo-los-hdr">
+                    <span class="topo-los-title">Line of Sight</span>
+                </div>
+                <div class="topo-los-body">
+                    ${bannerHtml}
+                    <div class="topo-los-pin-list">${pinsHtml}</div>
+                    <div class="topo-los-actions">
+                        <span class="topo-los-hint">+ Add pin (click on map)</span>
+                        <button class="topo-los-clear" id="topo-los-clear-btn">Clear all</button>
+                    </div>
+                    ${statusHtml}
+                    ${segHeightsHtml}
+                    <div id="topo-los-chart">${chartPlaceholder}</div>
+                    ${verdictsHtml}
+                </div>`;
+
+            // Wire pin height inputs (per-row inputs in the pin list)
+            pane.querySelectorAll(".topo-los-pin-h").forEach(inp => {
+                inp.addEventListener("change", () => {
+                    const id = parseInt(inp.dataset.pinId, 10);
+                    const pin = _losPins.find(p => p.id === id);
+                    if (pin) {
+                        pin.h = Math.max(0, Math.min(100, parseFloat(inp.value) || 0));
+                        inp.value = pin.h;
+                        // Sync the selected-segment Start/End inputs in case
+                        // the edited pin is one of them — without this they
+                        // would display a stale value until the user clicks
+                        // a different segment.
+                        const segPinA = _losPins[_losSelectedSeg];
+                        const segPinB = _losPins[_losSelectedSeg + 1];
+                        const hStart = document.getElementById("topo-los-seg-h-start");
+                        const hEnd   = document.getElementById("topo-los-seg-h-end");
+                        if (hStart && segPinA && segPinA.id === pin.id) hStart.value = pin.h;
+                        if (hEnd   && segPinB && segPinB.id === pin.id) hEnd.value   = pin.h;
+                        if (_losPins.length >= 2) {
+                            if (_losLastElevations) {
+                                _drawLosChart(_losLastElevations);
+                            } else {
+                                const verdEl = document.getElementById("topo-los-verdicts");
+                                if (verdEl) verdEl.innerHTML =
+                                    '<div class="topo-los-banner error"><i class="fa-solid fa-triangle-exclamation"></i> Elevation service unavailable; heights saved but profile cannot be drawn.</div>';
+                            }
+                        }
+                    }
+                });
+                // Prevent row-click propagation from firing on the input itself
+                inp.addEventListener("click", e => e.stopPropagation());
+            });
+
+            // Wire pin-row click → select segment
+            pane.querySelectorAll(".topo-los-pin-row").forEach(row => {
+                row.addEventListener("click", e => {
+                    if (e.target.closest(".topo-los-pin-del") || e.target.closest(".topo-los-pin-h")) return;
+                    const segIdx = parseInt(row.dataset.segIdx, 10);
+                    if (_losPins.length < 2) return;
+                    _losSelectedSeg = Math.max(0, Math.min(_losPins.length - 2, segIdx));
+                    _renderLosPanel();
+                    if (_losLastElevations) _drawLosChart(_losLastElevations);
+                });
+            });
+
+            // Wire segment height inputs (start / end of selected segment)
+            const segHStart = pane.querySelector("#topo-los-seg-h-start");
+            const segHEnd   = pane.querySelector("#topo-los-seg-h-end");
+            function _applySegHeight(pinIdx, val) {
+                const pin = _losPins[pinIdx];
+                if (!pin) return;
+                pin.h = Math.max(0, Math.min(100, parseFloat(val) || 0));
+                // Sync the per-row input for this pin if it exists
+                const rowInp = pane.querySelector(`.topo-los-pin-h[data-pin-id="${pin.id}"]`);
+                if (rowInp) rowInp.value = pin.h;
+                if (_losPins.length >= 2 && _losLastElevations) _drawLosChart(_losLastElevations);
+            }
+            if (segHStart) segHStart.addEventListener("change", () => _applySegHeight(_losSelectedSeg, segHStart.value));
+            if (segHEnd)   segHEnd.addEventListener("change",   () => _applySegHeight(_losSelectedSeg + 1, segHEnd.value));
+
+            // Wire pin delete buttons
+            pane.querySelectorAll(".topo-los-pin-del").forEach(btn => {
+                btn.addEventListener("click", () => {
+                    const id = parseInt(btn.dataset.pinId, 10);
+                    _losPins = _losPins.filter(p => p.id !== id);
+                    _losSelectedSeg = 0;
+                    _renderLosOverlay();
+                    _renderLosPanel();
+                    if (_losPins.length >= 2) _scheduleLosProfile();
+                    else {
+                        const vc = document.getElementById("topo-los-verdicts");
+                        if (vc) vc.innerHTML = "";
+                        if (_losChart) { try { _losChart.destroy(); } catch (_) {} _losChart = null; }
+                        _losLastElevations = null;
+                    }
+                });
+            });
+
+            // Wire clear-all button
+            const clearBtn = pane.querySelector("#topo-los-clear-btn");
+            if (clearBtn) {
+                clearBtn.addEventListener("click", () => {
+                    _losPins = [];
+                    _losSelectedSeg = 0;
+                    if (_losLayer && _leafletMap) { try { _leafletMap.removeLayer(_losLayer); } catch (_) {} _losLayer = null; }
+                    if (_losChart) { try { _losChart.destroy(); } catch (_) {} _losChart = null; }
+                    _losLastElevations = null;
+                    _renderLosPanel();
+                });
+            }
+        }
+
+        // Cached elevation result for height-only redraws.
+        let _losLastElevations = null;
+
+        // Render/update the Leaflet LoS overlay (numbered markers + polyline).
+        function _renderLosOverlay() {
+            if (!_leafletMap) return;
+            if (!_losLayer) {
+                _losLayer = L.layerGroup().addTo(_leafletMap);
+            } else {
+                _losLayer.clearLayers();
+            }
+            if (_losPins.length === 0) return;
+
+            // Connecting polyline
+            if (_losPins.length >= 2) {
+                const latlngs = _losPins.map(p => [p.lat, p.lon]);
+                L.polyline(latlngs, { color: "#f0a832", weight: 5, dashArray: "10 6", opacity: 0.95 })
+                    .addTo(_losLayer);
+            }
+
+            // Numbered markers (draggable)
+            _losPins.forEach((pin, i) => {
+                const icon = L.divIcon({
+                    className: "",
+                    html: `<div class="los-pin-icon">${i + 1}</div>`,
+                    iconSize: [22, 22],
+                    iconAnchor: [11, 11],
+                });
+                const marker = L.marker([pin.lat, pin.lon], { icon, draggable: true })
+                    .addTo(_losLayer);
+                marker.on("dragend", (ev) => {
+                    const ll = ev.target.getLatLng();
+                    const prevLat = pin.lat, prevLon = pin.lon;
+                    pin.lat = ll.lat;
+                    pin.lon = ll.lng;
+                    // Validate segment distance after drag; revert and show banner if exceeded.
+                    let tooFar = false;
+                    for (let j = 1; j < _losPins.length; j++) {
+                        const segKm = _haversineKm(_losPins[j-1].lat, _losPins[j-1].lon, _losPins[j].lat, _losPins[j].lon);
+                        if (segKm > _LOS_MAX_SEG_KM) { tooFar = true; break; }
+                    }
+                    if (tooFar) {
+                        pin.lat = prevLat;
+                        pin.lon = prevLon;
+                        _renderLosOverlay();
+                        _renderLosPanel();
+                        const verdEl = document.getElementById("topo-los-verdicts");
+                        if (verdEl) verdEl.innerHTML =
+                            `<div class="topo-los-banner error"><i class="fa-solid fa-triangle-exclamation"></i> Segment exceeds the ${_LOS_MAX_SEG_KM} km limit — pin reverted. Drag within range.</div>`;
+                        return;
+                    }
+                    _renderLosOverlay();
+                    _renderLosPanel();
+                    _scheduleLosProfile();
+                });
+            });
+        }
+
+        // Schedule a profile re-fetch with 250 ms debounce.
+        // Also bumps _losGeneration synchronously so any in-flight response is invalidated.
+        // Resets segment selection to 0 (pins changed → old index may be out of range).
+        function _scheduleLosProfile() {
+            ++_losGeneration;
+            _losSelectedSeg = 0;
+            if (_losProfileDebounce) clearTimeout(_losProfileDebounce);
+            _losProfileDebounce = setTimeout(_fetchLosProfile, 250);
+        }
+
+        // Great-circle interpolation: returns n evenly-spaced [lat,lon] pairs
+        // from (lat1,lon1) to (lat2,lon2) inclusive of endpoints.
+        function _gcInterpolate(lat1, lon1, lat2, lon2, n) {
+            const toRad = d => d * Math.PI / 180;
+            const toDeg = r => r * 180 / Math.PI;
+            const phi1 = toRad(lat1), lam1 = toRad(lon1);
+            const phi2 = toRad(lat2), lam2 = toRad(lon2);
+            const d = 2 * Math.asin(Math.sqrt(
+                Math.sin((phi2 - phi1) / 2) ** 2 +
+                Math.cos(phi1) * Math.cos(phi2) * Math.sin((lam2 - lam1) / 2) ** 2
+            ));
+            if (d < 1e-10) {
+                return Array.from({ length: n }, () => [lat1, lon1]);
+            }
+            const pts = [];
+            for (let i = 0; i < n; i++) {
+                const f = i / (n - 1);
+                const A = Math.sin((1 - f) * d) / Math.sin(d);
+                const B = Math.sin(f * d) / Math.sin(d);
+                const x = A * Math.cos(phi1) * Math.cos(lam1) + B * Math.cos(phi2) * Math.cos(lam2);
+                const y = A * Math.cos(phi1) * Math.sin(lam1) + B * Math.cos(phi2) * Math.sin(lam2);
+                const z = A * Math.sin(phi1) + B * Math.sin(phi2);
+                const lat = toDeg(Math.atan2(z, Math.sqrt(x * x + y * y)));
+                const lon = toDeg(Math.atan2(y, x));
+                pts.push([lat, lon]);
+            }
+            return pts;
+        }
+
+        // Fetch elevations for all segments and draw the profile chart.
+        // The chart is rendered IMMEDIATELY with a zero-terrain skeleton (LoS
+        // line + Fresnel envelope) so the user gets instant feedback, then
+        // each elevation chunk that returns triggers a redraw with the real
+        // terrain layered in. This avoids the previous "10-second wait while
+        // every upstream HTTP completes" pattern.
+        async function _fetchLosProfile() {
+            _losProfileDebounce = null;
+            if (_losPins.length < 2) return;
+            const gen = ++_losGeneration;
+            const chartEl = document.getElementById("topo-los-chart");
+            if (!chartEl) return;
+            // Ensure Highcharts (core + more/arearange) is available before fetching elevations.
+            if (typeof _loadHighchartsMore === "function") {
+                try { await _loadHighchartsMore(); } catch (_) {}
+            } else if (typeof _loadHighcharts === "function") {
+                try { await _loadHighcharts(); } catch (_) {}
+            }
+            if (gen !== _losGeneration) return;
+
+            // Build interpolated points for each segment.
+            const segPoints = [];   // array of arrays (one per segment)
+            for (let s = 0; s < _losPins.length - 1; s++) {
+                const p1 = _losPins[s], p2 = _losPins[s + 1];
+                segPoints.push(_gcInterpolate(p1.lat, p1.lon, p2.lat, p2.lon, _LOS_SAMPLES));
+            }
+
+            // Allocate the elevations array; null means "not yet known" — the
+            // chart renderer treats nulls as zero-terrain for the LoS / Fresnel
+            // math and skips drawing terrain at those samples so the profile
+            // doesn't show a phantom sea-level baseline. As chunks arrive we
+            // fill the array and redraw.
+            const elevations = new Array(segPoints.reduce((n, s) => n + s.length, 0)).fill(null);
+            _losLastElevations = { segPoints, elevations };
+            _drawLosChart({ segPoints, elevations });  // instant skeleton paint
+
+            // Flatten into one list, rounded to 4 dp to match the elevation
+            // cache's quantisation (~11 m grid). Extra precision would be
+            // discarded server-side anyway and only inflates WS frame size.
+            const allPoints = [];
+            for (const seg of segPoints) {
+                for (const [la, lo] of seg) {
+                    allPoints.push([
+                        Math.round(la * 1e4) / 1e4,
+                        Math.round(lo * 1e4) / 1e4,
+                    ]);
+                }
+            }
+
+            // Chunk into ≤ _LOS_ELEV_CHUNK points per cmd — Domoticz caps
+            // `plugin_command` frames at 65 536 bytes; with 4-dp coords each
+            // point serialises to ~17 bytes so 1000 points ≈ 17 KB, well
+            // under the cap.
+            const _LOS_ELEV_CHUNK = 1000;
+            try {
+                for (let off = 0; off < allPoints.length; off += _LOS_ELEV_CHUNK) {
+                    if (gen !== _losGeneration) return;
+                    const chunk = allPoints.slice(off, off + _LOS_ELEV_CHUNK);
+                    const id = ++_losElevCmdId;
+                    const result = await new Promise((resolve, reject) => {
+                        let unsub;
+                        const timer = setTimeout(() => {
+                            unsub && unsub();
+                            reject(new Error("cmd timeout"));
+                        }, 30000);
+                        unsub = _pluginWS.onPluginMessage(msg => {
+                            if (msg && msg.t === "cmd_result" && msg.id === id) {
+                                clearTimeout(timer);
+                                unsub();
+                                if (msg.ok) resolve(msg);
+                                else reject(new Error(msg.error || "elevation cmd failed"));
+                            }
+                        });
+                        _pluginWS.sendPluginCommand({ t: "cmd", cmd: "elevation", points: chunk, id });
+                    });
+                    if (gen !== _losGeneration) return;
+                    const elevs = result.elevations || [];
+                    for (let j = 0; j < elevs.length; j++) elevations[off + j] = elevs[j];
+                    // Progressive redraw: each chunk that returns updates the
+                    // terrain area + verdicts incrementally. On a cache-warm
+                    // path this is a single tight loop; on a cold path the
+                    // user sees terrain fill in from left to right.
+                    _drawLosChart({ segPoints, elevations });
+                }
+            } catch (err) {
+                if (gen !== _losGeneration) return;
+                const verdEl = document.getElementById("topo-los-verdicts");
+                if (verdEl) verdEl.innerHTML = `<div class="topo-los-banner error"><i class="fa-solid fa-triangle-exclamation"></i> Elevation service unreachable; profile unavailable.</div>`;
+                return;
+            }
+
+            if (gen !== _losGeneration) return;
+            _losLastElevations = { segPoints, elevations };
+        }
+
+        // Build and render the Highcharts elevation profile.
+        function _drawLosChart({ segPoints, elevations }) {
+            if (typeof Highcharts === "undefined") return;
+            const chartEl = document.getElementById("topo-los-chart");
+            if (!chartEl) return;
+            // Guard: cached segPoints must match current pin count.
+            if (!segPoints || segPoints.length !== _losPins.length - 1) return;
+            const verdEl = document.getElementById("topo-los-verdicts");
+            if (verdEl) verdEl.innerHTML = "";   // wipe any prior error banner
+            if (_losChart) { try { _losChart.destroy(); } catch (_) {} _losChart = null; }
+
+            // Reconstruct per-segment data with cumulative distance axis.
+            const terrainData  = [];   // [dist_km, elev_m]
+            const losLineData  = [];   // [dist_km, los_m]
+            const fresnelRange = [];   // [dist_km, lower_m, upper_m]  — arearange
+            const pinData      = [];   // [dist_km, h_above_terrain_stub]
+            const verdicts     = [];
+
+            let elevIdx = 0;
+            let cumDist = 0;
+
+            for (let s = 0; s < segPoints.length; s++) {
+                const seg = segPoints[s];
+                const p1 = _losPins[s], p2 = _losPins[s + 1];
+                const segElev = elevations.slice(elevIdx, elevIdx + seg.length);
+                elevIdx += seg.length;
+
+                const segKm = _haversineKm(p1.lat, p1.lon, p2.lat, p2.lon);
+                const elev1 = segElev[0] != null ? segElev[0] : 0;
+                const elev2 = segElev[seg.length - 1] != null ? segElev[seg.length - 1] : 0;
+                const ant1 = elev1 + p1.h;
+                const ant2 = elev2 + p2.h;
+
+                if (s === 0) pinData.push([cumDist, p1.h]);
+
+                let minClearance = Infinity;
+
+                for (let i = 0; i < seg.length; i++) {
+                    const frac = i / (seg.length - 1);
+                    const d = cumDist + frac * segKm;
+                    const terrain = segElev[i] != null ? segElev[i] : null;
+                    terrainData.push([d, terrain]);
+
+                    // LoS straight line (interpolated between antenna tops)
+                    const losH = ant1 + frac * (ant2 - ant1);
+                    losLineData.push([d, losH]);
+
+                    // Per-segment elliptical Fresnel zone (60% of 1st-zone radius).
+                    // d1/d2 are distances from each pin end within THIS segment — resets at each pin.
+                    const d1 = frac * segKm;
+                    const d2 = (1 - frac) * segKm;
+                    let fresnelReq = 0;
+                    if (d1 > 0 && d2 > 0) {
+                        const r1 = 17.31 * Math.sqrt((d1 * d2) / ((d1 + d2) * _LOS_FREQ_GHZ));
+                        fresnelReq = 0.6 * r1;
+                    }
+                    // arearange: [x, low, high]
+                    fresnelRange.push([d, losH - fresnelReq, losH + fresnelReq]);
+
+                    // Clearance margin: how far terrain is below the Fresnel lower bound
+                    if (terrain != null) {
+                        const margin = (losH - fresnelReq) - terrain;
+                        if (margin < minClearance) minClearance = margin;
+                    }
+                }
+                cumDist += segKm;
+                pinData.push([cumDist, p2.h]);
+
+                // Verdict
+                const v = minClearance === Infinity ? "unknown"
+                         : minClearance > 0          ? "clear"
+                         : minClearance >= -3         ? "grazing"
+                         :                             "blocked";
+                verdicts.push({ seg: s + 1, segIdx: s, v, minClearance, km: segKm,
+                                a: s + 1, b: s + 2 });
+            }
+
+            _losChart = Highcharts.chart(chartEl, {
+                chart: {
+                    animation: false,
+                    backgroundColor: "transparent",
+                    margin: [4, 8, 22, 38],
+                    style: { fontFamily: "inherit" },
+                },
+                title: { text: null },
+                credits: { enabled: false },
+                legend: { enabled: false },
+                // Hide the hamburger / context menu in the top-right corner.
+                exporting: { enabled: false },
+                xAxis: {
+                    type: "linear",
+                    title: { text: "km", style: { color: "var(--muted)", fontSize: "0.62rem" }, margin: 2 },
+                    labels: { style: { color: "var(--muted)", fontSize: "0.62rem" } },
+                    gridLineColor: "rgba(255,255,255,0.05)",
+                    lineColor: "rgba(255,255,255,0.12)",
+                    tickColor: "rgba(255,255,255,0.12)",
+                    crosshair: { color: "rgba(255,255,255,0.15)" },
+                },
+                yAxis: {
+                    title: { text: "m", style: { color: "var(--muted)", fontSize: "0.62rem" }, margin: 2 },
+                    labels: { style: { color: "var(--muted)", fontSize: "0.62rem" } },
+                    gridLineColor: "rgba(255,255,255,0.05)",
+                },
+                tooltip: {
+                    shared: true,
+                    backgroundColor: "rgba(30,31,38,0.92)",
+                    borderColor: "#3a3b47",
+                    style: { color: "#e2e4ed", fontSize: "0.7rem" },
+                    formatter: function () {
+                        let s = `<b>${this.x.toFixed(2)} km</b><br>`;
+                        this.points.forEach(pt => {
+                            if (pt.series.name === "Terrain" && pt.y != null)
+                                s += `Terrain: <b>${pt.y.toFixed(0)} m</b><br>`;
+                            if (pt.series.name === "LoS line")
+                                s += `LoS: <b>${pt.y.toFixed(0)} m</b><br>`;
+                        });
+                        const terrainPt = this.points.find(p => p.series.name === "Terrain");
+                        const losPt     = this.points.find(p => p.series.name === "LoS line");
+                        const frPt      = this.points.find(p => p.series.name === "Fresnel 60%");
+                        if (terrainPt && losPt && terrainPt.y != null) {
+                            const frLow = frPt ? frPt.point.low : losPt.y;
+                            s += `Clearance: <b>${(frLow - terrainPt.y).toFixed(0)} m</b>`;
+                        }
+                        return s;
+                    },
+                },
+                series: [
+                    {
+                        // Fresnel arearange drawn first so terrain renders on top
+                        name: "Fresnel 60%",
+                        type: "arearange",
+                        data: fresnelRange,
+                        color: "rgba(255,255,255,0.55)",
+                        fillColor: "rgba(255,255,255,0.07)",
+                        lineWidth: 1,
+                        dashStyle: "Dash",
+                        marker: { enabled: false },
+                        zIndex: 2,
+                        enableMouseTracking: true,
+                    },
+                    {
+                        name: "Terrain",
+                        type: "area",
+                        data: terrainData,
+                        color: "rgba(200,200,200,0.75)",
+                        fillColor: { linearGradient: { x1: 0, y1: 0, x2: 0, y2: 1 },
+                            stops: [[0, "rgba(50,50,55,0.95)"], [1, "rgba(25,25,28,0.85)"]] },
+                        lineWidth: 1.5,
+                        marker: { enabled: false },
+                        zIndex: 3,
+                        connectNulls: false,
+                        threshold: null,
+                    },
+                    {
+                        name: "LoS line",
+                        type: "line",
+                        data: losLineData,
+                        color: "#ef4444",
+                        lineWidth: 2,
+                        dashStyle: "Solid",
+                        marker: { enabled: false },
+                        zIndex: 4,
+                    },
+                    {
+                        name: "Pins",
+                        type: "column",
+                        data: pinData,
+                        color: "rgba(78,154,241,0.6)",
+                        borderWidth: 0,
+                        pointWidth: 2,
+                        grouping: false,
+                        zIndex: 5,
+                        marker: { enabled: false },
+                        enableMouseTracking: false,
+                    },
+                ],
+            });
+
+            // Update verdict chips below chart (clickable → select segment)
+            if (verdEl) {
+                const vLabel = { clear: "Clear", grazing: "Grazing", blocked: "Blocked", unknown: "No data" };
+                const vIcon  = { clear: "fa-check", grazing: "fa-exclamation", blocked: "fa-xmark", unknown: "fa-question" };
+                verdEl.innerHTML = verdicts.map((vd, idx) => {
+                    const sel = idx === _losSelectedSeg ? " selected" : "";
+                    return `<span class="topo-los-chip ${vd.v}${sel}" data-seg-idx="${idx}"><i class="fa-solid ${vIcon[vd.v] || 'fa-question'}"></i> Seg ${vd.seg}: ${vLabel[vd.v] || vd.v}</span>`;
+                }).join("");
+                verdEl.querySelectorAll(".topo-los-chip").forEach(chip => {
+                    chip.addEventListener("click", () => {
+                        const idx = parseInt(chip.dataset.segIdx, 10);
+                        _losSelectedSeg = idx;
+                        _renderLosPanel();
+                        _drawLosChart({ segPoints, elevations });
+                    });
+                });
+            }
+
+            // Update segment status header
+            _updateLosSegStatus(verdicts);
+        }
+
+        // Update the segment-status banner and the segment-height inputs for the selected segment.
+        function _updateLosSegStatus(verdicts) {
+            if (!verdicts || !verdicts.length) return;
+            const vd = verdicts[Math.min(_losSelectedSeg, verdicts.length - 1)];
+            if (!vd) return;
+
+            const statusEl = document.getElementById("topo-los-seg-status");
+            if (statusEl) {
+                const vLabel = { clear: "Clear", grazing: "Grazing", blocked: "Blocked", unknown: "No data" };
+                let margin = "";
+                if (vd.minClearance !== Infinity) {
+                    if (vd.v === "clear") {
+                        margin = ` (+${vd.minClearance.toFixed(1)} m)`;
+                    } else if (vd.v === "grazing") {
+                        margin = ` (${vd.minClearance.toFixed(1)} m)`;
+                    } else if (vd.v === "blocked") {
+                        margin = ` (+${(-vd.minClearance).toFixed(1)} m)`;
+                    }
+                }
+                statusEl.innerHTML =
+                    `LoS: ${vd.a}→${vd.b} &middot; ${vd.km.toFixed(2)} km &middot; ` +
+                    `<span class="seg-verdict ${vd.v}">${vLabel[vd.v] || vd.v}${margin}</span>`;
+                statusEl.classList.add("visible");
+            }
+
+            // Sync segment height inputs to current selected-segment pins
+            const hStart = document.getElementById("topo-los-seg-h-start");
+            const hEnd   = document.getElementById("topo-los-seg-h-end");
+            if (hStart && _losPins[_losSelectedSeg]) hStart.value = _losPins[_losSelectedSeg].h;
+            if (hEnd   && _losPins[_losSelectedSeg + 1]) hEnd.value = _losPins[_losSelectedSeg + 1].h;
         }
 
         // ── Self-node side panel ─────────────────────────────────────────
@@ -7197,7 +9174,7 @@ Larger = more reliable routing but smaller mesh diameter.">Path hash size</label
             // Location map. innerHTML above replaced the DOM, so any prior
             // Leaflet instance is now orphaned — drop it and rebuild. This
             // panel has no periodic refresh, so a plain rebuild is fine.
-            if (_contactMap) { try { _contactMap.remove(); } catch (_) {} _contactMap = null; }
+            if (_contactMap) { try { _contactMap.remove(); } catch (_) {} _liveMaps.delete(_contactMap); _contactMap = null; }
             if (cHasLoc) {
                 const el = document.getElementById("contact-map");
                 let tries = 0;
@@ -7212,9 +9189,8 @@ Larger = more reliable routing but smaller mesh diameter.">Path hash size</label
                     }
                     if (!el) return;
                     _contactMap = L.map(el, { zoomControl: true }).setView([cLat, cLon], 12);
-                    L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
-                        attribution: '&copy; OpenStreetMap', maxZoom: 19,
-                    }).addTo(_contactMap);
+                    _liveMaps.add(_contactMap);
+                    _applyTileMode(_contactMap, _topoGetStr("tile", "light"));
                     const pinIcon = L.divIcon({
                         className: "mc-pin",
                         html: '<div class="mc-pin-inner"></div>',
@@ -7312,6 +9288,7 @@ Larger = more reliable routing but smaller mesh diameter.">Path hash size</label
             if (body && !document.getElementById("map-canvas")) {
                 body.innerHTML = `<div id="map-canvas"></div>`;
                 // Force a re-create of the Leaflet map next open
+                if (_leafletMap) _liveMaps.delete(_leafletMap);
                 _leafletMap = null;
                 _leafletMarker = null;
             }
@@ -7335,6 +9312,15 @@ Larger = more reliable routing but smaller mesh diameter.">Path hash size</label
             _topoFitDone = false;
             _lastSeenByNode = {};
             _topoLivePulsing.clear();
+
+            // LoS and Coverage are intentionally session-only — clear any
+            // stored "on" state from a previous session so the panel always
+            // opens with both off. The settings drawer values for Coverage
+            // (TX power, freq, etc.) persist; only the on/off toggle resets.
+            try {
+                localStorage.removeItem(LS_TOPO.los);
+                localStorage.removeItem(LS_TOPO.coverage);
+            } catch (_) {}
 
             // Entering topo layout from a non-topo view: rebuild content.
             body.classList.add("topo-layout");
@@ -7360,12 +9346,34 @@ Larger = more reliable routing but smaller mesh diameter.">Path hash size</label
                             <i class="fa-solid fa-share-nodes"></i>
                             <span class="topo-tool-label">Lines</span>
                         </button>
+                        <button class="topo-map-tool-btn" id="topo-btn-heatmap" title="10-minute activity heatmap">
+                            <i class="fa-solid fa-fire"></i>
+                            <span class="topo-tool-label">Heat</span>
+                        </button>
+                        <select class="topo-heat-window" id="topo-heat-window" title="Heatmap time window">
+                            <option value="5">5 min</option>
+                            <option value="10" selected>10 min</option>
+                            <option value="30">30 min</option>
+                            <option value="60">60 min</option>
+                        </select>
+                        <span id="topo-heatmap-empty"></span>
                         <button class="topo-map-tool-btn" id="topo-btn-live" title="Highlight active nodes">
                             <i class="fa-solid fa-bolt"></i>
                             <span class="topo-tool-label">Live</span>
                         </button>
                         <button class="topo-map-tool-btn icon-only" id="topo-btn-audio" title="Audio cue on activity (requires Live)">
                             <i class="fa-solid fa-volume-high"></i>
+                        </button>
+                        <button class="topo-map-tool-btn" id="topo-btn-los" title="Line-of-sight tool: drop pins on map to compute elevation profile">
+                            <i class="fa-solid fa-ruler"></i>
+                            <span class="topo-tool-label">LoS</span>
+                        </button>
+                        <button class="topo-map-tool-btn" id="topo-btn-coverage" title="Predicted radio coverage heatmap">
+                            <i class="fa-solid fa-broadcast-tower"></i>
+                            <span class="topo-tool-label">Coverage</span>
+                        </button>
+                        <button class="topo-map-tool-btn icon-only" id="topo-btn-tile" title="Toggle dark/light map">
+                            <i class="fa-solid fa-moon"></i>
                         </button>
                 </div>
                 <div class="topo-map-wrap">
@@ -7393,6 +9401,7 @@ Larger = more reliable routing but smaller mesh diameter.">Path hash size</label
                     </div>
                 </div>`;
             // Force a Leaflet re-init since we replaced the map-canvas DOM node.
+            if (_leafletMap) _liveMaps.delete(_leafletMap);
             _leafletMap = null;
             _leafletMarker = null;
 
@@ -7408,8 +9417,42 @@ Larger = more reliable routing but smaller mesh diameter.">Path hash size</label
                 const liveOn  = _topoGet("live", false);
                 const audioBtn = document.getElementById("topo-btn-audio");
                 if (audioBtn) audioBtn.toggleAttribute("disabled", !liveOn);
+                // Tile button icon reflects current mode: moon = currently light (click → dark)
+                const tileBtn = document.getElementById("topo-btn-tile");
+                if (tileBtn) {
+                    const tileMode = _topoGetStr("tile", "light");
+                    _updateTileIcon(tileBtn, tileMode);
+                    tileBtn.classList.toggle("active", tileMode === "dark");
+                }
+                // Heatmap button + window selector visibility
+                const heatBtn = document.getElementById("topo-btn-heatmap");
+                const heatWin = document.getElementById("topo-heat-window");
+                const heatOn  = _topoGet("heatmap", false);
+                if (heatBtn) heatBtn.classList.toggle("active", heatOn);
+                if (heatWin) {
+                    heatWin.classList.toggle("visible", heatOn);
+                    const savedWin = _topoGetStr("heatmap-window", "10");
+                    heatWin.value = savedWin;
+                }
+                // LoS button restores its persisted active state
+                const losBtn = document.getElementById("topo-btn-los");
+                const losOn  = _topoGet("los", false);
+                if (losBtn) losBtn.classList.toggle("active", losOn);
+                // Coverage button restores its persisted active state
+                const covBtn = document.getElementById("topo-btn-coverage");
+                const covOn  = _topoGet("coverage", false);
+                if (covBtn) covBtn.classList.toggle("active", covOn);
             }
             _applyTopoToolbarState();
+
+            // Apply persisted LoS state (swap pane + cursor + dimming).
+            if (_topoGet("los", false)) _applyLosActiveState(true);
+
+            // Apply persisted coverage state (render drawer + trigger recompute).
+            if (_topoGet("coverage", false)) {
+                _propRenderDrawer();
+                _propScheduleRecompute();
+            }
 
             // ── Wire toolbar button clicks ────────────────────────────────────
             const toolbar = body.querySelector("#topo-toolbar");
@@ -7418,6 +9461,76 @@ Larger = more reliable routing but smaller mesh diameter.">Path hash size</label
                 if (!btn || btn.hasAttribute("disabled")) return;
                 const id = btn.id; // e.g. "topo-btn-contacts"
                 const key = id.replace("topo-btn-", "");
+
+                // Tile toggle — string value, not boolean
+                if (key === "tile") {
+                    const cur = _topoGetStr("tile", "light");
+                    const next = cur === "light" ? "dark" : "light";
+                    _topoSetStr("tile", next);
+                    _updateTileIcon(btn, next);
+                    // active = dark mode is currently on (icon shows the inverse: what clicking will do next)
+                    btn.classList.toggle("active", next === "dark");
+                    _applyTileModeAll(next);
+                    return;
+                }
+
+                // Heatmap toggle — manage window selector visibility, rxlog sub, and auto-fade.
+                if (key === "heatmap") {
+                    const newVal = !_topoGet("heatmap", false);
+                    _topoSet("heatmap", newVal);
+                    btn.classList.toggle("active", newVal);
+                    const heatWin = document.getElementById("topo-heat-window");
+                    if (heatWin) heatWin.classList.toggle("visible", newVal);
+                    const emptyNote = document.getElementById("topo-heatmap-empty");
+                    if (!newVal && emptyNote) emptyNote.classList.remove("visible");
+                    if (newVal) {
+                        // Ensure rxlog is subscribed (topology panel doesn't subscribe on its own).
+                        // _rxLogOpenPanels refcount covers other heavy panels — subscribing here
+                        // is safe; toggling off only unsubscribes when no other panel holds a ref.
+                        if (_rxLogOpenPanels.size === 0) _rxLogSubscribe();
+                        _startHeatmapAutoFade();
+                    } else {
+                        _stopHeatmapAutoFade();
+                        if (_rxLogOpenPanels.size === 0) _rxLogUnsubscribe();
+                    }
+                    _renderActivityHeatmap();
+                    return;
+                }
+
+                // LoS toggle — swap radar pane with LoS pane, manage cursor + dimming.
+                if (key === "los") {
+                    const newVal = !_topoGet("los", false);
+                    _topoSet("los", newVal);
+                    btn.classList.toggle("active", newVal);
+                    _applyLosActiveState(newVal);
+                    // Preload Highcharts (core + more for arearange) the moment
+                    // the user enables LoS, so the library is in cache by the
+                    // time the first pin is dropped — eliminates the 1-2 s
+                    // first-paint delay.
+                    if (newVal) {
+                        if (typeof _loadHighchartsMore === "function") {
+                            try { _loadHighchartsMore(); } catch (_) {}
+                        } else if (typeof _loadHighcharts === "function") {
+                            try { _loadHighcharts(); } catch (_) {}
+                        }
+                    }
+                    return;
+                }
+
+                // Coverage toggle — show/hide settings drawer, start/stop computation.
+                if (key === "coverage") {
+                    const newVal = !_topoGet("coverage", false);
+                    _topoSet("coverage", newVal);
+                    btn.classList.toggle("active", newVal);
+                    _propRenderDrawer();
+                    if (newVal) {
+                        _propScheduleRecompute();
+                    } else {
+                        _propTeardown();
+                    }
+                    return;
+                }
+
                 const defs = { contacts: true, repeaters: true, rooms: true, heard: false, lines: true, live: false, audio: false };
                 const newVal = !_topoGet(key, defs[key] !== undefined ? defs[key] : false);
                 _topoSet(key, newVal);
@@ -7465,23 +9578,32 @@ Larger = more reliable routing but smaller mesh diameter.">Path hash size</label
                 _renderTopology();
             });
 
-            // Wire button event handlers for the radar toolbar.
-            body.querySelector("#topo-radar-view-seg").addEventListener("click", ev => {
-                const btn = ev.target.closest("button[data-view]");
-                if (!btn) return;
-                body.querySelectorAll("#topo-radar-view-seg button").forEach(b => b.classList.remove("active"));
-                btn.classList.add("active");
-                _radarView = btn.dataset.view;
-                _renderRadar();
+            // Wire button event handlers for the radar toolbar (delegated to body
+            // so they still work after _losSwapPane replaces the radar wrap).
+            body.addEventListener("click", ev => {
+                const vBtn = ev.target.closest("#topo-radar-view-seg button[data-view]");
+                if (vBtn) {
+                    body.querySelectorAll("#topo-radar-view-seg button").forEach(b => b.classList.remove("active"));
+                    vBtn.classList.add("active");
+                    _radarView = vBtn.dataset.view;
+                    _renderRadar();
+                }
+                const zBtn = ev.target.closest("#topo-radar-zoom-seg button[data-zoom]");
+                if (zBtn) {
+                    body.querySelectorAll("#topo-radar-zoom-seg button").forEach(b => b.classList.remove("active"));
+                    zBtn.classList.add("active");
+                    _radarZoom = parseInt(zBtn.dataset.zoom, 10);
+                    _renderRadar();
+                }
             });
-            body.querySelector("#topo-radar-zoom-seg").addEventListener("click", ev => {
-                const btn = ev.target.closest("button[data-zoom]");
-                if (!btn) return;
-                body.querySelectorAll("#topo-radar-zoom-seg button").forEach(b => b.classList.remove("active"));
-                btn.classList.add("active");
-                _radarZoom = parseInt(btn.dataset.zoom, 10);
-                _renderRadar();
-            });
+            // Heatmap window selector — persist value and re-render immediately.
+            const heatWinSel = body.querySelector("#topo-heat-window");
+            if (heatWinSel) {
+                heatWinSel.addEventListener("change", () => {
+                    _topoSetStr("heatmap-window", heatWinSel.value);
+                    _renderActivityHeatmap();
+                });
+            }
             const ext = document.getElementById("map-panel-external");
             if (ext) ext.style.display = "";
         }
@@ -7581,6 +9703,92 @@ Larger = more reliable routing but smaller mesh diameter.">Path hash size</label
             }
         });
 
+        // Delegated handler for "LoS to here" popup buttons.
+        // Enables LoS mode, seeds observer (pin 1) + target (pin 2), then renders.
+        document.addEventListener("click", (ev) => {
+            const btn = ev.target.closest(".topo-popup-los");
+            if (!btn) return;
+            ev.preventDefault();
+            ev.stopPropagation();
+            const tgtLat = parseFloat(btn.dataset.losLat);
+            const tgtLon = parseFloat(btn.dataset.losLon);
+            const tgtLabel = btn.dataset.losLabel || "";
+            if (isNaN(tgtLat) || isNaN(tgtLon)) return;
+
+            // Resolve observer coords (same 3-tier chain as _renderTopology).
+            let obsLat = null, obsLon = null;
+            const si = _deviceMap && _deviceMap.self_info;
+            if (si && si.adv_lat != null && si.adv_lon != null && (si.adv_lat || si.adv_lon)) {
+                obsLat = si.adv_lat; obsLon = si.adv_lon;
+            }
+            if ((obsLat == null || (!obsLat && !obsLon)) && _deviceMap && _deviceMap.nodes && _deviceMap.self) {
+                const sn = _deviceMap.nodes[_deviceMap.self];
+                if (sn && sn.lat != null && sn.lon != null && (sn.lat || sn.lon)) { obsLat = sn.lat; obsLon = sn.lon; }
+            }
+            if ((obsLat == null || (!obsLat && !obsLon)) && _domoticzLocation && _domoticzLocation.lat != null) {
+                obsLat = _domoticzLocation.lat; obsLon = _domoticzLocation.lon;
+            }
+            if (obsLat == null) {
+                // Quick-action shortcut: alert is fine here; the LoS pane uses an inline banner for the sustained-use case.
+                alert("Observer location unknown. Set GPS on the connected node or configure the Domoticz location in Settings.");
+                return;
+            }
+
+            // Enable LoS if not already on.
+            if (!_topoGet("los", false)) {
+                _topoSet("los", true);
+                const losBtn = document.getElementById("topo-btn-los");
+                if (losBtn) losBtn.classList.add("active");
+                _applyLosActiveState(true);
+            }
+
+            // Seed two pins: observer → target.
+            _losPins = [
+                { id: _losNextId++, lat: obsLat, lon: obsLon, h: 2, label: "Observer" },
+                { id: _losNextId++, lat: tgtLat, lon: tgtLon, h: 8, label: tgtLabel },
+            ];
+            if (_leafletMap) _leafletMap.closePopup();
+            _renderLosOverlay();
+            _renderLosPanel();
+            _scheduleLosProfile();
+        });
+
+        // Delegated handler for "Coverage from here" popup buttons.
+        // Enables Coverage mode if off, sets the drawer's origin to the
+        // clicked node, then re-renders the drawer + recomputes the grid.
+        document.addEventListener("click", (ev) => {
+            const btn = ev.target.closest(".topo-popup-cov");
+            if (!btn) return;
+            ev.preventDefault();
+            ev.stopPropagation();
+            const origin = btn.dataset.covOrigin || "";
+            if (!origin) return;
+
+            // Validate the node actually has resolvable coords before we kick
+            // off the recompute — avoids the user staring at a stalled grid
+            // when the popup belongs to a node without GPS.
+            if (!_propOriginCoords(origin)) {
+                alert("That node has no known location. Coverage needs a fix to centre the grid.");
+                return;
+            }
+
+            // Persist the new origin to the coverage drawer's storage. Other
+            // coverage settings (TX power, freq, etc.) are intentionally left
+            // alone.
+            _topoSetStr("coverage:origin", origin);
+
+            // Enable Coverage if not already on. Mirror the toolbar click
+            // path so toolbar state stays in sync.
+            if (!_topoGet("coverage", false)) {
+                _topoSet("coverage", true);
+                const covBtn = document.getElementById("topo-btn-coverage");
+                if (covBtn) covBtn.classList.add("active");
+            }
+            if (_leafletMap) _leafletMap.closePopup();
+            _propRenderDrawer();
+            _propScheduleRecompute();
+        });
+
         // ── Map side panel (Leaflet) ─────────────────────────────────────────────
         let _leafletMap = null;
         let _leafletMarker = null;
@@ -7623,13 +9831,8 @@ Larger = more reliable routing but smaller mesh diameter.">Path hash size</label
                 }
                 if (!_leafletMap) {
                     _leafletMap = L.map(canvas, { zoomControl: true }).setView([lat, lon], 13);
-                    // OpenStreetMap default tiles — broadly compatible and not on tracker
-                    // block lists. CartoDB's dark tiles were getting blocked by Edge/Firefox
-                    // tracking prevention.
-                    L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
-                        attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors',
-                        maxZoom: 19,
-                    }).addTo(_leafletMap);
+                    _liveMaps.add(_leafletMap);
+                    _applyTileMode(_leafletMap, _topoGetStr("tile", "light"));
                 } else {
                     _leafletMap.setView([lat, lon], 13);
                 }

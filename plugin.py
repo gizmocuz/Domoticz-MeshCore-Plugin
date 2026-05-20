@@ -48,6 +48,7 @@ import collections
 import copy
 import gc
 import json
+import math
 import os
 import queue
 import re
@@ -56,6 +57,8 @@ import sqlite3
 import threading
 import time
 import traceback
+import urllib.error
+import urllib.request
 
 try:
     from meshcore import MeshCore
@@ -494,7 +497,14 @@ class BasePlugin:
     # Prune at most once every N inserts (cheap amortised cost).
     _MSG_STORE_PRUNE_EVERY = 200
     # Current schema version stored in the preferences table.
-    MSG_DB_SCHEMA_VERSION = 2
+    MSG_DB_SCHEMA_VERSION = 3
+
+    # ── Elevation cache ───────────────────────────────────────────────────────
+
+    # LRU cap: keep at most this many rows in elevation_cache.
+    _ELEV_PRUNE_CAP = 100_000
+    # Prune elevation cache at most once every this many seconds (5 min).
+    _ELEV_PRUNE_INTERVAL = 300
 
     def _msg_store_open(self, db_path: str):
         """Open (or create) the SQLite message store at *db_path*.
@@ -607,6 +617,24 @@ class BasePlugin:
                         self._msgdb.commit()
                     except Exception:
                         pass  # column already present — safe to ignore
+                elif ver == 3:
+                    # Elevation sample cache for the LoS tool. Keyed by quantised
+                    # (lat, lon) grid (≈11 m resolution). last_used drives LRU eviction.
+                    cur = self._msgdb.cursor()
+                    cur.execute("""
+                        CREATE TABLE IF NOT EXISTS elevation_cache (
+                            lat_q     INTEGER NOT NULL,
+                            lon_q     INTEGER NOT NULL,
+                            elev_m    REAL    NOT NULL,
+                            last_used INTEGER NOT NULL,
+                            PRIMARY KEY (lat_q, lon_q)
+                        )
+                    """)
+                    cur.execute(
+                        "CREATE INDEX IF NOT EXISTS ix_elev_last_used"
+                        " ON elevation_cache (last_used)"
+                    )
+                    self._msgdb.commit()
 
             self._pref_set("db_version", str(self.MSG_DB_SCHEMA_VERSION))
 
@@ -635,6 +663,229 @@ class BasePlugin:
             return None
         cleaned = "".join(c for c in str(pk).lower() if c in "0123456789abcdef")
         return cleaned[:12] or None
+
+    # ── Elevation cache helpers ───────────────────────────────────────────────
+
+    @staticmethod
+    def _elev_quantise(lat: float, lon: float) -> "tuple[int, int]":
+        """Quantise (lat, lon) to an integer grid of ~11 m resolution.
+
+        Multiplying by 1e4 gives approximately 11 m per step at the equator,
+        which is finer than the 30 m SRTM source resolution and therefore
+        lossless for caching purposes.
+
+        The rounding deliberately uses ``math.floor(x + 0.5)`` rather than
+        Python's built-in ``round()`` so that the result matches JavaScript's
+        ``Math.round`` semantics (half-away-from-+inf for positives,
+        half-toward-zero for negatives).  The frontend pre-rounds every
+        coordinate via ``Math.round(v * 1e4) / 1e4`` before sending; using
+        Python banker's rounding here would produce a 1 ULP mismatch at
+        boundary values (e.g. lat 52.00005) and cause needless cache misses.
+        """
+        return (math.floor(lat * 1e4 + 0.5), math.floor(lon * 1e4 + 0.5))
+
+    def _elevation_lookup(self, points: "list[tuple[float, float]]") -> "list":
+        """Return elevation in metres (float) for each (lat, lon) in *points*.
+
+        Results are returned in input order.  Any point whose elevation could
+        not be fetched from either upstream source is represented as None
+        (rare — should log a warning).
+
+        Cache strategy:
+        - Quantise all points and batch-SELECT from elevation_cache.
+        - Update last_used for hits.
+        - Fetch misses from open-elevation (batch ≤100), fall back to
+          opentopodata on HTTP error.
+        - INSERT OR REPLACE fetched samples.
+
+        This is a *blocking* function — it does synchronous HTTP.  Call it via
+        ``loop.run_in_executor(None, self._elevation_lookup, points)`` from the
+        worker loop.
+        """
+        if not points:
+            return []
+
+        db = self._msgdb
+        quantised = [self._elev_quantise(lat, lon) for lat, lon in points]
+        n = len(quantised)
+        results = [None] * n
+
+        # ── Cache lookup ─────────────────────────────────────────────────────
+        # Map (lat_q, lon_q) → index list (multiple input points may map to
+        # the same quantised bucket after rounding).
+        from collections import defaultdict
+        bucket_to_idxs: "dict[tuple, list[int]]" = defaultdict(list)
+        for i, q in enumerate(quantised):
+            bucket_to_idxs[q].append(i)
+
+        cached_elev: "dict[tuple, float]" = {}
+        if db is not None:
+            unique_qs = list(bucket_to_idxs.keys())
+            # SQLite 999-param limit: chunk into batches of ≤499 pairs (2 params each).
+            _CHUNK = 499
+            for chunk_start in range(0, len(unique_qs), _CHUNK):
+                chunk = unique_qs[chunk_start: chunk_start + _CHUNK]
+                if not chunk:
+                    continue
+                # Build: WHERE (lat_q=? AND lon_q=?) OR (lat_q=? AND lon_q=?) ...
+                where_parts = " OR ".join(["(lat_q=? AND lon_q=?)"] * len(chunk))
+                params = []
+                for lat_q, lon_q in chunk:
+                    params.extend([lat_q, lon_q])
+                try:
+                    with self._msgdb_lock:
+                        rows = self._msgdb.execute(
+                            f"SELECT lat_q, lon_q, elev_m FROM elevation_cache"
+                            f" WHERE {where_parts}",
+                            params,
+                        ).fetchall()
+                        if rows:
+                            now_ts = int(time.time())
+                            upd_params = []
+                            for lat_q, lon_q, elev_m in rows:
+                                cached_elev[(lat_q, lon_q)] = elev_m
+                                upd_params.extend([lat_q, lon_q])
+                            upd_where = " OR ".join(
+                                ["(lat_q=? AND lon_q=?)"] * len(rows)
+                            )
+                            self._msgdb.execute(
+                                f"UPDATE elevation_cache SET last_used=?"
+                                f" WHERE {upd_where}",
+                                [now_ts] + upd_params,
+                            )
+                            self._msgdb.commit()
+                except Exception as exc:
+                    Domoticz.Error(
+                        f"Elevation cache lookup failed (non-fatal): {exc!r}"
+                    )
+
+        # Fill hits from cache
+        for q, idxs in bucket_to_idxs.items():
+            if q in cached_elev:
+                for i in idxs:
+                    results[i] = cached_elev[q]
+
+        # ── Fetch misses from upstream ────────────────────────────────────────
+        miss_qs = [q for q in bucket_to_idxs if q not in cached_elev]
+        if miss_qs:
+            fetched: "dict[tuple, float]" = {}
+            _BATCH = 100
+
+            def _fetch_open_elevation(batch_qs):
+                """POST to open-elevation; returns {(lat_q,lon_q): elev_m} or raises."""
+                locations = [
+                    {"latitude": lq / 1e4, "longitude": oq / 1e4}
+                    for lq, oq in batch_qs
+                ]
+                body = json.dumps({"locations": locations}).encode()
+                req = urllib.request.Request(
+                    "https://api.open-elevation.com/api/v1/lookup",
+                    data=body,
+                    headers={"Content-Type": "application/json"},
+                    method="POST",
+                )
+                with urllib.request.urlopen(req, timeout=15) as resp:
+                    if resp.status != 200:
+                        raise urllib.error.HTTPError(
+                            req.full_url, resp.status, "non-200", {}, None
+                        )
+                    data = json.loads(resp.read())
+                out = {}
+                for i, r in enumerate(data.get("results", [])):
+                    out[batch_qs[i]] = float(r["elevation"])
+                return out
+
+            def _fetch_opentopodata(batch_qs):
+                """GET opentopodata; returns {(lat_q,lon_q): elev_m} or raises."""
+                loc_str = "|".join(
+                    f"{lq / 1e4},{oq / 1e4}" for lq, oq in batch_qs
+                )
+                url = (
+                    f"https://api.opentopodata.org/v1/srtm30m"
+                    f"?locations={urllib.request.quote(loc_str, safe=',|.')}"
+                )
+                req = urllib.request.Request(url, method="GET")
+                with urllib.request.urlopen(req, timeout=15) as resp:
+                    if resp.status != 200:
+                        raise urllib.error.HTTPError(
+                            req.full_url, resp.status, "non-200", {}, None
+                        )
+                    data = json.loads(resp.read())
+                out = {}
+                for i, r in enumerate(data.get("results", [])):
+                    elev = r.get("elevation")
+                    if elev is not None:
+                        out[batch_qs[i]] = float(elev)
+                return out
+
+            for batch_start in range(0, len(miss_qs), _BATCH):
+                batch = miss_qs[batch_start: batch_start + _BATCH]
+                try:
+                    batch_result = _fetch_open_elevation(batch)
+                except Exception as exc:
+                    Domoticz.Debug(
+                        f"Elevation: open-elevation failed ({exc!r}), trying opentopodata"
+                    )
+                    try:
+                        batch_result = _fetch_opentopodata(batch)
+                    except Exception as exc2:
+                        Domoticz.Error(
+                            f"Elevation: both upstream services failed for batch"
+                            f" of {len(batch)} point(s):"
+                            f" open-elevation: {exc!r}; opentopodata: {exc2!r}"
+                        )
+                        batch_result = {}
+                fetched.update(batch_result)
+
+            # Persist fetched samples
+            if fetched and db is not None:
+                now_ts = int(time.time())
+                try:
+                    with self._msgdb_lock:
+                        self._msgdb.executemany(
+                            "INSERT OR REPLACE INTO elevation_cache"
+                            " (lat_q, lon_q, elev_m, last_used) VALUES (?,?,?,?)",
+                            [
+                                (lat_q, lon_q, elev_m, now_ts)
+                                for (lat_q, lon_q), elev_m in fetched.items()
+                            ],
+                        )
+                        self._msgdb.commit()
+                except Exception as exc:
+                    Domoticz.Error(
+                        f"Elevation cache write failed (non-fatal): {exc!r}"
+                    )
+
+            # Fill misses
+            for q, idxs in bucket_to_idxs.items():
+                if q not in cached_elev and q in fetched:
+                    for i in idxs:
+                        results[i] = fetched[q]
+
+        return results
+
+    def _elev_prune(self):
+        """LRU-evict elevation_cache rows beyond _ELEV_PRUNE_CAP.
+
+        Keeps the _ELEV_PRUNE_CAP most-recently-used rows; deletes the rest.
+        Never raises into callers.
+        """
+        if self._msgdb is None:
+            return
+        try:
+            with self._msgdb_lock:
+                self._msgdb.execute(
+                    "DELETE FROM elevation_cache"
+                    " WHERE rowid NOT IN ("
+                    "   SELECT rowid FROM elevation_cache"
+                    "   ORDER BY last_used DESC"
+                    "   LIMIT ?"
+                    ")",
+                    (self._ELEV_PRUNE_CAP,),
+                )
+                self._msgdb.commit()
+        except Exception as exc:
+            Domoticz.Error(f"Elevation cache prune failed (non-fatal): {exc!r}")
 
     def _msg_store_add(self, chan: str, sender: str, body: str, epoch: int,
                        bad: bool = False, snr=None, hops=None, rssi=None,
@@ -1274,6 +1525,67 @@ class BasePlugin:
             if not cmd:
                 self._push("cmd_result", {"ok": False, "target": "unknown", "result": "empty cmd", "id": req_id})
                 return
+
+            # Elevation proxy: local DB + HTTP, no MC connection required.
+            if cmd == "elevation":
+                raw_pts = payload.get("points", [])
+                if not isinstance(raw_pts, list) or len(raw_pts) > 4096:
+                    self._push("cmd_result", {
+                        "ok": False, "id": req_id,
+                        "error": "too many points",
+                    })
+                    return
+                loop = self._worker_loop
+                if loop is None:
+                    self._push("cmd_result", {
+                        "ok": False, "id": req_id,
+                        "error": "worker not running",
+                    })
+                    return
+                if not raw_pts:
+                    self._push("cmd_result", {"ok": True, "id": req_id, "elevations": []})
+                    return
+                points = []
+                try:
+                    for p in raw_pts:
+                        if not isinstance(p, (list, tuple)) or len(p) < 2:
+                            raise ValueError("point must be [lat, lon]")
+                        lat, lon = float(p[0]), float(p[1])
+                        if not (-90.0 <= lat <= 90.0 and -180.0 <= lon <= 180.0):
+                            raise ValueError("point out of bounds")
+                        points.append((lat, lon))
+                except (ValueError, TypeError) as exc:
+                    self._push("cmd_result", {
+                        "ok": False, "id": req_id,
+                        "error": f"invalid point: {exc}",
+                    })
+                    return
+
+                async def _run_elevation(pts, rid):
+                    try:
+                        elevs = await asyncio.get_event_loop().run_in_executor(
+                            None, self._elevation_lookup, pts
+                        )
+                        self._push("cmd_result", {
+                            "ok": True, "id": rid,
+                            "elevations": elevs,
+                        })
+                    except Exception as exc:
+                        Domoticz.Error(f"elevation cmd failed: {exc!r}")
+                        self._push("cmd_result", {
+                            "ok": False, "id": rid,
+                            "error": str(exc),
+                        })
+
+                try:
+                    asyncio.run_coroutine_threadsafe(_run_elevation(points, req_id), loop)
+                except Exception as exc:
+                    self._push("cmd_result", {
+                        "ok": False, "id": req_id,
+                        "error": str(exc),
+                    })
+                return
+
             if self._handle_local_only_command(cmd):
                 self._push("cmd_result", {"ok": True, "target": target, "result": "applied", "id": req_id})
                 return
@@ -1672,7 +1984,7 @@ class BasePlugin:
         if os.path.isdir(leaflet_src):
             try:
                 os.makedirs(leaflet_dst, exist_ok=True)
-                for fname in ("leaflet.js", "leaflet.css"):
+                for fname in ("leaflet.js", "leaflet.css", "leaflet-heat.js"):
                     s = os.path.join(leaflet_src, fname)
                     if os.path.isfile(s):
                         shutil.copy2(s, os.path.join(leaflet_dst, fname))
@@ -2724,10 +3036,11 @@ class BasePlugin:
         # serial_asyncio_fast's executor tasks (open/close) drain so the
         # default thread pool can shut down cleanly on plugin stop.
         try:
-            last_stats     = time.monotonic()
-            last_contacts  = time.monotonic()
-            last_msg_drain = time.monotonic()   # connect-time drain just ran
-            last_rx_write  = 0.0
+            last_stats      = time.monotonic()
+            last_contacts   = time.monotonic()
+            last_msg_drain  = time.monotonic()   # connect-time drain just ran
+            last_rx_write   = 0.0
+            last_elev_prune = time.monotonic()
 
             while not self._stop_event.is_set():
                 stopped = await self._wait_or_stop(1.0)
@@ -2811,6 +3124,16 @@ class BasePlugin:
                 # Runs every loop iteration; _push_dirty_feeds coalesces to
                 # ≤1 push/sec/feed using per-feed last-push timestamps.
                 self._push_dirty_feeds()
+
+                # LRU eviction for the elevation cache (every 5 min).
+                if now - last_elev_prune >= self._ELEV_PRUNE_INTERVAL:
+                    last_elev_prune = now
+                    try:
+                        await asyncio.get_event_loop().run_in_executor(
+                            None, self._elev_prune
+                        )
+                    except Exception as exc:
+                        Domoticz.Debug(f"Periodic elev_prune error: {exc}")
         finally:
             try:
                 self._write_heard()
@@ -5066,6 +5389,14 @@ class BasePlugin:
                 now_ts = int(time.time())
                 # Record activity — used by _handle_contacts for online detection
                 self._node_last_activity[node_name] = now_ts
+                # Also advance last_advert so the dashboard's "Last Heard"
+                # reflects any heard activity (advert OR message), not just
+                # the periodic advert. This dict is what the device-map
+                # snapshot publishes as `last_advert` (see _build_device_map),
+                # and it is persisted via meshcore_devices.json so the value
+                # survives plugin restarts.
+                if now_ts > self._node_last_advert.get(node_name, 0):
+                    self._node_last_advert[node_name] = now_ts
 
                 # A message means the node is clearly reachable → mark online
                 self._set(did, OFF_STATUS, 1, "On")

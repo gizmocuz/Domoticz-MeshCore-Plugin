@@ -742,9 +742,9 @@ class TestMsgStorePreferences(unittest.TestCase):
         ver = self.bp._pref_get("db_version")
         self.assertEqual(ver, str(plugin.BasePlugin.MSG_DB_SCHEMA_VERSION))
 
-    def test_schema_version_constant_is_2(self):
+    def test_schema_version_constant_is_3(self):
         import plugin
-        self.assertEqual(plugin.BasePlugin.MSG_DB_SCHEMA_VERSION, 2)
+        self.assertEqual(plugin.BasePlugin.MSG_DB_SCHEMA_VERSION, 3)
 
     # ── _pref_set / _pref_get round-trip ─────────────────────────────────────
 
@@ -870,7 +870,7 @@ class TestMsgStorePreferences(unittest.TestCase):
 # ── 11. Schema — peer_key column, indexes, db_version, datetime columns ──────
 
 class TestMsgStoreSchemaBaseline(unittest.TestCase):
-    """Verify fresh-DB peer_key column, indexes, db_version='2', and epoch/recv_ts as TEXT."""
+    """Verify fresh-DB peer_key column, indexes, db_version='3', and epoch/recv_ts as TEXT."""
 
     def test_fresh_db_has_peer_key_column(self):
         """A fresh DB must have a peer_key column in the messages table."""
@@ -890,8 +890,8 @@ class TestMsgStoreSchemaBaseline(unittest.TestCase):
         bp = _make_store(tmp)
         try:
             import plugin
-            self.assertEqual(plugin.BasePlugin.MSG_DB_SCHEMA_VERSION, 2)
-            self.assertEqual(bp._pref_get("db_version"), "2")
+            self.assertEqual(plugin.BasePlugin.MSG_DB_SCHEMA_VERSION, 3)
+            self.assertEqual(bp._pref_get("db_version"), "3")
         finally:
             _close_store(bp)
             shutil.rmtree(tmp, ignore_errors=True)
@@ -942,7 +942,7 @@ class TestMsgStoreSchemaBaseline(unittest.TestCase):
             shutil.rmtree(tmp, ignore_errors=True)
 
     def test_migration_idempotent_on_fresh_db(self):
-        """Opening an already-current DB a second time must not raise and keeps version='2'."""
+        """Opening an already-current DB a second time must not raise and keeps version='3'."""
         tmp = tempfile.mkdtemp()
         db_path = os.path.join(tmp, "v1.db")
         import plugin
@@ -952,7 +952,7 @@ class TestMsgStoreSchemaBaseline(unittest.TestCase):
         bp2 = plugin.BasePlugin()
         bp2._msg_store_open(db_path)
         try:
-            self.assertEqual(bp2._pref_get("db_version"), "2")
+            self.assertEqual(bp2._pref_get("db_version"), "3")
             with bp2._msgdb_lock:
                 cur = bp2._msgdb.execute("PRAGMA table_info(messages)")
                 cols = {row[1] for row in cur.fetchall()}
