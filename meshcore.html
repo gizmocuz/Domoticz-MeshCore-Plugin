@@ -6256,7 +6256,16 @@
                         <i class="fa-solid fa-location-dot"></i> to show its
                         position on the map below.
                     </div>
-                    <div id="heard-type-filter" style="display:flex;align-items:center;gap:4px;margin:8px 0 2px">
+                    <div id="heard-purge-bar" style="display:flex;align-items:center;gap:6px;margin:8px 0 2px;flex-wrap:wrap">
+                        <span style="font-size:0.72rem;color:var(--muted)">Purge older than:</span>
+                        <select id="heard-purge-age" style="font-size:0.72rem;background:var(--surface);color:var(--text);border:1px solid var(--border);border-radius:4px;padding:2px 6px">
+                            <option value="604800">1 week</option>
+                            <option value="2592000" selected>1 month</option>
+                            <option value="31536000">1 year</option>
+                        </select>
+                        <button id="heard-purge-btn" class="view-btn" title="Remove heard nodes older than the selected age"><i class="fa-solid fa-broom"></i> Purge</button>
+                    </div>
+                    <div id="heard-type-filter" style="display:flex;align-items:center;gap:4px;margin:6px 0 2px">
                         <span style="font-size:0.72rem;color:var(--muted);margin-right:4px">Show:</span>
                         ${[1,2,3,4].map(t =>
                             `<button class="view-btn heard-type-btn${_heardShowType[t] ? " active" : ""}" data-htype="${t}" title="Show/hide ${_HEARD_ADV_TYPE[t]}s"><i class="fa-solid ${_HEARD_TYPE_ICON[t]}"></i> <span class="htc">0</span></button>`
@@ -6274,6 +6283,8 @@
                         _renderHeardIfOpen();
                     };
                 });
+                const purgeBtn = document.getElementById("heard-purge-btn");
+                if (purgeBtn) purgeBtn.onclick = _heardPurgeOlderThan;
             }
 
             // Refresh the per-type count badges every render.
@@ -6319,6 +6330,7 @@
                             <span class="heard-chip">${escHtml(kind)}</span>
                             <span class="heard-chip">${hops}</span>
                             <span class="heard-chip">${escHtml(sig)} dB/dBm</span>
+                            <span class="heard-chip" title="Adverts received from this node">${(h.count || 0)}&times;</span>
                         </div>
                         <div class="heard-pk" title="${escHtml(pk)}">${escHtml(pk)}</div>
                         <div class="heard-extra"><span title="Last heard at">${escHtml(t)}</span>${skewWrong ? `<i class="fa-solid fa-triangle-exclamation clock-warn" title="${escHtml(skewTip).replace(/\n/g, "&#10;")}"></i>` : ""}</div>
@@ -6354,6 +6366,43 @@
             await _sendDeviceCmd(`!heard_add ${pk}`);
             // The plugin will push t:'devices' and t:'heard' shortly; the reducer
             // will re-render automatically.  No explicit fetch needed.
+        }
+
+        // Bulk purge: drop every heard node whose last_heard is older than
+        // the selected age. Counts the affected rows locally (against the
+        // currently visible filter) so the confirm dialog tells the user
+        // exactly what's about to happen.
+        async function _heardPurgeOlderThan() {
+            const sel = document.getElementById("heard-purge-age");
+            if (!sel) return;
+            const seconds = parseInt(sel.value, 10);
+            if (!Number.isFinite(seconds) || seconds <= 0) return;
+            const now = Math.floor(Date.now() / 1000);
+            const cutoff = now - seconds;
+            const knownPks = new Set();
+            for (const n of Object.values((_deviceMap && _deviceMap.nodes) || {}))
+                if (n.pubkey) knownPks.add(n.pubkey);
+            const victims = Object.values((_heard && _heard.nodes) || {})
+                .filter(h => h.pubkey && !knownPks.has(h.pubkey))
+                .filter(h => !h.last_heard || h.last_heard < cutoff);
+            if (!victims.length) {
+                alert(`No heard nodes are older than ${sel.options[sel.selectedIndex].text}.`);
+                return;
+            }
+            const cutoffStr = new Date(cutoff * 1000).toLocaleDateString();
+            if (!confirm(
+                `This will remove ${victims.length} heard node(s) last seen before ${cutoffStr}.\n\n` +
+                `Future broadcasts from these nodes will be ignored until they're heard again past the cutoff.\n\n` +
+                `Continue?`
+            )) return;
+            // Optimistic local removal so the rows disappear immediately.
+            for (const v of victims) {
+                if (_heard.nodes) delete _heard.nodes[v.pubkey];
+                if (_heardMapPk === v.pubkey) _heardToggleMap(v.pubkey);
+            }
+            _renderHeardIfOpen();
+            if (_includeHeard) _rerenderContacts();
+            await _pluginWS.sendCmdAndWait(`!purge_heard ${seconds}`);
         }
 
         async function _heardDelete(pk) {
@@ -10166,6 +10215,25 @@ Larger = more reliable routing but smaller mesh diameter.">Path hash size</label
                 const body = document.getElementById("map-panel-body");
                 if (body) body.classList.remove("topo-layout");
             }
+            // Mirror the analytics teardown from _openSidePanel's
+            // "leaving analytics" branch. Without this, clicking X (or
+            // Esc / backdrop) leaves the 7 Highcharts instances alive
+            // while body.innerHTML throws away their SVG containers on
+            // the next reopen — the renderers then take the in-place
+            // setData() path against orphan charts and nothing draws.
+            if (_sidePanelView === "analytics") {
+                _analyticsStopTimer();
+                if (_analyticsUnsubWS) { try { _analyticsUnsubWS(); } catch (_) {} _analyticsUnsubWS = null; }
+                if (_analyticsResizeObs) { try { _analyticsResizeObs.disconnect(); } catch (_) {} _analyticsResizeObs = null; }
+                try { if (_analyticsRssiChart)    { _analyticsRssiChart.destroy();    _analyticsRssiChart    = null; } } catch (_) {}
+                try { if (_analyticsSnrChart)     { _analyticsSnrChart.destroy();     _analyticsSnrChart     = null; } } catch (_) {}
+                try { if (_analyticsPacketsChart) { _analyticsPacketsChart.destroy(); _analyticsPacketsChart = null; } } catch (_) {}
+                try { if (_analyticsNoiseChart)   { _analyticsNoiseChart.destroy();   _analyticsNoiseChart   = null; } } catch (_) {}
+                try { if (_analyticsHourlyChart)  { _analyticsHourlyChart.destroy();  _analyticsHourlyChart  = null; } } catch (_) {}
+                try { if (_analyticsHopsChart)    { _analyticsHopsChart.destroy();    _analyticsHopsChart    = null; } } catch (_) {}
+                try { if (_analyticsChanChart)    { _analyticsChanChart.destroy();    _analyticsChanChart    = null; } } catch (_) {}
+                panel.classList.remove("panel-analytics-wide");
+            }
             _sidePanelView = null;
         }
 
@@ -11290,6 +11358,12 @@ Larger = more reliable routing but smaller mesh diameter.">Path hash size</label
                     animation: false,
                     marginRight: 10
                 },
+                // Per-chart belt-and-braces: even though _loadHighcharts() calls
+                // Highcharts.setOptions({time:{useUTC:false}}) globally, some
+                // setups still rendered UTC labels (likely because the chart
+                // captured the option before our setOptions ran). Setting it
+                // per-chart is unambiguous.
+                time: { useUTC: false },
                 // Hide the Highcharts hamburger / context menu on the RSSI,
                 // SNR, and Noise charts (the three that build their options
                 // via this helper). The other analytics charts already set
@@ -11412,14 +11486,16 @@ Larger = more reliable routing but smaller mesh diameter.">Path hash size</label
             if (!slot) return;
             const rangeLabel = _analyticsRangeLabel(_analyticsRange);
 
+            // Backend shape: { series: [ {name:'rx', data:[[ts,val],...]}, {name:'tx', ...} ] }
+            // — Highcharts-series wrappers, NOT flat rows. Convert ts (epoch
+            // seconds) to ms for Highcharts.
             const series = data && data.ok && Array.isArray(data.series) ? data.series : [];
-            const rxData = [], txData = [];
-            for (const row of series) {
-                // ts is Unix epoch-seconds from the backend.
-                const x = row.ts * 1000;
-                rxData.push([x, row.rx || 0]);
-                txData.push([x, row.tx || 0]);
-            }
+            const rxSeries = series.find(s => s.name === 'rx');
+            const txSeries = series.find(s => s.name === 'tx');
+            const rxData = (rxSeries && Array.isArray(rxSeries.data) ? rxSeries.data : [])
+                .map(([ts, v]) => [ts * 1000, v || 0]);
+            const txData = (txSeries && Array.isArray(txSeries.data) ? txSeries.data : [])
+                .map(([ts, v]) => [ts * 1000, v || 0]);
 
             // Empty state when both series carry no data points.
             if (rxData.length === 0 && txData.length === 0) {
@@ -11454,6 +11530,7 @@ Larger = more reliable routing but smaller mesh diameter.">Path hash size</label
                     animation: false,
                     marginRight: 10,
                 },
+                time: { useUTC: false },
                 title: {
                     text: 'RX / TX packet volume',
                     style: { color: 'var(--text)', fontSize: '0.78rem', fontWeight: '600' },
@@ -11631,6 +11708,7 @@ Larger = more reliable routing but smaller mesh diameter.">Path hash size</label
                     animation: false,
                     marginRight: 10,
                 },
+                time: { useUTC: false },
                 title: {
                     text: 'TRAFFIC VOLUME (packets per hour)',
                     style: { color: 'var(--text)', fontSize: '0.78rem', fontWeight: '600' },

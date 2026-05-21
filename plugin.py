@@ -2272,6 +2272,8 @@ class BasePlugin:
         """
         if text.startswith("!forget_heard "):
             return self._handle_forget_heard(text[len("!forget_heard "):])
+        if text.startswith("!purge_heard "):
+            return self._handle_purge_heard(text[len("!purge_heard "):])
         if not text.startswith("!favorite "):
             return False
         try:
@@ -2344,6 +2346,42 @@ class BasePlugin:
         self._ws_heard_dirty = True
         self._write_heard()
         Domoticz.Log(f"Contact '{name}' removed and demoted to heard nodes")
+
+    def _handle_purge_heard(self, arg: str) -> bool:
+        """Bulk-delete heard nodes whose last_heard age is older than the
+        supplied threshold in seconds.  Matches the per-node !forget_heard
+        semantics: removed pubkeys go into _heard_purged so a queued advert
+        from one of them does not resurrect the entry. Returns True (always
+        consumed). Nodes with no last_heard at all are also pruned — they
+        carry no useful timestamp and would never satisfy any age filter."""
+        try:
+            older_than_s = int(arg.strip())
+        except (ValueError, TypeError):
+            Domoticz.Log(f"!purge_heard: invalid seconds argument {arg!r}")
+            return True
+        if older_than_s <= 0:
+            Domoticz.Log("!purge_heard: seconds must be positive")
+            return True
+        cutoff = int(time.time()) - older_than_s
+        removed = 0
+        with self._rx_log_lock:
+            to_remove = [
+                pk for pk, h in self._heard_nodes.items()
+                if not h.get("last_heard") or int(h.get("last_heard") or 0) < cutoff
+            ]
+            for pk in to_remove:
+                self._heard_nodes.pop(pk, None)
+                self._heard_purged.add(pk)
+                removed += 1
+            if removed:
+                self._heard_dirty = True
+                self._ws_heard_dirty = True
+        if removed:
+            self._write_heard()
+            Domoticz.Log(f"!purge_heard: removed {removed} heard node(s) older than {older_than_s}s")
+        else:
+            Domoticz.Log(f"!purge_heard: no heard nodes older than {older_than_s}s")
+        return True
 
     def _handle_forget_heard(self, pubkey_or_prefix: str) -> bool:
         """Permanently delete a heard node and add it to the purged set so
