@@ -3,365 +3,1671 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Domoticz — MeshCore Plugin · Feature Tour</title>
-    <meta name="description" content="Visual tour of the Domoticz-MeshCore-Plugin custom dashboard.">
+    <title>MeshCore Plugin for Domoticz — Documentation</title>
+    <meta name="description" content="Install, configure and automate your LoRa mesh network in Domoticz with the MeshCore plugin.">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
     <style>
         :root {
-            --bg:        #1b1d25;
-            --surface:   #252834;
-            --surface-2: #2b2e3c;
-            --border:    #353846;
-            --text:      #e2e4ed;
-            --muted:     #8a8d9f;
-            --accent:    #4e9af1;
-            --accent-2:  #2d6ec7;
+            --sidebar-w: 252px;
+            --topbar-h:  54px;
+            --bg:        #060a0d;
+            --surface:   #0d1318;
+            --surface-2: #141d24;
+            --border:    #1c2830;
+            --text:      #e0eaf0;
+            --muted:     #567080;
+            --accent:    #2dd4bf;
+            --accent-2:  #0d9488;
+            --accent-dim:#052320;
             --good:      #4ade80;
             --warn:      #facc15;
             --bad:       #f87171;
-            --radius:    10px;
+            --code-bg:   #040709;
+            --radius:    8px;
         }
-        * { box-sizing: border-box; margin: 0; padding: 0; }
-        html { scroll-behavior: smooth; }
+        *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+        html { scroll-behavior: smooth; scroll-padding-top: calc(var(--topbar-h) + 28px); }
         body {
-            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+            font-family: 'Inter', -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
             background: var(--bg);
             color: var(--text);
-            min-height: 100vh;
-            line-height: 1.5;
+            line-height: 1.65;
+            font-size: 15px;
         }
         a { color: var(--accent); text-decoration: none; }
         a:hover { text-decoration: underline; }
+        code {
+            font-family: "JetBrains Mono", "Fira Code", "Cascadia Code", Consolas, monospace;
+            font-size: 0.87em;
+            background: var(--surface-2);
+            border: 1px solid var(--border);
+            padding: 1px 5px;
+            border-radius: 4px;
+        }
 
-        /* ── Domoticz chrome ────────────────────────────────────── */
-        #dz-nav {
-            background: #23252f;
-            border-bottom: 1px solid #2e3040;
+        /* ── Top bar ───────────────────────────────────────────── */
+        #topbar {
+            position: fixed; top: 0; left: 0; right: 0; z-index: 300;
+            height: var(--topbar-h);
+            background: rgba(15, 17, 25, 0.95);
+            backdrop-filter: blur(12px);
+            border-bottom: 1px solid var(--border);
             display: flex; align-items: center;
-            padding: 0 20px;
-            height: 54px;
-            position: sticky; top: 0; z-index: 200;
+            padding: 0 22px; gap: 14px;
         }
-        #dz-logo {
-            display: flex; align-items: center; gap: 9px;
-            margin-right: 28px; flex-shrink: 0;
+        .logo {
+            display: flex; align-items: center; gap: 11px;
+            text-decoration: none; flex-shrink: 0;
         }
-        #dz-logo .dz-icon {
-            width: 30px; height: 30px;
+        .logo:hover { text-decoration: none; }
+        .logo-icon {
+            width: 34px; height: 34px; flex-shrink: 0;
+            border-radius: 9px;
+            background: linear-gradient(145deg, var(--accent), var(--accent-2));
+            display: flex; align-items: center; justify-content: center;
+            box-shadow: 0 2px 14px rgba(45,212,191,0.28);
+        }
+        .logo-text-wrap { display: flex; flex-direction: column; line-height: 1.1; }
+        .logo-name { font-size: 0.97rem; font-weight: 800; color: var(--text); letter-spacing: -0.01em; }
+        .logo-name span { color: var(--accent); }
+        .logo-sub  { font-size: 0.66rem; color: var(--muted); font-weight: 400; letter-spacing: 0.02em; }
+        #topbar-nav { margin-left: auto; display: flex; gap: 2px; align-items: center; }
+        #topbar-nav a {
+            padding: 5px 12px; border-radius: var(--radius);
+            font-size: 0.81rem; color: var(--muted);
+        }
+        #topbar-nav a:hover { background: var(--surface); color: var(--text); text-decoration: none; }
+        #topbar-nav a.cta {
             background: linear-gradient(135deg, var(--accent), var(--accent-2));
-            border-radius: 7px;
-            display: flex; align-items: center; justify-content: center;
-            font-size: 0.65rem; font-weight: 900; color: #fff;
+            color: #fff; font-weight: 600; margin-left: 4px;
+            box-shadow: 0 2px 8px rgba(45,212,191,0.25);
         }
-        #dz-logo .dz-wordmark {
-            font-size: 1rem; font-weight: 700; color: var(--text);
+        #topbar-nav a.cta:hover { opacity: 0.9; }
+        #topbar-donate {
+            background: linear-gradient(135deg, #f59e0b, #d97706);
+            color: #fff !important; font-weight: 600; margin-left: 4px;
+            box-shadow: 0 2px 8px rgba(245,158,11,0.3);
         }
-        #dz-logo .dz-wordmark span { color: var(--accent); }
-        #dz-tabs {
-            display: flex; height: 54px; flex: 1;
-            overflow-x: auto; scrollbar-width: none;
+        #topbar-donate:hover { opacity: 0.9; background: linear-gradient(135deg, #f59e0b, #d97706) !important; }
+        #hamburger {
+            display: none; background: none;
+            border: 1px solid var(--border); color: var(--muted);
+            cursor: pointer; padding: 5px 9px; border-radius: var(--radius);
+            font-size: 1rem; line-height: 1;
         }
-        #dz-tabs::-webkit-scrollbar { display: none; }
-        .dz-tab {
-            display: flex; align-items: center; gap: 6px;
-            padding: 0 16px;
-            font-size: 0.82rem; color: var(--muted);
-            border-bottom: 2px solid transparent;
-            white-space: nowrap;
+        #hamburger:hover { color: var(--text); }
+
+        /* ── Layout ────────────────────────────────────────────── */
+        #layout { display: flex; padding-top: var(--topbar-h); min-height: 100vh; }
+
+        /* ── Sidebar ───────────────────────────────────────────── */
+        #sidebar {
+            width: var(--sidebar-w); flex-shrink: 0;
+            position: sticky; top: var(--topbar-h);
+            height: calc(100vh - var(--topbar-h));
+            overflow-y: auto; overflow-x: hidden;
+            padding: 22px 0 40px;
+            border-right: 1px solid var(--border);
+            scrollbar-width: thin;
+            scrollbar-color: var(--border) transparent;
         }
-        .dz-tab.active { color: var(--text); border-bottom-color: var(--accent); }
-        #dz-right {
-            display: flex; align-items: center; gap: 12px;
-            margin-left: 16px;
+        #sidebar::-webkit-scrollbar { width: 4px; }
+        #sidebar::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
+        .nav-group { margin-bottom: 4px; }
+        .nav-label {
+            display: block; padding: 8px 20px 3px;
+            font-size: 0.66rem; font-weight: 700;
+            text-transform: uppercase; letter-spacing: 0.12em;
+            color: var(--muted);
         }
-        .dz-avatar {
-            width: 28px; height: 28px; border-radius: 50%;
-            background: var(--accent);
-            display: flex; align-items: center; justify-content: center;
-            font-weight: 700; font-size: 0.8rem; color: #fff;
+        .nav-link {
+            display: flex; align-items: center; gap: 7px;
+            padding: 5px 18px 5px 20px;
+            font-size: 0.83rem; color: var(--muted);
+            border-left: 2px solid transparent;
+        }
+        .nav-link:hover { color: var(--text); text-decoration: none; border-left-color: var(--border); }
+        .nav-link.active { color: var(--accent); border-left-color: var(--accent); background: rgba(45,212,191,0.07); }
+        .nav-link .ni { font-size: 0.85rem; opacity: 0.7; }
+
+        /* ── Content ───────────────────────────────────────────── */
+        #content {
+            flex: 1; min-width: 0;
+            max-width: 840px;
+            padding: 48px 56px 100px;
         }
 
-        #dz-breadcrumb {
-            padding: 10px 24px;
-            font-size: 0.78rem;
-            color: var(--muted);
-            background: var(--surface);
+        /* ── Typography ────────────────────────────────────────── */
+        h1 { font-size: 1.9rem; font-weight: 800; line-height: 1.15; margin-bottom: 14px; letter-spacing: -0.02em; }
+        h2 {
+            font-size: 1.22rem; font-weight: 700;
+            margin: 0 0 16px; padding: 22px 0 14px;
+            border-top: 1px solid var(--border);
+        }
+        section:first-child h2 { border-top: none; }
+        h3 { font-size: 0.98rem; font-weight: 700; margin: 26px 0 10px; }
+        h4 { font-size: 0.78rem; font-weight: 700; margin: 18px 0 7px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.07em; }
+        p { margin-bottom: 14px; }
+        ul, ol { margin: 0 0 14px 22px; }
+        li { margin-bottom: 5px; }
+        .lead { font-size: 1.02rem; color: var(--muted); margin-bottom: 22px; line-height: 1.65; }
+
+        /* ── Hero ──────────────────────────────────────────────── */
+        .hero-layout {
+            display: flex; align-items: center; gap: 32px;
+            margin-bottom: 32px; padding-bottom: 32px;
             border-bottom: 1px solid var(--border);
         }
-        #dz-breadcrumb .dz-sep { margin: 0 6px; opacity: 0.5; }
+        .hero-text { flex: 1; min-width: 0; }
+        .hero-illustration { flex-shrink: 0; opacity: 0.85; }
+        .gradient-text {
+            background: linear-gradient(135deg, #7ee8e0 0%, var(--accent) 50%, var(--good) 100%);
+            -webkit-background-clip: text; -webkit-text-fill-color: transparent;
+            background-clip: text;
+        }
+        .title-sub { font-size: 1.1rem; font-weight: 400; color: var(--muted); display: block; margin-top: 2px; }
+        .page-tags { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 14px; }
 
-        /* ── Page ───────────────────────────────────────────────── */
-        main {
-            max-width: 1200px;
-            margin: 0 auto;
-            padding: 28px 24px 80px;
+        /* ── Badges ────────────────────────────────────────────── */
+        .badge {
+            display: inline-flex; align-items: center; gap: 4px;
+            font-size: 0.68rem; font-weight: 700;
+            padding: 2px 8px; border-radius: 20px; line-height: 1.6;
         }
+        .badge.blue  { background: rgba(45,212,191,0.12); color: #5de0d4; border: 1px solid rgba(45,212,191,0.28); }
+        .badge.green { background: rgba(74,222,128,0.1);  color: #6ee7a0; border: 1px solid rgba(74,222,128,0.25); }
+        .badge.amber { background: rgba(250,204,21,0.1);  color: #fde68a; border: 1px solid rgba(250,204,21,0.25); }
+        .badge.purple{ background: rgba(168,85,247,0.1);  color: #d8b4fe; border: 1px solid rgba(168,85,247,0.25); }
 
-        /* Hero */
-        .hero {
-            display: flex; flex-direction: column; gap: 14px;
-            margin-bottom: 32px;
+        /* ── Callouts ──────────────────────────────────────────── */
+        .callout {
+            border-radius: var(--radius); padding: 13px 16px;
+            margin: 18px 0; display: flex; gap: 11px;
+            font-size: 0.87rem; line-height: 1.55;
         }
-        .hero h1 {
-            font-size: 1.8rem; font-weight: 700;
-            display: flex; align-items: center; gap: 10px;
+        .callout .ci { font-size: 1rem; flex-shrink: 0; margin-top: 1px; }
+        .callout.tip  { background: rgba(74,222,128,0.07);  border: 1px solid rgba(74,222,128,0.2);  color: #a7f3c4; }
+        .callout.note { background: rgba(45,212,191,0.07);  border: 1px solid rgba(45,212,191,0.2);  color: #80ddd5; }
+        .callout.warn { background: rgba(250,204,21,0.07);  border: 1px solid rgba(250,204,21,0.2);  color: #fde68a; }
+        .callout p { color: inherit; margin: 0; }
+        .callout strong { color: inherit; }
+        .callout a { color: inherit; text-decoration: underline; }
+
+        /* ── Steps ─────────────────────────────────────────────── */
+        .steps { margin: 4px 0 20px; }
+        .step { display: grid; grid-template-columns: 32px 1fr; gap: 0 14px; margin-bottom: 22px; align-items: start; }
+        .step-n {
+            width: 30px; height: 30px; border-radius: 50%;
+            background: var(--accent-dim); color: var(--accent);
+            border: 1.5px solid rgba(45,212,191,0.5);
+            display: flex; align-items: center; justify-content: center;
+            font-weight: 700; font-size: 0.8rem; flex-shrink: 0; margin-top: 3px;
         }
-        .hero .pill {
-            display: inline-flex; align-items: center; gap: 6px;
-            background: linear-gradient(135deg, var(--accent), var(--accent-2));
-            color: #fff;
-            font-size: 0.7rem; font-weight: 800;
-            padding: 4px 9px; border-radius: 6px;
-            letter-spacing: 0.04em;
-        }
-        .hero p { color: var(--muted); font-size: 0.95rem; max-width: 700px; }
-        .hero-img {
-            margin-top: 8px;
+        .step-body h3 { margin-top: 4px; margin-bottom: 7px; }
+        .step-body p  { margin-bottom: 6px; font-size: 0.93rem; }
+
+        /* ── Code blocks ───────────────────────────────────────── */
+        .code-wrap {
+            background: var(--code-bg);
             border: 1px solid var(--border);
             border-radius: var(--radius);
-            overflow: hidden;
+            margin: 12px 0 20px; overflow: hidden;
+        }
+        .code-header {
             background: var(--surface);
+            border-bottom: 1px solid var(--border);
+            padding: 6px 14px;
+            display: flex; justify-content: space-between; align-items: center;
         }
-        .hero-img img { display: block; width: 100%; height: auto; }
-        .hero-actions {
-            display: flex; gap: 10px; flex-wrap: wrap; margin-top: 4px;
+        .code-lang {
+            font-size: 0.66rem; font-weight: 700; text-transform: uppercase;
+            letter-spacing: 0.08em; color: var(--muted);
         }
+        .copy-btn {
+            font-size: 0.68rem; color: var(--muted); background: none;
+            border: 1px solid var(--border); cursor: pointer;
+            padding: 2px 9px; border-radius: 4px; font-family: inherit;
+        }
+        .copy-btn:hover { color: var(--text); border-color: var(--muted); }
+        .copy-btn.ok { color: var(--good); border-color: rgba(74,222,128,0.4); }
+        pre {
+            padding: 18px 20px; overflow-x: auto;
+            font-family: "JetBrains Mono", "Fira Code", Consolas, monospace;
+            font-size: 0.81rem; line-height: 1.7; color: #c4cce8;
+        }
+        pre code { background: none; border: none; padding: 0; font-size: inherit; border-radius: 0; }
+        .kw  { color: #5de0d4; }
+        .str { color: #98d8a0; }
+        .cm  { color: #3c4060; font-style: italic; }
+        .fn  { color: #e2a3f0; }
+        .num { color: #fda082; }
+
+        /* ── Tables ────────────────────────────────────────────── */
+        .tbl-wrap { overflow-x: auto; margin: 12px 0 20px; }
+        table { width: 100%; border-collapse: collapse; font-size: 0.85rem; }
+        th {
+            text-align: left; padding: 9px 14px;
+            background: var(--surface); border: 1px solid var(--border);
+            font-size: 0.72rem; font-weight: 700;
+            text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted);
+        }
+        td { padding: 9px 14px; border: 1px solid var(--border); vertical-align: top; }
+        tr:nth-child(even) td { background: rgba(255,255,255,0.016); }
+        td code { font-size: 0.82em; }
+
+        /* ── Buttons ───────────────────────────────────────────── */
+        .btn-row { display: flex; gap: 8px; flex-wrap: wrap; margin: 18px 0; }
         .btn {
             display: inline-flex; align-items: center; gap: 6px;
-            padding: 8px 16px; border-radius: 8px;
+            padding: 8px 16px; border-radius: var(--radius);
             font-size: 0.85rem; font-weight: 600;
             text-decoration: none; border: 1px solid var(--border);
-            background: var(--surface);
-            color: var(--text);
+            background: var(--surface); color: var(--text);
+            transition: border-color 0.15s, transform 0.12s;
         }
+        .btn:hover { text-decoration: none; border-color: var(--accent); transform: translateY(-1px); }
         .btn.primary {
             background: linear-gradient(135deg, var(--accent), var(--accent-2));
-            color: #fff;
-            border-color: transparent;
+            color: #fff; border-color: transparent;
+            box-shadow: 0 2px 10px rgba(45,212,191,0.22);
         }
-        .btn:hover { text-decoration: none; transform: translateY(-1px); }
+        .btn.primary:hover { opacity: 0.9; }
 
-        /* Section heading */
-        .section-title {
-            font-size: 0.85rem;
-            font-weight: 700;
-            text-transform: uppercase;
-            letter-spacing: 0.08em;
-            color: var(--muted);
-            margin: 36px 0 14px;
-        }
-
-        /* Feature grid */
-        .feature-grid {
+        /* ── Screenshot gallery ────────────────────────────────── */
+        .gallery {
             display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
-            gap: 18px;
+            grid-template-columns: repeat(3, 1fr);
+            gap: 10px; margin: 16px 0 24px;
         }
-        .feature-card {
+        .gal-item {
+            aspect-ratio: 16 / 10;
+            overflow: hidden; border-radius: var(--radius);
+            cursor: pointer; position: relative;
             background: var(--surface);
             border: 1px solid var(--border);
-            border-radius: var(--radius);
-            overflow: hidden;
-            display: flex; flex-direction: column;
-            transition: transform 0.15s ease-out, border-color 0.15s;
+            transition: border-color 0.18s, box-shadow 0.18s;
         }
-        .feature-card:hover {
-            transform: translateY(-2px);
+        .gal-item:hover {
             border-color: var(--accent);
+            box-shadow: 0 0 0 3px rgba(82,148,240,0.15);
         }
-        .feature-card .thumb { background: var(--bg); }
-        .feature-card .thumb img {
-            display: block; width: 100%; height: auto;
+        .gal-item img {
+            width: 100%; height: 100%; object-fit: cover;
+            transition: transform 0.28s ease;
+            display: block;
         }
-        .feature-card .body {
-            padding: 14px 16px 16px;
+        .gal-item:hover img { transform: scale(1.07); }
+        .gal-overlay {
+            position: absolute; bottom: 0; left: 0; right: 0;
+            background: linear-gradient(transparent, rgba(0,0,0,0.78));
+            padding: 28px 10px 9px;
+            font-size: 0.74rem; color: #fff; font-weight: 500;
+            opacity: 0; transition: opacity 0.2s;
+            pointer-events: none;
         }
-        .feature-card h3 {
-            font-size: 0.98rem; font-weight: 700; margin-bottom: 6px;
+        .gal-item:hover .gal-overlay { opacity: 1; }
+        .gal-expand {
+            position: absolute; top: 7px; right: 7px;
+            background: rgba(0,0,0,0.55); color: rgba(255,255,255,0.85);
+            border: 1px solid rgba(255,255,255,0.2);
+            border-radius: 5px; padding: 3px 7px;
+            font-size: 0.65rem; letter-spacing: 0.04em;
+            opacity: 0; transition: opacity 0.2s;
+            pointer-events: none;
         }
-        .feature-card p {
-            font-size: 0.82rem; color: var(--muted); line-height: 1.45;
-        }
+        .gal-item:hover .gal-expand { opacity: 1; }
 
-        /* Feature list (bullet style) */
-        .feature-list {
-            background: var(--surface);
-            border: 1px solid var(--border);
-            border-radius: var(--radius);
-            padding: 18px 22px;
+        /* ── Lightbox ──────────────────────────────────────────── */
+        #lightbox {
+            display: none; position: fixed; inset: 0; z-index: 1000;
+            background: rgba(5, 6, 12, 0.94);
+            backdrop-filter: blur(6px);
+            align-items: center; justify-content: center;
+            flex-direction: column; gap: 14px;
+        }
+        #lightbox.open { display: flex; }
+        #lb-img {
+            max-width: 90vw; max-height: 78vh;
+            border-radius: 10px;
+            border: 1px solid rgba(255,255,255,0.08);
+            box-shadow: 0 24px 80px rgba(0,0,0,0.7);
+            transition: opacity 0.15s ease;
+            cursor: default;
+        }
+        #lb-caption {
+            font-size: 0.85rem; color: rgba(255,255,255,0.55);
+            text-align: center; max-width: 600px;
+        }
+        #lb-counter {
+            position: fixed; top: 22px; left: 50%; transform: translateX(-50%);
+            font-size: 0.75rem; color: rgba(255,255,255,0.35);
+        }
+        .lb-close {
+            position: fixed; top: 18px; right: 22px;
+            background: rgba(255,255,255,0.07);
+            border: 1px solid rgba(255,255,255,0.15);
+            color: rgba(255,255,255,0.7);
+            width: 38px; height: 38px; border-radius: 50%;
+            cursor: pointer; font-size: 1.1rem;
+            display: flex; align-items: center; justify-content: center;
+            transition: background 0.15s; line-height: 1;
+        }
+        .lb-close:hover { background: rgba(255,255,255,0.15); color: #fff; }
+        .lb-nav {
+            position: fixed; top: 50%; transform: translateY(-50%);
+            background: rgba(255,255,255,0.07);
+            border: 1px solid rgba(255,255,255,0.15);
+            color: rgba(255,255,255,0.7);
+            width: 42px; height: 42px; border-radius: 50%;
+            cursor: pointer; font-size: 1.1rem;
+            display: flex; align-items: center; justify-content: center;
+            transition: background 0.15s; user-select: none;
+        }
+        .lb-nav:hover { background: rgba(255,255,255,0.15); color: #fff; }
+        #lb-prev { left: 18px; }
+        #lb-next { right: 18px; }
+
+        /* ── Works With cards ──────────────────────────────────── */
+        .works-grid {
             display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
-            gap: 8px 22px;
+            grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+            gap: 12px; margin: 16px 0 24px;
         }
-        .feature-list .item {
-            display: flex; align-items: flex-start; gap: 10px;
-            font-size: 0.85rem;
-            padding: 4px 0;
+        .works-card {
+            background: var(--surface); border: 1px solid var(--border);
+            border-radius: 10px; padding: 16px 14px;
+            display: flex; flex-direction: column; gap: 10px;
+            transition: border-color 0.18s, transform 0.15s;
+            text-decoration: none; color: var(--text);
         }
-        .feature-list .dot {
-            width: 6px; height: 6px; border-radius: 50%;
-            background: var(--accent);
-            margin-top: 8px; flex-shrink: 0;
+        .works-card:hover {
+            border-color: var(--accent); transform: translateY(-2px);
+            text-decoration: none; color: var(--text);
         }
-        .feature-list .item strong { color: var(--text); margin-right: 4px; }
-        .feature-list .item span { color: var(--muted); }
+        .works-card.featured {
+            border-color: rgba(45,212,191,0.28);
+            background: linear-gradient(145deg, var(--surface), rgba(45,212,191,0.05));
+        }
+        .wc-top { display: flex; align-items: center; gap: 10px; }
+        .wc-icon {
+            font-size: 1.5rem; width: 42px; height: 42px; flex-shrink: 0;
+            display: flex; align-items: center; justify-content: center;
+            background: var(--surface-2); border-radius: 9px;
+            border: 1px solid var(--border);
+        }
+        .wc-meta { flex: 1; min-width: 0; }
+        .wc-meta h4 { font-size: 0.9rem; color: var(--text); text-transform: none; letter-spacing: 0; margin: 0 0 3px; }
+        .wc-desc { font-size: 0.8rem; color: var(--muted); line-height: 1.45; }
+        .wc-link { font-size: 0.78rem; color: var(--accent); display: flex; align-items: center; gap: 4px; }
+        .wc-link:hover { text-decoration: underline; }
 
-        /* Footer */
+        /* ── Footer ────────────────────────────────────────────── */
         footer {
-            margin-top: 48px;
-            padding-top: 22px;
-            border-top: 1px solid var(--border);
-            display: flex; justify-content: space-between;
-            align-items: center; flex-wrap: wrap; gap: 10px;
+            border-top: 1px solid var(--border); padding: 22px 56px;
             font-size: 0.78rem; color: var(--muted);
+            display: flex; justify-content: space-between; gap: 10px; flex-wrap: wrap;
         }
         footer a { color: var(--muted); }
+        footer a:hover { color: var(--text); }
 
-        @media (max-width: 600px) {
-            #dz-right { display: none; }
-            .hero h1 { font-size: 1.4rem; }
-            main { padding: 18px 14px 60px; }
+        /* ── Section spacing ───────────────────────────────────── */
+        section { margin-bottom: 8px; }
+
+        /* ── Responsive ────────────────────────────────────────── */
+        @media (max-width: 940px) { #content { padding: 36px 30px 80px; } }
+        @media (max-width: 720px) {
+            #hamburger { display: block; }
+            #sidebar {
+                position: fixed; z-index: 200;
+                top: var(--topbar-h); left: 0;
+                height: calc(100vh - var(--topbar-h));
+                background: var(--bg);
+                transform: translateX(-100%);
+                transition: transform 0.22s ease;
+                box-shadow: 4px 0 28px rgba(0,0,0,0.5);
+            }
+            #sidebar.open { transform: translateX(0); }
+            #overlay {
+                display: none; position: fixed; inset: 0; z-index: 150;
+                background: rgba(0,0,0,0.55); top: var(--topbar-h);
+            }
+            #overlay.show { display: block; }
+            #topbar-nav { display: none; }
+            #content { padding: 24px 18px 80px; }
+            h1 { font-size: 1.45rem; }
+            .hero-layout { flex-direction: column; }
+            .hero-illustration { display: none; }
+            .gallery { grid-template-columns: repeat(2, 1fr); }
+            footer { padding: 20px 18px; }
         }
+        @media (max-width: 420px) {
+            .gallery { grid-template-columns: 1fr 1fr; gap: 6px; }
+        }
+
     </style>
 </head>
 <body>
 
-<nav id="dz-nav">
-    <div id="dz-logo">
-        <div class="dz-icon">DZ</div>
-        <div class="dz-wordmark">Domoti<span>cz</span></div>
+<!-- ── Top bar ────────────────────────────────────────────────── -->
+<header id="topbar">
+    <button id="hamburger" onclick="toggleSidebar()" aria-label="Toggle navigation">&#9776;</button>
+
+    <a href="#overview" class="logo">
+        <div class="logo-icon">
+            <!-- Mesh network SVG icon -->
+            <svg width="20" height="20" viewBox="0 0 20 20" fill="none" xmlns="http://www.w3.org/2000/svg">
+                <circle cx="10" cy="3"  r="2.2" fill="white"/>
+                <circle cx="3"  cy="15" r="2.2" fill="white"/>
+                <circle cx="17" cy="15" r="2.2" fill="white"/>
+                <circle cx="10" cy="11" r="1.6" fill="white" opacity="0.45"/>
+                <line x1="10" y1="3"  x2="3"  y2="15" stroke="white" stroke-width="1.2" opacity="0.7"/>
+                <line x1="10" y1="3"  x2="17" y2="15" stroke="white" stroke-width="1.2" opacity="0.7"/>
+                <line x1="3"  y1="15" x2="17" y2="15" stroke="white" stroke-width="1.2" opacity="0.7"/>
+                <line x1="10" y1="3"  x2="10" y2="11" stroke="white" stroke-width="0.9" opacity="0.4"/>
+                <line x1="3"  y1="15" x2="10" y2="11" stroke="white" stroke-width="0.9" opacity="0.4"/>
+                <line x1="17" y1="15" x2="10" y2="11" stroke="white" stroke-width="0.9" opacity="0.4"/>
+            </svg>
+        </div>
+        <div class="logo-text-wrap">
+            <span class="logo-name">Mesh<span>Core</span></span>
+            <span class="logo-sub">for Domoticz</span>
+        </div>
+    </a>
+
+    <nav id="topbar-nav">
+        <a href="https://github.com/galadril/Domoticz-MeshCore-Plugin/releases">Releases</a>
+        <a href="https://github.com/galadril/Domoticz-MeshCore-Plugin/issues">Issues</a>
+        <a href="https://github.com/galadril/Domoticz-MeshCore-Plugin" class="cta">GitHub &rarr;</a>
+        <a href="https://www.paypal.me/markheinis" target="_blank" rel="noopener" id="topbar-donate">&#9749; Donate</a>
+    </nav>
+</header>
+
+<div id="overlay" onclick="closeSidebar()"></div>
+
+<div id="layout">
+
+<!-- ═══════════════════════════════════════════════ SIDEBAR ═══ -->
+<nav id="sidebar">
+    <div class="nav-group">
+        <span class="nav-label">Getting Started</span>
+        <a class="nav-link active" href="#overview"><span class="ni">&#9733;</span> Overview</a>
+        <a class="nav-link" href="#screenshots"><span class="ni">&#128247;</span> Screenshots</a>
+        <a class="nav-link" href="#requirements"><span class="ni">&#9989;</span> Requirements</a>
+        <a class="nav-link" href="#installation"><span class="ni">&#128196;</span> Installation</a>
     </div>
-    <div id="dz-tabs">
-        <a class="dz-tab" href="#">Dashboard</a>
-        <a class="dz-tab" href="#">Switches</a>
-        <a class="dz-tab" href="#">Temperature</a>
-        <a class="dz-tab" href="#">Security</a>
-        <a class="dz-tab" href="#">Utility</a>
-        <a class="dz-tab" href="#">Weather</a>
-        <a class="dz-tab active" href="#">MeshCore</a>
-        <a class="dz-tab" href="#">Setup</a>
+    <div class="nav-group">
+        <span class="nav-label">Setup</span>
+        <a class="nav-link" href="#configuration"><span class="ni">&#9881;</span> Configuration</a>
+        <a class="nav-link" href="#dashboard"><span class="ni">&#128187;</span> Dashboard</a>
+        <a class="nav-link" href="#sending"><span class="ni">&#128140;</span> Sending Messages</a>
     </div>
-    <div id="dz-right">
-        <div class="dz-avatar">A</div>
+    <div class="nav-group">
+        <span class="nav-label">Reference</span>
+        <a class="nav-link" href="#devices"><span class="ni">&#128268;</span> Devices</a>
+        <a class="nav-link" href="#locations"><span class="ni">&#128205;</span> Manual Locations</a>
+    </div>
+    <div class="nav-group">
+        <span class="nav-label">Automation</span>
+        <a class="nav-link" href="#automation"><span class="ni">&#128640;</span> dzVents Bridge</a>
+        <a class="nav-link" href="#example-bridge"><span class="ni">&#128257;</span> Simple Bridge</a>
+        <a class="nav-link" href="#example-responder"><span class="ni">&#128172;</span> Chat Responder</a>
+        <a class="nav-link" href="#example-reporter"><span class="ni">&#128202;</span> Status Reporter</a>
+    </div>
+    <div class="nav-group">
+        <span class="nav-label">Ecosystem</span>
+        <a class="nav-link" href="#works-with"><span class="ni">&#128279;</span> Works With</a>
+        <a class="nav-link" href="#changelog"><span class="ni">&#128221;</span> Changelog</a>
+    </div>
+    <div class="nav-group">
+        <span class="nav-label">Help</span>
+        <a class="nav-link" href="#troubleshooting"><span class="ni">&#128270;</span> Troubleshooting</a>
+        <a class="nav-link" href="#updating"><span class="ni">&#128260;</span> Updating</a>
+        <a class="nav-link" href="#support"><span class="ni">&#9749;</span> Support &amp; Donate</a>
     </div>
 </nav>
 
-<div id="dz-breadcrumb">
-    <a href="#">Home</a><span class="dz-sep">›</span>
-    <a href="#">Custom Pages</a><span class="dz-sep">›</span>
-    MeshCore — Feature Tour
-</div>
+<!-- ═══════════════════════════════════════════════ CONTENT ═══ -->
+<main id="content">
 
-<main>
-
-    <section class="hero">
-        <div>
-            <span class="pill">📡 LoRa Mesh · Domoticz Plugin</span>
-        </div>
-        <h1>MeshCore Dashboard</h1>
-        <p>
-            A real-time, in-browser dashboard for your MeshCore LoRa mesh
-            — node telemetry, messaging, topology, history and analytics
-            served straight from the Domoticz plugin over a native
-            WebSocket channel. This page is a static feature tour;
-            install the plugin to get the interactive version.
-        </p>
-        <div class="hero-actions">
-            <a class="btn primary" href="https://github.com/galadril/Domoticz-MeshCore-Plugin#%EF%B8%8F-installation">Install</a>
-            <a class="btn" href="https://github.com/galadril/Domoticz-MeshCore-Plugin">View on GitHub</a>
-            <a class="btn" href="https://github.com/galadril/Domoticz-MeshCore-Plugin#-custom-dashboard">Dashboard docs</a>
-        </div>
-        <div class="hero-img">
-            <a href="images/screenshot.png">
-                <img src="images/screenshot.png" alt="MeshCore dashboard overview">
-            </a>
-        </div>
-    </section>
-
-    <h2 class="section-title">Feature tour</h2>
-    <div class="feature-grid">
-
-        <div class="feature-card">
-            <a class="thumb" href="images/topology.png">
-                <img src="images/topology.png" alt="Mesh topology screenshot">
-            </a>
-            <div class="body">
-                <h3>🗺️ Mesh topology &amp; path lines</h3>
-                <p>Leaflet map plots every contact (and optionally every heard node) and draws the real multi-hop repeater paths recent messages traversed.</p>
+<!-- ── Overview ──────────────────────────────────────────────── -->
+<section id="overview">
+    <div class="hero-layout">
+        <div class="hero-text">
+            <div class="page-tags">
+                <span class="badge blue">&#128225; LoRa Mesh</span>
+                <span class="badge green">MIT License</span>
+                <span class="badge amber">Domoticz &#8805; build 17956</span>
+            </div>
+            <h1>
+                <span class="gradient-text">MeshCore</span>
+                <span class="title-sub">Plugin for Domoticz</span>
+            </h1>
+            <p class="lead">
+                Connect your <a href="https://meshcore.io/">MeshCore LoRa mesh nodes</a> to
+                <a href="https://www.domoticz.com/">Domoticz</a> as native automation devices.
+                Telemetry, messaging, a real-time dashboard and a scripting bridge &mdash;
+                all over a native WebSocket channel.
+            </p>
+            <div class="btn-row">
+                <a class="btn primary" href="#installation">Get started &rarr;</a>
+                <a class="btn" href="#screenshots">Screenshots</a>
+                <a class="btn" href="#automation">Automation</a>
+                <a class="btn" href="https://github.com/galadril/Domoticz-MeshCore-Plugin">GitHub</a>
             </div>
         </div>
 
-        <div class="feature-card">
-            <a class="thumb" href="images/history_charts.png">
-                <img src="images/history_charts.png" alt="Historical analytics screenshot">
-            </a>
-            <div class="body">
-                <h3>📈 Historical analytics</h3>
-                <p>Time-series side panel — RSSI, SNR, noise floor, RX/TX packet volume, hourly traffic, top relay keys and per-channel message stats. SQLite-backed, schema-versioned, 30-day window.</p>
+        <!-- Animated mesh canvas (right side) -->
+        <div class="hero-illustration" style="position:relative;">
+            <canvas id="hero-canvas" width="260" height="200" style="display:block;border-radius:12px;opacity:0.9;"></canvas>
+        </div>
+    </div>
+
+    <!-- Feature summary chips -->
+    <div style="display:flex;flex-wrap:wrap;gap:8px;margin-bottom:8px;">
+        <span style="display:flex;align-items:center;gap:6px;background:var(--surface);border:1px solid var(--border);border-radius:6px;padding:6px 12px;font-size:0.82rem;">&#128313; Auto-discovery</span>
+        <span style="display:flex;align-items:center;gap:6px;background:var(--surface);border:1px solid var(--border);border-radius:6px;padding:6px 12px;font-size:0.82rem;">&#128267; Self-node telemetry</span>
+        <span style="display:flex;align-items:center;gap:6px;background:var(--surface);border:1px solid var(--border);border-radius:6px;padding:6px 12px;font-size:0.82rem;">&#128241; Send &amp; receive</span>
+        <span style="display:flex;align-items:center;gap:6px;background:var(--surface);border:1px solid var(--border);border-radius:6px;padding:6px 12px;font-size:0.82rem;">&#127757; Interactive node map</span>
+        <span style="display:flex;align-items:center;gap:6px;background:var(--surface);border:1px solid var(--border);border-radius:6px;padding:6px 12px;font-size:0.82rem;">&#128202; Historical analytics</span>
+        <span style="display:flex;align-items:center;gap:6px;background:var(--surface);border:1px solid var(--border);border-radius:6px;padding:6px 12px;font-size:0.82rem;">&#128274; SQLite message store</span>
+        <span style="display:flex;align-items:center;gap:6px;background:var(--surface);border:1px solid var(--border);border-radius:6px;padding:6px 12px;font-size:0.82rem;">&#128228; Delivery ACKs</span>
+        <span style="display:flex;align-items:center;gap:6px;background:var(--surface);border:1px solid var(--border);border-radius:6px;padding:6px 12px;font-size:0.82rem;">&#128640; dzVents bridge</span>
+    </div>
+</section>
+
+<!-- ── Screenshots ────────────────────────────────────────────── -->
+<section id="screenshots">
+    <h2>Screenshots</h2>
+    <p>Click any image to open the full-size view. Use arrow keys or the buttons to navigate.</p>
+
+    <div class="gallery">
+        <div class="gal-item" onclick="openLightbox(0)">
+            <img src="images/screenshot.png" alt="Dashboard overview" loading="lazy">
+            <div class="gal-overlay">Dashboard overview</div>
+            <div class="gal-expand">&#8599; View</div>
+        </div>
+        <div class="gal-item" onclick="openLightbox(1)">
+            <img src="images/topology.png" alt="Mesh topology" loading="lazy">
+            <div class="gal-overlay">Mesh topology &amp; path lines</div>
+            <div class="gal-expand">&#8599; View</div>
+        </div>
+        <div class="gal-item" onclick="openLightbox(2)">
+            <img src="images/history_charts.png" alt="Historical analytics" loading="lazy">
+            <div class="gal-overlay">Historical analytics</div>
+            <div class="gal-expand">&#8599; View</div>
+        </div>
+        <div class="gal-item" onclick="openLightbox(3)">
+            <img src="images/heard_nodes.png" alt="Heard nodes" loading="lazy">
+            <div class="gal-overlay">Heard nodes panel</div>
+            <div class="gal-expand">&#8599; View</div>
+        </div>
+        <div class="gal-item" onclick="openLightbox(4)">
+            <img src="images/firehose.png" alt="RX firehose" loading="lazy">
+            <div class="gal-overlay">RX firehose</div>
+            <div class="gal-expand">&#8599; View</div>
+        </div>
+        <div class="gal-item" onclick="openLightbox(5)">
+            <img src="images/statistics.png" alt="Statistics" loading="lazy">
+            <div class="gal-overlay">Statistics &amp; leaderboards</div>
+            <div class="gal-expand">&#8599; View</div>
+        </div>
+    </div>
+</section>
+
+<!-- ── Requirements ───────────────────────────────────────────── -->
+<section id="requirements">
+    <h2>Requirements</h2>
+    <div class="tbl-wrap">
+        <table>
+            <thead><tr><th>Requirement</th><th>Notes</th></tr></thead>
+            <tbody>
+                <tr>
+                    <td><strong>Domoticz build &#8805;&nbsp;17956</strong><br>
+                        <small style="color:var(--muted)">2025.2.17956 / 2026-05-16</small></td>
+                    <td>The real-time dashboard uses <code>Domoticz.WebSocketSend</code> /
+                        <code>onWebSocketMessage</code> added in that build. Plugin devices
+                        work on any version; only the dashboard requires this minimum.</td>
+                </tr>
+                <tr><td><strong>Python 3.6+</strong></td>
+                    <td>Must be enabled in your Domoticz build (default on most platforms).</td></tr>
+                <tr><td><strong><code>meshcore</code> Python package</strong></td>
+                    <td>Install with <code>pip install meshcore</code> on the Domoticz machine.</td></tr>
+                <tr><td><strong>MeshCore node reachable via TCP or USB serial</strong></td>
+                    <td>TCP: companion app, USB-to-TCP bridge, or
+                        <a href="https://www.meshcomod.com">MeshcoMod</a> firmware (native WiFi on Heltec v3/v4).
+                        Serial: USB cable directly to the node.</td></tr>
+            </tbody>
+        </table>
+    </div>
+</section>
+
+<!-- ── Installation ───────────────────────────────────────────── -->
+<section id="installation">
+    <h2>Installation</h2>
+    <div class="steps">
+
+        <div class="step">
+            <div class="step-n">1</div>
+            <div class="step-body">
+                <h3>Install the Python package</h3>
+                <div class="code-wrap">
+                    <div class="code-header"><span class="code-lang">bash</span><button class="copy-btn" onclick="copyCode(this)">Copy</button></div>
+                    <pre><code>pip install meshcore</code></pre>
+                </div>
+                <div class="callout note">
+                    <span class="ci">&#8505;</span>
+                    <p><strong>Docker:</strong> add <code>pip3 install meshcore</code> (or
+                    <code>pip3 install --break-system-packages meshcore</code> on Debian 12)
+                    to your <code>customstart.sh</code> hook so it survives image rebuilds.</p>
+                </div>
             </div>
         </div>
 
-        <div class="feature-card">
-            <a class="thumb" href="images/heard_nodes.png">
-                <img src="images/heard_nodes.png" alt="Heard nodes screenshot">
-            </a>
-            <div class="body">
-                <h3>👂 Heard nodes</h3>
-                <p>Persistent list of mesh nodes that aren't in your contacts. Per-node advert count, per-type filters, GPS pin, and bulk purge by age or low hit-count.</p>
+        <div class="step">
+            <div class="step-n">2</div>
+            <div class="step-body">
+                <h3>Clone the plugin</h3>
+                <div class="code-wrap">
+                    <div class="code-header"><span class="code-lang">bash</span><button class="copy-btn" onclick="copyCode(this)">Copy</button></div>
+                    <pre><code>cd ~/domoticz/plugins
+git clone https://github.com/galadril/Domoticz-MeshCore-Plugin.git MeshCore</code></pre>
+                </div>
+                <p>Naming the folder <code>MeshCore</code> is conventional but not required — Domoticz finds the plugin by scanning for <code>plugin.py</code> in any subdirectory.</p>
             </div>
         </div>
 
-        <div class="feature-card">
-            <a class="thumb" href="images/firehose.png">
-                <img src="images/firehose.png" alt="RX firehose screenshot">
-            </a>
-            <div class="body">
-                <h3>🚿 RX firehose</h3>
-                <p>Live packet stream with type filters, pause/resume, and per-row SNR/RSSI/path-len breakdown for deep mesh debugging.</p>
+        <div class="step">
+            <div class="step-n">3</div>
+            <div class="step-body">
+                <h3>Restart Domoticz</h3>
+                <div class="code-wrap">
+                    <div class="code-header"><span class="code-lang">bash</span><button class="copy-btn" onclick="copyCode(this)">Copy</button></div>
+                    <pre><code>sudo service domoticz.sh restart</code></pre>
+                </div>
             </div>
         </div>
 
-        <div class="feature-card">
-            <a class="thumb" href="images/statistics.png">
-                <img src="images/statistics.png" alt="Statistics screenshot">
-            </a>
-            <div class="body">
-                <h3>📊 Statistics</h3>
-                <p>Lifetime totals and leaderboards — messages, adverts, top senders, deepest hops, longest-running relay keys.</p>
+        <div class="step">
+            <div class="step-n">4</div>
+            <div class="step-body">
+                <h3>Add the hardware</h3>
+                <p>Go to <strong>Setup &rarr; Hardware</strong>, click <em>Add</em>, and select
+                type <strong>MeshCore</strong>. Set the host and port of your TCP endpoint
+                (default port <code>5000</code>), or select a Serial port. Click Save.</p>
             </div>
         </div>
 
-        <div class="feature-card">
-            <a class="thumb" href="images/packet_types.png">
-                <img src="images/packet_types.png" alt="Packet types donut chart">
-            </a>
-            <div class="body">
-                <h3>🍩 Packet types</h3>
-                <p>Donut breakdown of RX payload types — adverts, channel messages, DMs, ACKs, status responses, anonymous requests…</p>
+        <div class="step">
+            <div class="step-n">5</div>
+            <div class="step-body">
+                <h3>Verify</h3>
+                <p>Open <strong>Setup &rarr; Log</strong>. Within seconds you should see
+                <em>MeshCore connected</em> and your self-node name. Devices appear under
+                <strong>Setup &rarr; Devices</strong> as contacts are discovered.</p>
+            </div>
+        </div>
+
+    </div>
+</section>
+
+<!-- ── Configuration ──────────────────────────────────────────── -->
+<section id="configuration">
+    <h2>Configuration</h2>
+    <p>Edit via <strong>Setup &rarr; Hardware &rarr; MeshCore &rarr; Edit</strong>.</p>
+
+    <h3>TCP transport</h3>
+    <div class="tbl-wrap">
+        <table>
+            <thead><tr><th>Field</th><th>Default</th><th>Description</th></tr></thead>
+            <tbody>
+                <tr><td><strong>MeshCore Host</strong></td><td></td>
+                    <td>IP address or hostname of the MeshCore TCP endpoint.</td></tr>
+                <tr><td><strong>MeshCore Port</strong></td><td><code>5000</code></td>
+                    <td>TCP port. Leave at default unless changed on the device side.</td></tr>
+            </tbody>
+        </table>
+    </div>
+
+    <h3>Serial transport</h3>
+    <div class="tbl-wrap">
+        <table>
+            <thead><tr><th>Field</th><th>Default</th><th>Description</th></tr></thead>
+            <tbody>
+                <tr><td><strong>Serial Port</strong></td><td></td>
+                    <td>COM / tty port &mdash; auto-populated dropdown in Domoticz.</td></tr>
+                <tr><td><strong>Baud Rate</strong></td><td><code>115200</code></td>
+                    <td>Must match the setting on the connected node.</td></tr>
+            </tbody>
+        </table>
+    </div>
+
+    <h3>Plugin options</h3>
+    <div class="tbl-wrap">
+        <table>
+            <thead><tr><th>Field</th><th>Default</th><th>Description</th></tr></thead>
+            <tbody>
+                <tr><td><strong>Command Bridge Channel</strong></td><td><em>empty</em></td>
+                    <td>Channel name to monitor for <code>!</code>-prefixed commands.
+                        Creates three bridge devices for dzVents scripts.
+                        Leave blank to disable the bridge. See <a href="#automation">Automation</a>.</td></tr>
+                <tr><td><strong>Install Custom Dashboard</strong></td><td>Yes</td>
+                    <td>Copies <code>meshcore.html</code> into Domoticz templates on start.
+                        Access via <em>Setup &rarr; More Options &rarr; Custom Pages &rarr; meshcore</em>.</td></tr>
+                <tr><td><strong>Debug Level</strong></td><td>None</td>
+                    <td><strong>None</strong> &mdash; errors only &nbsp;&middot;&nbsp;
+                        <strong>Basic</strong> &mdash; connection events &amp; device updates &nbsp;&middot;&nbsp;
+                        <strong>All</strong> &mdash; full packet trace (very verbose).</td></tr>
+            </tbody>
+        </table>
+    </div>
+
+    <h3>Poll intervals</h3>
+    <div class="tbl-wrap">
+        <table>
+            <thead><tr><th>What</th><th>Interval</th></tr></thead>
+            <tbody>
+                <tr><td>Message drain + contacts refresh</td><td>30 s</td></tr>
+                <tr><td>Full contacts refresh (liveness probe)</td><td>5 min</td></tr>
+                <tr><td>Self-node stats (battery, RSSI, uptime, counters)</td><td>5 min</td></tr>
+                <tr><td>Stale connection detection &rarr; reconnect</td><td>10 min without push events</td></tr>
+            </tbody>
+        </table>
+    </div>
+
+    <div class="callout tip">
+        <span class="ci">&#128161;</span>
+        <p>Available channels are logged on startup, e.g.
+        <code>MeshCore channels: #0 = General, #1 = MyRoom</code>.
+        Use the exact channel name (without <code>#</code>) in the Command Bridge Channel field.</p>
+    </div>
+</section>
+
+<!-- ── Dashboard ──────────────────────────────────────────────── -->
+<section id="dashboard">
+    <h2>Custom Dashboard</h2>
+    <p>Enable <em>Install Custom Dashboard</em> in the hardware settings, then open:</p>
+    <div class="code-wrap">
+        <div class="code-header"><span class="code-lang">path</span></div>
+        <pre><code>Setup &rarr; More Options &rarr; Custom Pages &rarr; meshcore</code></pre>
+    </div>
+
+    <div class="callout warn">
+        <span class="ci">&#9888;</span>
+        <p><strong>Requires Domoticz build &#8805;&nbsp;17956.</strong> The dashboard uses
+        <code>Domoticz.WebSocketSend</code> / <code>onWebSocketMessage</code> introduced
+        in that release. Older Domoticz versions can use the plugin devices but not this dashboard.</p>
+    </div>
+
+    <div class="tbl-wrap">
+        <table>
+            <thead><tr><th>Feature</th><th>Details</th></tr></thead>
+            <tbody>
+                <tr><td><strong>Node cards</strong></td>
+                    <td>Online/offline badge, battery bar, color-coded SNR bars, hops, last seen. Every metric links to its Domoticz device log.</td></tr>
+                <tr><td><strong>Node map</strong></td>
+                    <td>Leaflet dark-mode map showing contacts and heard nodes. Draws real multi-hop repeater path lines. Click the pin icon on any card to center on that node. Hidden until at least one node has coordinates.</td></tr>
+                <tr><td><strong>Activity heatmap</strong></td>
+                    <td>24-hour rolling Leaflet heatmap of RX events overlaid on the topology map.</td></tr>
+                <tr><td><strong>Message inbox</strong></td>
+                    <td>SQLite-backed, server-side paginated with infinite scroll. Full-text search and per-channel / per-contact scope filters.</td></tr>
+                <tr><td><strong>DM threads</strong></td>
+                    <td>Pin any contact to open its full direct-message conversation with delivery ACK markers.</td></tr>
+                <tr><td><strong>Compose &amp; reply</strong></td>
+                    <td>Channel or direct target picker, emoji picker (700+), @mention highlighting, hover-to-reply on any message.</td></tr>
+                <tr><td><strong>Historical analytics</strong></td>
+                    <td>Side panel: RSSI/SNR/noise time-series, packet volume (per-minute and hourly), top relay keys, per-channel stats. 30-day window.</td></tr>
+                <tr><td><strong>RX firehose</strong></td>
+                    <td>Live packet stream with type filters, pause/resume, per-row SNR/RSSI/path breakdown.</td></tr>
+                <tr><td><strong>Heard nodes</strong></td>
+                    <td>Non-contact adverts with hit count, GPS pin, bulk purge by age or low hit-count.</td></tr>
+                <tr><td><strong>Statistics</strong></td>
+                    <td>Packet-type donut, lifetime totals, leaderboards (top senders, deepest hops, longest relay keys).</td></tr>
+                <tr><td><strong>Coverage &amp; LoS tools</strong></td>
+                    <td>Terrain-aware propagation map and per-link path-profile chart with Bullington knife-edge attenuation.</td></tr>
+            </tbody>
+        </table>
+    </div>
+</section>
+
+<!-- ── Sending Messages ────────────────────────────────────────── -->
+<section id="sending">
+    <h2>Sending Messages</h2>
+    <p>Write to the <strong>Mesh Inbox</strong> device via the Domoticz JSON API,
+    a dzVents script, or the dashboard compose bar.</p>
+
+    <h3>Message format</h3>
+    <div class="tbl-wrap">
+        <table>
+            <thead><tr><th>Write to device</th><th>Result</th></tr></thead>
+            <tbody>
+                <tr><td><code>hello world</code></td><td>Direct message to the first discovered contact.</td></tr>
+                <tr><td><code>garden: hello</code></td><td>Direct message to the contact named <em>garden</em>.</td></tr>
+                <tr><td><code>#General: hello</code></td><td>Broadcast on the channel named <em>General</em>.</td></tr>
+                <tr><td><code>#0: hello</code></td><td>Broadcast on channel index 0.</td></tr>
+            </tbody>
+        </table>
+    </div>
+
+    <h3>Internal control commands</h3>
+    <p><code>!</code>-prefixed writes configure the plugin or device &mdash; they are never transmitted as messages.</p>
+    <div class="tbl-wrap">
+        <table>
+            <thead><tr><th>Command</th><th>Effect</th></tr></thead>
+            <tbody>
+                <tr><td><code>!remove &lt;name&gt;</code></td><td>Remove the named contact from the connected device.</td></tr>
+                <tr><td><code>!favorite add &lt;name&gt;</code></td><td>Mark contact as favorite (sorted first, persisted to <code>meshcore_favorites.json</code>).</td></tr>
+                <tr><td><code>!favorite remove &lt;name&gt;</code></td><td>Drop favorite.</td></tr>
+                <tr><td><code>!flood_scope #&lt;tag&gt;</code></td><td>Set default flood scope (empty = global).</td></tr>
+                <tr><td><code>!set adv_loc_policy &lt;0|1&gt;</code></td><td>Never share / share location in adverts.</td></tr>
+                <tr><td><code>!set telemetry_base &lt;0|1|2&gt;</code></td><td>Off / Public / Always.</td></tr>
+            </tbody>
+        </table>
+    </div>
+</section>
+
+<!-- ── Device Reference ───────────────────────────────────────── -->
+<section id="devices">
+    <h2>Device Reference</h2>
+    <p>All devices are created automatically as data arrives &mdash; no manual configuration needed.</p>
+
+    <h3>Global devices</h3>
+    <div class="tbl-wrap">
+        <table>
+            <thead><tr><th>Device</th><th>Type</th><th>Description</th></tr></thead>
+            <tbody>
+                <tr><td>Mesh Inbox</td><td>Text</td>
+                    <td>Last received message. Format: <code>[C0|sender] text</code> or <code>[P|sender] text</code>. Value change triggers a WebSocket push to the dashboard.</td></tr>
+                <tr><td>Mesh Msgs Received</td><td>Custom (msgs)</td><td>Running counter of messages received since plugin start.</td></tr>
+                <tr><td>Mesh Msgs Sent</td><td>Custom (msgs)</td><td>Running counter of messages sent since plugin start.</td></tr>
+            </tbody>
+        </table>
+    </div>
+
+    <h3>Self (connected) node &mdash; DeviceID: <code>self</code></h3>
+    <div class="tbl-wrap">
+        <table>
+            <thead><tr><th>Device</th><th>Type</th><th>Source</th></tr></thead>
+            <tbody>
+                <tr><td>Status</td><td>Switch</td><td>On when connected; Off on disconnect.</td></tr>
+                <tr><td>Battery %</td><td>Percentage</td><td><code>battery_mv</code> from <code>get_stats_core</code></td></tr>
+                <tr><td>Battery V</td><td>Custom (V)</td><td><code>battery_mv</code> from <code>get_stats_core</code></td></tr>
+                <tr><td>RSSI</td><td>Custom (dBm)</td><td><code>last_rssi</code> from <code>get_stats_radio</code></td></tr>
+                <tr><td>SNR</td><td>Custom (dB)</td><td><code>last_snr</code> from <code>get_stats_radio</code></td></tr>
+                <tr><td>Noise Floor</td><td>Custom (dBm)</td><td><code>noise_floor</code> from <code>get_stats_radio</code></td></tr>
+                <tr><td>Last Seen</td><td>Text</td><td>Timestamp of last received event.</td></tr>
+                <tr><td>Uptime</td><td>Custom (min)</td><td><code>uptime_secs</code> from <code>get_stats_core</code></td></tr>
+                <tr><td>Airtime TX</td><td>Custom (s)</td><td><code>tx_air_secs</code> from <code>get_stats_radio</code></td></tr>
+                <tr><td>Pkts Sent</td><td>Custom (pkts)</td><td><code>sent</code> from <code>get_stats_packets</code></td></tr>
+                <tr><td>Pkts Recv</td><td>Custom (pkts)</td><td><code>recv</code> from <code>get_stats_packets</code></td></tr>
+            </tbody>
+        </table>
+    </div>
+
+    <h3>Remote contacts &mdash; DeviceID: pubkey[:12]</h3>
+    <div class="tbl-wrap">
+        <table>
+            <thead><tr><th>Device</th><th>Type</th><th>Notes</th></tr></thead>
+            <tbody>
+                <tr><td>Status</td><td>Switch</td><td>Online when last advert &lt;&nbsp;8 h ago; offline otherwise.</td></tr>
+                <tr><td>SNR</td><td>Custom (dB)</td><td>From incoming messages (not a radio poll).</td></tr>
+                <tr><td>Last Seen</td><td>Text</td><td>Timestamp of last advert or message.</td></tr>
+                <tr><td>Hops</td><td>Custom (hops)</td><td>Contact <code>out_path_len</code> from the contacts list.</td></tr>
+            </tbody>
+        </table>
+    </div>
+
+    <h3>Command Bridge devices</h3>
+    <p>Created when a Command Bridge Channel is configured. See <a href="#automation">Automation</a>.</p>
+    <div class="tbl-wrap">
+        <table>
+            <thead><tr><th>Device</th><th>Type</th><th>Direction</th></tr></thead>
+            <tbody>
+                <tr><td>MeshCore Command In</td><td>Text</td><td>Plugin &rarr; dzVents. JSON payload of each inbound <code>!</code>-command.</td></tr>
+                <tr><td>MeshCore Reply</td><td>Text</td><td>dzVents &rarr; Plugin. Write JSON reply here before triggering Send.</td></tr>
+                <tr><td>MeshCore Send</td><td>Switch (Push On)</td><td>dzVents &rarr; Plugin. Turn On to dispatch.</td></tr>
+            </tbody>
+        </table>
+    </div>
+</section>
+
+<!-- ── Manual Locations ────────────────────────────────────────── -->
+<section id="locations">
+    <h2>Manual Node Locations</h2>
+    <p>Pin nodes without GPS on the dashboard map by creating
+    <code>meshcore_locations.json</code> in <code>domoticz/plugins/MeshCore/</code>:</p>
+    <div class="code-wrap">
+        <div class="code-header"><span class="code-lang">json</span><button class="copy-btn" onclick="copyCode(this)">Copy</button></div>
+        <pre><code>{
+    "Garden":  { "lat": 52.3690, "lon": 4.9075 },
+    "Rooftop": { "lat": 52.3712, "lon": 4.9102 }
+}</code></pre>
+    </div>
+    <ul>
+        <li>Node names are case-sensitive and must match contact names exactly.</li>
+        <li>Live GPS data from a node automatically overrides its manual entry.</li>
+        <li>The map section is hidden until at least one node has coordinates.</li>
+    </ul>
+</section>
+
+<!-- ── Automation ─────────────────────────────────────────────── -->
+<section id="automation">
+    <h2>Automation &amp; dzVents Bridge</h2>
+    <p>The <strong>Command Bridge</strong> turns any channel message starting with
+    <code>!</code> into a dzVents event &mdash; giving your scripts live access to incoming
+    LoRa commands and the ability to broadcast replies back to the mesh.</p>
+
+    <h3>Setup</h3>
+    <ol>
+        <li>Set a <strong>Command Bridge Channel</strong> in the hardware settings.</li>
+        <li>Restart the plugin &mdash; three bridge devices are created.</li>
+        <li>Copy an example script from <a href="#example-bridge">below</a> to
+            <code>~/domoticz/scripts/dzVents/generated_scripts/</code>.</li>
+        <li>Edit the <code>CONFIGURATION</code> block and enable the script.</li>
+    </ol>
+
+    <h3>Inbound payload (written to MeshCore Command In)</h3>
+    <div class="code-wrap">
+        <div class="code-header"><span class="code-lang">json</span><button class="copy-btn" onclick="copyCode(this)">Copy</button></div>
+        <pre><code>{
+    "id":      42,             <span class="cm">// origin handle — valid for 5 min after arrival</span>
+    "seq":     17,             <span class="cm">// monotonic; use to deduplicate across restarts</span>
+    "cmd":     "!status",      <span class="cm">// full command string, including ! prefix</span>
+    "sender":  "AlphaNode",
+    "pubkey":  "a1b2c3d4e5f6",
+    "channel": "General",
+    "snr":     8.5,
+    "ts":      1716023456
+}</code></pre>
+    </div>
+
+    <h3>Reply formats (write to MeshCore Reply, then trigger MeshCore Send)</h3>
+    <div class="code-wrap">
+        <div class="code-header"><span class="code-lang">json</span><button class="copy-btn" onclick="copyCode(this)">Copy</button></div>
+        <pre><code><span class="cm">// Id-based (first reply only — plugin resolves channel from id)</span>
+{ "id": 42, "text": "reply text" }
+
+<span class="cm">// Channel-based (queued follow-ups; id is consumed after first send)</span>
+{ "to": "#General", "text": "follow-up text" }
+
+<span class="cm">// Direct message override</span>
+{ "id": 42, "to": "AlphaNode", "text": "private reply" }</code></pre>
+    </div>
+
+    <div class="callout note">
+        <span class="ci">&#8505;</span>
+        <p>The plugin consumes the <code>id</code> record on the first reply. For multi-part
+        responses (e.g. <code>!status</code>), use id-based routing for the first message,
+        then channel-based routing for follow-ups &mdash; spaced at least one minute apart
+        to avoid LoRa TX overlap.</p>
+    </div>
+</section>
+
+<!-- ── Example: Simple Bridge ─────────────────────────────────── -->
+<section id="example-bridge">
+    <h2>Example: Simple Bridge</h2>
+    <p><strong>File:</strong> <a href="https://github.com/galadril/Domoticz-MeshCore-Plugin/blob/main/examples/dzvents_meshcore_bridge.lua"><code>examples/dzvents_meshcore_bridge.lua</code></a></p>
+    <p>The minimal starting point. Extend the <code>if/elseif</code> chain with your own commands.</p>
+    <div class="code-wrap">
+        <div class="code-header"><span class="code-lang">lua</span><button class="copy-btn" onclick="copyCode(this)">Copy</button></div>
+        <pre><code><span class="kw">return</span> {
+    on = { devices = { <span class="str">"MeshCore Command In"</span> } },
+
+    logging = { level = domoticz.LOG_DEBUG, marker = <span class="str">"MeshCore-Bridge"</span> },
+
+    execute = <span class="kw">function</span>(dz, item)
+        <span class="kw">local</span> ok, m = pcall(dz.utils.fromJSON, item.text)
+        <span class="kw">if</span> <span class="kw">not</span> ok <span class="kw">or</span> type(m) ~= <span class="str">"table"</span> <span class="kw">then</span> <span class="kw">return</span> <span class="kw">end</span>
+
+        <span class="kw">local</span> cmd       = m.cmd    <span class="kw">or</span> <span class="str">""</span>
+        <span class="kw">local</span> sender    = m.sender <span class="kw">or</span> <span class="str">"?"</span>
+        <span class="kw">local</span> lower_cmd = string.lower(cmd)
+        <span class="kw">local</span> reply
+
+        <span class="kw">if</span>     lower_cmd == <span class="str">"!ping"</span> <span class="kw">then</span>
+            reply = <span class="str">"pong"</span>
+
+        <span class="kw">elseif</span> lower_cmd == <span class="str">"!status"</span> <span class="kw">then</span>
+            reply = string.format(<span class="str">"OK | time=%s uptime=%dm"</span>,
+                os.date(<span class="str">"%Y-%m-%d %H:%M:%S"</span>),
+                math.floor(dz.utils.osSeconds() / <span class="num">60</span>))
+
+        <span class="kw">elseif</span> string.sub(lower_cmd, <span class="num">1</span>, <span class="num">6</span>) == <span class="str">"!hello"</span> <span class="kw">then</span>
+            <span class="kw">local</span> name = string.sub(cmd, <span class="num">8</span>)
+            <span class="kw">if</span> name == <span class="str">""</span> <span class="kw">then</span> name = sender <span class="kw">end</span>
+            reply = <span class="str">"Hello, "</span> .. name .. <span class="str">"!"</span>
+
+        <span class="kw">else</span>
+            reply = <span class="str">"unknown command: "</span> .. cmd
+        <span class="kw">end</span>
+
+        <span class="cm">-- 1. Write reply payload  2. Trigger dispatch</span>
+        dz.devices(<span class="str">"MeshCore Reply"</span>).updateText(
+            dz.utils.toJSON({ id = m.id, text = reply })
+        )
+        dz.devices(<span class="str">"MeshCore Send"</span>).switchOn().checkFirst()
+    end,
+}</code></pre>
+    </div>
+</section>
+
+<!-- ── Example: Chat Responder ────────────────────────────────── -->
+<section id="example-responder">
+    <h2>Example: Chat Responder</h2>
+    <p><strong>File:</strong> <a href="https://github.com/galadril/Domoticz-MeshCore-Plugin/blob/main/examples/meshcore_chat_responder.lua"><code>examples/meshcore_chat_responder.lua</code></a></p>
+    <p>A full interactive bot. Queries live Domoticz sensor data and returns
+    themed replies. Multi-part responses are queued one per minute.</p>
+
+    <h3>Supported commands</h3>
+    <div class="tbl-wrap">
+        <table>
+            <thead><tr><th>Command</th><th>Response</th></tr></thead>
+            <tbody>
+                <tr><td><code>!help</code></td><td>List all available commands.</td></tr>
+                <tr><td><code>!status</code></td><td>Full summary: climate, weather, energy, home (multi-part).</td></tr>
+                <tr><td><code>!climate</code></td><td>Indoor temperature, humidity, thermostat, ventilation.</td></tr>
+                <tr><td><code>!weather</code></td><td>Outdoor temperature, wind, rain.</td></tr>
+                <tr><td><code>!energy</code></td><td>Grid usage/delivery, solar, home battery, gas.</td></tr>
+                <tr><td><code>!home</code></td><td>Water meter, presence status.</td></tr>
+                <tr><td><code>!device &lt;name&gt;</code></td><td>Query any Domoticz device by its exact name.</td></tr>
+                <tr><td><code>!switches</code></td><td>All switches and their state (capped at 15).</td></tr>
+                <tr><td><code>!temp</code></td><td>All temperature sensors (capped at 10).</td></tr>
+            </tbody>
+        </table>
+    </div>
+
+    <h3>Configuration block</h3>
+    <p>Set any entry to <code>nil</code> to silently skip it.</p>
+    <div class="code-wrap">
+        <div class="code-header"><span class="code-lang">lua</span><button class="copy-btn" onclick="copyCode(this)">Copy</button></div>
+        <pre><code><span class="kw">local</span> MESHCORE_INBOX = <span class="str">'MeshCore Command In'</span>
+<span class="kw">local</span> MESHCORE_REPLY = <span class="str">'MeshCore Reply'</span>
+<span class="kw">local</span> MESHCORE_SEND  = <span class="str">'MeshCore Send'</span>
+<span class="kw">local</span> CMD_PREFIX     = <span class="str">'!'</span>
+
+<span class="kw">local</span> DEVICES = {
+    tempIndoor   = <span class="str">'Temperature - Living Room'</span>,
+    tempBathroom = <span class="str">'Temperature - Bathroom'</span>,   <span class="cm">-- optional</span>
+    tempOutdoor  = <span class="str">'Temperature - Outside'</span>,
+    thermostat   = <span class="str">'Thermostat'</span>,
+    heatpump     = <span class="str">'Heat Pump Status'</span>,          <span class="cm">-- Text device, optional</span>
+    ventilation  = <span class="str">'Ventilation'</span>,              <span class="cm">-- Selector switch, optional</span>
+    power        = <span class="str">'Power'</span>,                     <span class="cm">-- P1 Smart Meter</span>
+    solar        = <span class="str">'Solar Power'</span>,               <span class="cm">-- optional</span>
+    homeBattery  = <span class="str">'Home Battery'</span>,              <span class="cm">-- Percentage device, optional</span>
+    gas          = <span class="str">'Gas'</span>,                       <span class="cm">-- optional</span>
+    water        = <span class="str">'Water Meter'</span>,               <span class="cm">-- optional</span>
+    presence     = <span class="str">'Presence'</span>,                  <span class="cm">-- Selector switch, optional</span>
+    wind         = <span class="str">'Wind'</span>,                      <span class="cm">-- optional</span>
+    rain         = <span class="str">'Rain'</span>,                      <span class="cm">-- optional</span>
+}</code></pre>
+    </div>
+
+    <h3>Example mesh conversation</h3>
+    <div class="code-wrap">
+        <div class="code-header"><span class="code-lang">text</span></div>
+        <pre><code>[You]    !climate
+[Bot]    Climate: Indoor 20.3C, 52% | Thermostat 19.5C | Heat pump: Heating
+
+[You]    !device Power
+[Bot]    Power: 380W (updated: 2025-01-15 14:32:00)
+
+[You]    !status
+[Bot]    Climate: Indoor 20.3C, 52% | Thermostat 19.5C
+[Bot+1m] Weather: 14.8C, 65% | Wind W 3.2 m/s
+[Bot+2m] Energy: Solar 1240W | Delivering 380W | Gas today 0.42</code></pre>
+    </div>
+</section>
+
+<!-- ── Example: Status Reporter ───────────────────────────────── -->
+<section id="example-reporter">
+    <h2>Example: Status Reporter</h2>
+    <p><strong>File:</strong> <a href="https://github.com/galadril/Domoticz-MeshCore-Plugin/blob/main/examples/meshcore_status_report.lua"><code>examples/meshcore_status_report.lua</code></a></p>
+    <p>Sends periodic home-status updates to a channel without any user command.
+    Ideal for a monitoring-only node that needs regular snapshots.</p>
+
+    <h3>Behaviour</h3>
+    <ul>
+        <li><strong>Every hour (minute 00):</strong> builds themed messages and queues them.</li>
+        <li><strong>Every minute:</strong> drains one queued message (so a 3-topic status takes 3 minutes).</li>
+        <li><strong>On presence change:</strong> fires an immediate alert to the channel.</li>
+    </ul>
+
+    <h3>Configuration block</h3>
+    <div class="code-wrap">
+        <div class="code-header"><span class="code-lang">lua</span><button class="copy-btn" onclick="copyCode(this)">Copy</button></div>
+        <pre><code><span class="kw">local</span> CHANNEL_NAME   = <span class="str">'General'</span>          <span class="cm">-- target channel name</span>
+<span class="kw">local</span> MESHCORE_REPLY = <span class="str">'MeshCore Reply'</span>
+<span class="kw">local</span> MESHCORE_SEND  = <span class="str">'MeshCore Send'</span>
+
+<span class="kw">local</span> DEVICES = {
+    tempIndoor  = <span class="str">'Temperature - Living Room'</span>,
+    tempOutdoor = <span class="str">'Temperature - Outside'</span>,
+    thermostat  = <span class="str">'Thermostat'</span>,
+    power       = <span class="str">'Power'</span>,
+    solar       = <span class="str">'Solar Power'</span>,    <span class="cm">-- optional</span>
+    gas         = <span class="str">'Gas'</span>,            <span class="cm">-- optional</span>
+    presence    = <span class="str">'Presence'</span>,       <span class="cm">-- optional, triggers immediate alert</span>
+}</code></pre>
+    </div>
+
+    <h3>Example output on the mesh</h3>
+    <div class="code-wrap">
+        <div class="code-header"><span class="code-lang">text</span></div>
+        <pre><code>[14:00] Climate: Indoor 20.3C, 52% | Thermostat 19.5C
+[14:01] Weather: 14.8C, 65%
+[14:02] Energy: Solar 1240W | Delivering 380W | Gas today 0.42</code></pre>
+    </div>
+</section>
+
+<!-- ── Works With ─────────────────────────────────────────────── -->
+<section id="works-with">
+    <h2>Works With</h2>
+    <p>Software and firmware that pairs well with this plugin.</p>
+
+    <div class="works-grid">
+
+        <a class="works-card" href="https://www.domoticz.com/" target="_blank" rel="noopener">
+            <div class="wc-top">
+                <div class="wc-icon">&#127968;</div>
+                <div class="wc-meta">
+                    <h4>Domoticz</h4>
+                    <span class="badge blue">Required</span>
+                </div>
+            </div>
+            <p class="wc-desc">Open-source home automation platform. This plugin runs inside the Domoticz Python plugin runtime.</p>
+            <span class="wc-link">domoticz.com &rarr;</span>
+        </a>
+
+        <div class="works-card" style="cursor:default;">
+            <div class="wc-top">
+                <div class="wc-icon">&#128225;</div>
+                <div class="wc-meta">
+                    <h4>MeshCore</h4>
+                    <span class="badge blue">Required</span>
+                </div>
+            </div>
+            <p class="wc-desc">LoRa mesh node firmware. The plugin connects via the MeshCore TCP companion port or USB serial.</p>
+            <div style="display:flex;gap:8px;flex-wrap:wrap;">
+                <a href="https://meshcore.io/" target="_blank" rel="noopener" class="wc-link" style="background:var(--surface-2);border:1px solid var(--border);padding:4px 10px;border-radius:6px;">meshcore.io &rarr;</a>
+                <a href="https://meshcore.gg" target="_blank" rel="noopener" class="wc-link" style="background:rgba(88,101,242,0.15);border:1px solid rgba(88,101,242,0.3);padding:4px 10px;border-radius:6px;color:#9aa4f8;">&#128172; Discord</a>
+            </div>
+        </div>
+
+        <a class="works-card featured" href="https://github.com/galadril/Domoticz-Nightglass-Theme" target="_blank" rel="noopener">
+            <div class="wc-top">
+                <div class="wc-icon">&#127762;</div>
+                <div class="wc-meta">
+                    <h4>Nightglass Theme</h4>
+                    <span class="badge purple">Recommended</span>
+                </div>
+            </div>
+            <p class="wc-desc">Modern dark UI for Domoticz with 16 theme presets, command palette (Ctrl+K), keyboard navigation, sparkline charts, and real-time WebSocket updates. Latest: v0.2.9.</p>
+            <span class="wc-link">GitHub &rarr;</span>
+        </a>
+
+        <a class="works-card" href="https://www.meshcomod.com" target="_blank" rel="noopener">
+            <div class="wc-top">
+                <div class="wc-icon">&#128246;</div>
+                <div class="wc-meta">
+                    <h4>MeshcoMod</h4>
+                    <span class="badge green">Alternative</span>
+                </div>
+            </div>
+            <p class="wc-desc">MeshCore-compatible firmware for Heltec v3/v4 boards with native WiFi &mdash; exposes the TCP port without a USB bridge.</p>
+            <span class="wc-link">meshcomod.com &rarr;</span>
+        </a>
+
+        <a class="works-card" href="https://www.domoticz.com/wiki/DzVents:_next_generation_Lua_scripting" target="_blank" rel="noopener">
+            <div class="wc-top">
+                <div class="wc-icon">&#128196;</div>
+                <div class="wc-meta">
+                    <h4>dzVents</h4>
+                    <span class="badge green">Built-in</span>
+                </div>
+            </div>
+            <p class="wc-desc">Lua scripting engine built into Domoticz. Powers the command bridge examples &mdash; no extra install needed.</p>
+            <span class="wc-link">Domoticz wiki &rarr;</span>
+        </a>
+
+    </div>
+</section>
+
+<!-- ── Changelog ──────────────────────────────────────────────── -->
+<section id="changelog">
+    <h2>Changelog</h2>
+    <p>Full release notes on <a href="https://github.com/galadril/Domoticz-MeshCore-Plugin/releases" target="_blank" rel="noopener">GitHub Releases</a>.</p>
+
+    <div style="display:flex;flex-direction:column;gap:0;margin-top:20px;">
+
+        <!-- v0.0.7 -->
+        <div style="display:grid;grid-template-columns:120px 1fr;gap:0 20px;padding:16px 0;border-bottom:1px solid var(--border);">
+            <div style="display:flex;flex-direction:column;gap:5px;padding-top:2px;">
+                <a href="https://github.com/galadril/Domoticz-MeshCore-Plugin/releases/tag/v0.0.7" target="_blank" rel="noopener"
+                   style="display:inline-flex;align-items:center;gap:5px;background:linear-gradient(135deg,var(--accent),var(--accent-2));color:#fff;font-size:0.75rem;font-weight:700;padding:3px 9px;border-radius:20px;text-decoration:none;width:fit-content;">
+                    v0.0.7 <span style="font-size:0.6rem;opacity:0.85;">LATEST</span>
+                </a>
+                <span style="font-size:0.75rem;color:var(--muted);">May 2026</span>
+            </div>
+            <div>
+                <p style="margin:0;font-size:0.88rem;font-weight:600;margin-bottom:4px;">Automated release workflow</p>
+                <p style="margin:0;font-size:0.83rem;color:var(--muted);">Added GitHub Actions workflow for automated releases on tag push.</p>
+            </div>
+        </div>
+
+        <!-- v0.0.6 -->
+        <div style="display:grid;grid-template-columns:120px 1fr;gap:0 20px;padding:16px 0;border-bottom:1px solid var(--border);">
+            <div style="display:flex;flex-direction:column;gap:5px;padding-top:2px;">
+                <a href="https://github.com/galadril/Domoticz-MeshCore-Plugin/releases/tag/v0.0.6" target="_blank" rel="noopener"
+                   style="display:inline-flex;align-items:center;background:var(--surface-2);border:1px solid var(--border);color:var(--text);font-size:0.75rem;font-weight:700;padding:3px 9px;border-radius:20px;text-decoration:none;width:fit-content;">
+                    v0.0.6
+                </a>
+                <span style="font-size:0.75rem;color:var(--muted);">21 May 2026</span>
+            </div>
+            <div>
+                <p style="margin:0;font-size:0.88rem;font-weight:600;margin-bottom:4px;">Map tools, historical analytics &amp; fixes</p>
+                <ul style="margin:4px 0 0 18px;font-size:0.83rem;color:var(--muted);">
+                    <li>Coverage &amp; line-of-sight terrain tools on the node map</li>
+                    <li>Historical analytics side panel (RSSI, SNR, packet volume, relay keys)</li>
+                    <li>Queued-message origin resolution fix</li>
+                </ul>
+            </div>
+        </div>
+
+        <!-- v0.0.5 -->
+        <div style="display:grid;grid-template-columns:120px 1fr;gap:0 20px;padding:16px 0;border-bottom:1px solid var(--border);">
+            <div style="display:flex;flex-direction:column;gap:5px;padding-top:2px;">
+                <a href="https://github.com/galadril/Domoticz-MeshCore-Plugin/releases/tag/v0.0.5" target="_blank" rel="noopener"
+                   style="display:inline-flex;align-items:center;background:var(--surface-2);border:1px solid var(--border);color:var(--text);font-size:0.75rem;font-weight:700;padding:3px 9px;border-radius:20px;text-decoration:none;width:fit-content;">
+                    v0.0.5
+                </a>
+                <span style="font-size:0.75rem;color:var(--muted);">20 May 2026</span>
+            </div>
+            <div>
+                <p style="margin:0;font-size:0.88rem;font-weight:600;margin-bottom:4px;">dzVents command bridge</p>
+                <ul style="margin:4px 0 0 18px;font-size:0.83rem;color:var(--muted);">
+                    <li>Command Bridge channel: three bridge devices for dzVents scripting</li>
+                    <li>Inbox scope filter and layout fixes</li>
+                    <li>Clock-skew correction for timestamps</li>
+                </ul>
+            </div>
+        </div>
+
+        <!-- v0.0.4 -->
+        <div style="display:grid;grid-template-columns:120px 1fr;gap:0 20px;padding:16px 0;border-bottom:1px solid var(--border);">
+            <div style="display:flex;flex-direction:column;gap:5px;padding-top:2px;">
+                <a href="https://github.com/galadril/Domoticz-MeshCore-Plugin/releases/tag/v0.0.4" target="_blank" rel="noopener"
+                   style="display:inline-flex;align-items:center;background:var(--surface-2);border:1px solid var(--border);color:var(--text);font-size:0.75rem;font-weight:700;padding:3px 9px;border-radius:20px;text-decoration:none;width:fit-content;">
+                    v0.0.4
+                </a>
+                <span style="font-size:0.75rem;color:var(--muted);">19 May 2026</span>
+            </div>
+            <div>
+                <p style="margin:0;font-size:0.88rem;font-weight:600;margin-bottom:4px;">UI &amp; theming fixes</p>
+                <ul style="margin:4px 0 0 18px;font-size:0.83rem;color:var(--muted);">
+                    <li>Dashboard UI and theming improvements</li>
+                    <li>Collapsible node settings panel</li>
+                    <li>Contact view state preserved in local storage</li>
+                </ul>
+            </div>
+        </div>
+
+        <!-- v0.0.3 -->
+        <div style="display:grid;grid-template-columns:120px 1fr;gap:0 20px;padding:16px 0;border-bottom:1px solid var(--border);">
+            <div style="display:flex;flex-direction:column;gap:5px;padding-top:2px;">
+                <a href="https://github.com/galadril/Domoticz-MeshCore-Plugin/releases/tag/v0.0.3" target="_blank" rel="noopener"
+                   style="display:inline-flex;align-items:center;background:var(--surface-2);border:1px solid var(--border);color:var(--text);font-size:0.75rem;font-weight:700;padding:3px 9px;border-radius:20px;text-decoration:none;width:fit-content;">
+                    v0.0.3
+                </a>
+                <span style="font-size:0.75rem;color:var(--muted);">19 May 2026</span>
+            </div>
+            <div>
+                <p style="margin:0;font-size:0.88rem;font-weight:600;margin-bottom:4px;">WebSocket dashboard &amp; SQLite message store</p>
+                <ul style="margin:4px 0 0 18px;font-size:0.83rem;color:var(--muted);">
+                    <li>Real-time dashboard over native Domoticz WebSocket channel (no more JSON-file polling)</li>
+                    <li>SQLite message store as single source of truth for inbox and DM threads</li>
+                    <li>Serial transport support</li>
+                    <li>Reliable messaging and device-side settings</li>
+                </ul>
+            </div>
+        </div>
+
+        <!-- v0.0.2 -->
+        <div style="display:grid;grid-template-columns:120px 1fr;gap:0 20px;padding:16px 0;border-bottom:1px solid var(--border);">
+            <div style="display:flex;flex-direction:column;gap:5px;padding-top:2px;">
+                <a href="https://github.com/galadril/Domoticz-MeshCore-Plugin/releases/tag/v0.0.2" target="_blank" rel="noopener"
+                   style="display:inline-flex;align-items:center;background:var(--surface-2);border:1px solid var(--border);color:var(--text);font-size:0.75rem;font-weight:700;padding:3px 9px;border-radius:20px;text-decoration:none;width:fit-content;">
+                    v0.0.2
+                </a>
+                <span style="font-size:0.75rem;color:var(--muted);">6 Apr 2026</span>
+            </div>
+            <div>
+                <p style="margin:0;font-size:0.88rem;font-weight:600;margin-bottom:4px;">dzVents example scripts</p>
+                <p style="margin:4px 0 0;font-size:0.83rem;color:var(--muted);">Status reporter and chat responder example scripts added.</p>
+            </div>
+        </div>
+
+        <!-- v0.0.1 -->
+        <div style="display:grid;grid-template-columns:120px 1fr;gap:0 20px;padding:16px 0;">
+            <div style="display:flex;flex-direction:column;gap:5px;padding-top:2px;">
+                <a href="https://github.com/galadril/Domoticz-MeshCore-Plugin/releases/tag/v0.0.1" target="_blank" rel="noopener"
+                   style="display:inline-flex;align-items:center;background:var(--surface-2);border:1px solid var(--border);color:var(--text);font-size:0.75rem;font-weight:700;padding:3px 9px;border-radius:20px;text-decoration:none;width:fit-content;">
+                    v0.0.1
+                </a>
+                <span style="font-size:0.75rem;color:var(--muted);">4 Apr 2026</span>
+            </div>
+            <div>
+                <p style="margin:0;font-size:0.88rem;font-weight:600;margin-bottom:4px;">Initial release</p>
+                <p style="margin:4px 0 0;font-size:0.83rem;color:var(--muted);">Self-node telemetry, message inbox, send controls and custom dashboard.</p>
             </div>
         </div>
 
     </div>
 
-    <h2 class="section-title">Other highlights</h2>
-    <div class="feature-list">
-        <div class="item"><div class="dot"></div><div><strong>Native WebSocket transport.</strong> <span>No JSON-file or JSON-API polling — every update is pushed by the plugin in real time.</span></div></div>
-        <div class="item"><div class="dot"></div><div><strong>SQLite message store.</strong> <span>Single source of truth for the inbox and per-contact DM conversations, with server-side pagination and full-text search.</span></div></div>
-        <div class="item"><div class="dot"></div><div><strong>Compose &amp; reply.</strong> <span>Send to channels or contacts, emoji picker, @mention highlighting, hover-to-reply on any message.</span></div></div>
-        <div class="item"><div class="dot"></div><div><strong>Self-node telemetry.</strong> <span>Battery, voltage, RSSI, SNR, noise floor, uptime, airtime and packet counters — exposed as Domoticz devices.</span></div></div>
-        <div class="item"><div class="dot"></div><div><strong>Auto-discovery.</strong> <span>Every contact advertised by the mesh is tracked automatically — no manual node list.</span></div></div>
-        <div class="item"><div class="dot"></div><div><strong>Delivery ACK markers.</strong> <span>Outgoing DMs show a delivered tick when the recipient acknowledges, even multi-hop.</span></div></div>
-        <div class="item"><div class="dot"></div><div><strong>Coverage &amp; line-of-sight tools.</strong> <span>Terrain-aware propagation map and per-link path-profile chart with Bullington knife-edge attenuation.</span></div></div>
-        <div class="item"><div class="dot"></div><div><strong>Activity heatmap.</strong> <span>24-hour rolling Leaflet heatmap of RX events on the topology map.</span></div></div>
-        <div class="item"><div class="dot"></div><div><strong>dzVents integration.</strong> <span>Bundled status-report and chat-responder example scripts — automations driven by mesh messages.</span></div></div>
-        <div class="item"><div class="dot"></div><div><strong>Auto-reconnect &amp; stale detection.</strong> <span>Worker thread reconnects after connection loss; stale-link watchdog triggers a reconnect after 10 min without push events.</span></div></div>
+    <div style="margin-top:16px;">
+        <a href="https://github.com/galadril/Domoticz-MeshCore-Plugin/releases" target="_blank" rel="noopener" class="btn">View all releases on GitHub &rarr;</a>
     </div>
+</section>
 
-    <footer>
-        <div>Static feature tour · Install the plugin for the live interactive dashboard.</div>
-        <div><a href="https://github.com/galadril/Domoticz-MeshCore-Plugin">github.com/galadril/Domoticz-MeshCore-Plugin</a></div>
-    </footer>
+<!-- ── Troubleshooting ────────────────────────────────────────── -->
+<section id="troubleshooting">
+    <h2>Troubleshooting</h2>
+    <p>Enable <strong>Basic</strong> or <strong>All</strong> debug logging in the hardware settings,
+    then check <strong>Setup &rarr; Log</strong>.</p>
+    <div class="tbl-wrap">
+        <table>
+            <thead><tr><th>Symptom</th><th>Fix</th></tr></thead>
+            <tbody>
+                <tr><td><code>meshcore package not installed</code> in log</td>
+                    <td>Run <code>pip install meshcore</code> and restart Domoticz. On Docker, add it to <code>customstart.sh</code>.</td></tr>
+                <tr><td>No devices appear after connecting</td>
+                    <td>Wait 30&nbsp;s for the initial contacts poll. Check that your node is advertising on the mesh. Enable Basic debug to see discovered contact names.</td></tr>
+                <tr><td>Dashboard shows "Connecting&hellip;" indefinitely</td>
+                    <td>Your Domoticz build is older than 17956 &mdash; update Domoticz. The WebSocket plugin channel was added in that release.</td></tr>
+                <tr><td>Command Bridge devices not created</td>
+                    <td>Set a non-empty channel name in the Command Bridge Channel field, save, then restart the plugin.</td></tr>
+                <tr><td>dzVents script fires but no reply arrives on the mesh</td>
+                    <td>Verify the channel name matches the plugin setting (case-insensitive, leading <code>#</code> stripped). Enable debug and look for <em>Replying (id=&hellip;)</em> in the log.</td></tr>
+                <tr><td>Connection drops and never recovers</td>
+                    <td>The plugin detects a stale link after 10&nbsp;min and reconnects automatically. Enable All debug to trace reconnect attempts.</td></tr>
+                <tr><td>Remote node battery / RSSI not showing</td>
+                    <td>These require a <code>STATUS_RESPONSE</code> push from the remote node, which needs firmware support. Only the self (connected) node reliably provides these metrics.</td></tr>
+                <tr><td>Old devices orphaned after upgrade</td>
+                    <td>After the DomoticzEx migration, delete old per-node devices via <em>Setup &rarr; Devices</em>, filtered by MeshCore hardware. The plugin recreates them automatically.</td></tr>
+            </tbody>
+        </table>
+    </div>
+</section>
+
+<!-- ── Updating ───────────────────────────────────────────────── -->
+<section id="updating">
+    <h2>Updating</h2>
+    <div class="code-wrap">
+        <div class="code-header"><span class="code-lang">bash</span><button class="copy-btn" onclick="copyCode(this)">Copy</button></div>
+        <pre><code>cd ~/domoticz/plugins/MeshCore
+git pull
+sudo service domoticz.sh restart</code></pre>
+    </div>
+    <p>For bugs and feature requests, open a <a href="https://github.com/galadril/Domoticz-MeshCore-Plugin/issues">GitHub Issue</a>.</p>
+</section>
+
+<!-- ── Support & Donate ───────────────────────────────────────── -->
+<section id="support">
+    <h2>Support &amp; Donate</h2>
+    <p>This plugin is free and open-source. If it saves you time or brings your LoRa mesh into Domoticz in a useful way, a small contribution is always appreciated.</p>
+
+    <div style="display:flex;gap:16px;flex-wrap:wrap;margin:24px 0;">
+
+        <div style="flex:1;min-width:220px;background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:24px 22px;display:flex;flex-direction:column;gap:14px;">
+            <div style="font-size:2rem;">&#9749;</div>
+            <div>
+                <div style="font-weight:700;font-size:1rem;margin-bottom:6px;">Buy me a coffee</div>
+                <p style="font-size:0.85rem;color:var(--muted);margin:0;">If the plugin saves you time, a small PayPal donation goes a long way.</p>
+            </div>
+            <a href="https://www.paypal.me/markheinis" target="_blank" rel="noopener"
+               style="display:inline-flex;align-items:center;justify-content:center;gap:8px;padding:10px 20px;border-radius:8px;background:linear-gradient(135deg,#f59e0b,#d97706);color:#fff;font-weight:700;font-size:0.88rem;text-decoration:none;margin-top:auto;">
+                &#9749; Donate via PayPal
+            </a>
+        </div>
+
+        <div style="flex:1;min-width:220px;background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:24px 22px;display:flex;flex-direction:column;gap:14px;">
+            <div style="font-size:2rem;">&#128030;</div>
+            <div>
+                <div style="font-weight:700;font-size:1rem;margin-bottom:6px;">Found a bug?</div>
+                <p style="font-size:0.85rem;color:var(--muted);margin:0;">Open an issue on GitHub. Include your Domoticz version, plugin version, and the relevant log lines.</p>
+            </div>
+            <a href="https://github.com/galadril/Domoticz-MeshCore-Plugin/issues/new" target="_blank" rel="noopener"
+               style="display:inline-flex;align-items:center;justify-content:center;gap:8px;padding:10px 20px;border-radius:8px;background:var(--surface-2);border:1px solid var(--border);color:var(--text);font-weight:600;font-size:0.88rem;text-decoration:none;margin-top:auto;">
+                &#128030; Open an Issue
+            </a>
+        </div>
+
+        <div style="flex:1;min-width:220px;background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:24px 22px;display:flex;flex-direction:column;gap:14px;">
+            <div style="font-size:2rem;">&#127381;</div>
+            <div>
+                <div style="font-weight:700;font-size:1rem;margin-bottom:6px;">Want a feature?</div>
+                <p style="font-size:0.85rem;color:var(--muted);margin:0;">Ideas and pull requests are welcome. Check the existing issues first to avoid duplicates.</p>
+            </div>
+            <a href="https://github.com/galadril/Domoticz-MeshCore-Plugin" target="_blank" rel="noopener"
+               style="display:inline-flex;align-items:center;justify-content:center;gap:8px;padding:10px 20px;border-radius:8px;background:var(--surface-2);border:1px solid var(--border);color:var(--text);font-weight:600;font-size:0.88rem;text-decoration:none;margin-top:auto;">
+                &#127381; View on GitHub
+            </a>
+        </div>
+
+        <div style="flex:1;min-width:220px;background:linear-gradient(145deg,var(--surface),rgba(88,101,242,0.08));border:1px solid rgba(88,101,242,0.3);border-radius:12px;padding:24px 22px;display:flex;flex-direction:column;gap:14px;">
+            <div style="font-size:2rem;">&#128172;</div>
+            <div>
+                <div style="font-weight:700;font-size:1rem;margin-bottom:6px;">MeshCore Community</div>
+                <p style="font-size:0.85rem;color:var(--muted);margin:0;">Join the official MeshCore Discord to discuss firmware, hardware, range tests and share your mesh setups.</p>
+            </div>
+            <a href="https://meshcore.gg" target="_blank" rel="noopener"
+               style="display:inline-flex;align-items:center;justify-content:center;gap:8px;padding:10px 20px;border-radius:8px;background:linear-gradient(135deg,#5865f2,#4752c4);color:#fff;font-weight:700;font-size:0.88rem;text-decoration:none;margin-top:auto;">
+                &#128172; Join Discord
+            </a>
+        </div>
+
+    </div>
+</section>
 
 </main>
+</div><!-- #layout -->
+
+<footer>
+    <div>MeshCore Plugin for Domoticz &mdash; MIT License &mdash; by <a href="https://github.com/galadril">galadril</a></div>
+    <div>
+        <a href="https://github.com/galadril/Domoticz-MeshCore-Plugin">GitHub</a>
+        &nbsp;&middot;&nbsp;
+        <a href="https://meshcore.io/">meshcore.io</a>
+        &nbsp;&middot;&nbsp;
+        <a href="https://www.domoticz.com/">Domoticz</a>
+        &nbsp;&middot;&nbsp;
+        <a href="https://github.com/galadril/Domoticz-Nightglass-Theme">Nightglass Theme</a>
+    </div>
+</footer>
+
+<!-- ── Lightbox ───────────────────────────────────────────────── -->
+<div id="lightbox" onclick="handleLightboxClick(event)">
+    <div id="lb-counter"></div>
+    <button class="lb-close" onclick="closeLightbox()" title="Close (Esc)">&#215;</button>
+    <button class="lb-nav" id="lb-prev" onclick="lightboxPrev(event)" title="Previous">&#8592;</button>
+    <img id="lb-img" src="" alt="">
+    <div id="lb-caption"></div>
+    <button class="lb-nav" id="lb-next" onclick="lightboxNext(event)" title="Next">&#8594;</button>
+</div>
+
+<script>
+    /* ── Hero canvas mesh animation ──────────────────────────── */
+    (function () {
+        var canvas = document.getElementById('hero-canvas');
+        if (!canvas) return;
+        var ctx = canvas.getContext('2d');
+        var W = canvas.width, H = canvas.height;
+        var R = 45, G = 212, B = 191; // #2dd4bf
+
+        var N = 22;
+        var nodes = Array.from({ length: N }, function () {
+            return {
+                x:  Math.random() * W,
+                y:  Math.random() * H,
+                vx: (Math.random() - 0.5) * 0.28,
+                vy: (Math.random() - 0.5) * 0.28,
+                r:  Math.random() * 1.8 + 1.2,
+            };
+        });
+
+        var DIST = 110;
+
+        function frame() {
+            ctx.clearRect(0, 0, W, H);
+
+            /* lines */
+            for (var i = 0; i < N; i++) {
+                for (var j = i + 1; j < N; j++) {
+                    var dx = nodes[i].x - nodes[j].x;
+                    var dy = nodes[i].y - nodes[j].y;
+                    var d  = Math.sqrt(dx * dx + dy * dy);
+                    if (d < DIST) {
+                        var a = ((1 - d / DIST) * 0.55).toFixed(2);
+                        ctx.strokeStyle = 'rgba(' + R + ',' + G + ',' + B + ',' + a + ')';
+                        ctx.lineWidth = 0.8;
+                        ctx.beginPath();
+                        ctx.moveTo(nodes[i].x, nodes[i].y);
+                        ctx.lineTo(nodes[j].x, nodes[j].y);
+                        ctx.stroke();
+                    }
+                }
+            }
+
+            /* nodes */
+            nodes.forEach(function (n) {
+                /* outer glow ring */
+                ctx.beginPath();
+                ctx.arc(n.x, n.y, n.r + 3, 0, Math.PI * 2);
+                ctx.fillStyle = 'rgba(' + R + ',' + G + ',' + B + ',0.12)';
+                ctx.fill();
+                /* solid dot */
+                ctx.beginPath();
+                ctx.arc(n.x, n.y, n.r, 0, Math.PI * 2);
+                ctx.fillStyle = 'rgba(' + R + ',' + G + ',' + B + ',0.85)';
+                ctx.fill();
+
+                n.x += n.vx; n.y += n.vy;
+                if (n.x < 0) { n.x = 0;  n.vx *= -1; }
+                if (n.x > W) { n.x = W;  n.vx *= -1; }
+                if (n.y < 0) { n.y = 0;  n.vy *= -1; }
+                if (n.y > H) { n.y = H;  n.vy *= -1; }
+            });
+
+            requestAnimationFrame(frame);
+        }
+        frame();
+    }());
+
+    /* ── Gallery data ───────────────────────────────────────── */
+    var GALLERY = [
+        { src: 'images/screenshot.png',     caption: 'Dashboard overview — node cards, inbox and compose bar' },
+        { src: 'images/topology.png',        caption: 'Mesh topology — Leaflet map with real multi-hop path lines' },
+        { src: 'images/history_charts.png',  caption: 'Historical analytics — RSSI, SNR, packet volume over time' },
+        { src: 'images/heard_nodes.png',     caption: 'Heard nodes — non-contact adverts with hit count and GPS pin' },
+        { src: 'images/firehose.png',        caption: 'RX firehose — live packet stream with type filters' },
+        { src: 'images/statistics.png',      caption: 'Statistics — lifetime totals and leaderboards' },
+    ];
+    var lbIdx = 0;
+
+    function openLightbox(idx) {
+        lbIdx = idx;
+        var img = document.getElementById('lb-img');
+        img.src = GALLERY[idx].src;
+        img.alt = GALLERY[idx].caption;
+        document.getElementById('lb-caption').textContent = GALLERY[idx].caption;
+        document.getElementById('lb-counter').textContent = (idx + 1) + ' / ' + GALLERY.length;
+        document.getElementById('lightbox').classList.add('open');
+        document.body.style.overflow = 'hidden';
+    }
+
+    function closeLightbox() {
+        document.getElementById('lightbox').classList.remove('open');
+        document.body.style.overflow = '';
+    }
+
+    function handleLightboxClick(e) {
+        if (e.target === document.getElementById('lightbox')) closeLightbox();
+    }
+
+    function updateLightbox() {
+        var img = document.getElementById('lb-img');
+        img.style.opacity = '0';
+        setTimeout(function () {
+            img.src = GALLERY[lbIdx].src;
+            img.alt = GALLERY[lbIdx].caption;
+            document.getElementById('lb-caption').textContent = GALLERY[lbIdx].caption;
+            document.getElementById('lb-counter').textContent = (lbIdx + 1) + ' / ' + GALLERY.length;
+            img.style.opacity = '1';
+        }, 130);
+    }
+
+    function lightboxPrev(e) {
+        if (e) e.stopPropagation();
+        lbIdx = (lbIdx - 1 + GALLERY.length) % GALLERY.length;
+        updateLightbox();
+    }
+
+    function lightboxNext(e) {
+        if (e) e.stopPropagation();
+        lbIdx = (lbIdx + 1) % GALLERY.length;
+        updateLightbox();
+    }
+
+    document.addEventListener('keydown', function (e) {
+        var lb = document.getElementById('lightbox');
+        if (!lb.classList.contains('open')) return;
+        if (e.key === 'Escape')      closeLightbox();
+        if (e.key === 'ArrowLeft')   lightboxPrev();
+        if (e.key === 'ArrowRight')  lightboxNext();
+    });
+
+    /* ── Sidebar toggle (mobile) ──────────────────────────── */
+    function toggleSidebar() {
+        document.getElementById('sidebar').classList.toggle('open');
+        document.getElementById('overlay').classList.toggle('show');
+    }
+    function closeSidebar() {
+        document.getElementById('sidebar').classList.remove('open');
+        document.getElementById('overlay').classList.remove('show');
+    }
+    document.querySelectorAll('.nav-link').forEach(function (link) {
+        link.addEventListener('click', function () {
+            if (window.innerWidth <= 720) closeSidebar();
+        });
+    });
+
+    /* ── Active nav via IntersectionObserver ──────────────── */
+    var observer = new IntersectionObserver(function (entries) {
+        entries.forEach(function (entry) {
+            if (entry.isIntersecting) {
+                var id = entry.target.id;
+                document.querySelectorAll('.nav-link').forEach(function (link) {
+                    link.classList.toggle('active', link.getAttribute('href') === '#' + id);
+                });
+            }
+        });
+    }, { rootMargin: '-15% 0px -70% 0px' });
+    document.querySelectorAll('section[id]').forEach(function (s) { observer.observe(s); });
+
+    /* ── Copy button ──────────────────────────────────────── */
+    function copyCode(btn) {
+        var pre = btn.closest('.code-wrap').querySelector('pre');
+        navigator.clipboard.writeText(pre.innerText || pre.textContent).then(function () {
+            btn.textContent = 'Copied!';
+            btn.classList.add('ok');
+            setTimeout(function () { btn.textContent = 'Copy'; btn.classList.remove('ok'); }, 1800);
+        }).catch(function () {
+            btn.textContent = 'Error';
+            setTimeout(function () { btn.textContent = 'Copy'; }, 1800);
+        });
+    }
+</script>
 
 </body>
 </html>
