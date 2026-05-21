@@ -2751,75 +2751,98 @@
             document.head.appendChild(css);
         }
         if (!document.querySelector('script[data-leaflet]')) {
-            // Domoticz's dashboard loads RequireJS, which defines window.define
-            // with .amd. Leaflet's UMD wrapper detects AMD and registers as a
-            // module instead of setting window.L. Hide window.define for the
-            // duration of the script load so the UMD picks the globals path.
-            const _define = window.define;
-            window.define = undefined;
-            const s = document.createElement("script");
-            s.src = "/templates/leaflet/leaflet.js";
-            s.setAttribute("data-leaflet", "1");
-            s.onload = () => {
-                window.define = _define;
-                // Load leaflet-heat after Leaflet itself so L is available.
-                if (!document.querySelector('script[data-leaflet-heat]')) {
-                    const sh = document.createElement("script");
-                    sh.src = "/templates/leaflet/leaflet-heat.js";
-                    sh.setAttribute("data-leaflet-heat", "1");
-                    document.head.appendChild(sh);
-                }
-            };
-            s.onerror = () => { window.define = _define; };
-            document.head.appendChild(s);
+            // Leaflet's UMD wrapper picks AMD if window.define.amd is set
+            // (Domoticz's RequireJS does set it), which prevents
+            // window.L from being assigned. The previous workaround
+            // wiped window.define for the duration of the script load —
+            // that opened a race window during which other AMD modules
+            // (e.g. Domoticz's EasterEggs.js on bootstrap) hit
+            // "define is not a function". Fetch the script as text and
+            // evaluate it inside a new Function whose `define`,
+            // `module` and `exports` parameters shadow the globals,
+            // forcing the UMD's global-assignment fallback. window.define
+            // is never touched.
+            const tag = document.createElement("script");
+            tag.setAttribute("data-leaflet", "1");
+            tag.type = "text/marker-only";
+            document.head.appendChild(tag); // marker so we don't re-fetch
+            fetch("/templates/leaflet/leaflet.js")
+                .then(r => { if (!r.ok) throw new Error("HTTP " + r.status); return r.text(); })
+                .then(code => {
+                    (new Function("define", "module", "exports", code))(undefined, undefined, undefined);
+                    // Load leaflet-heat after Leaflet so L is available.
+                    if (!document.querySelector('script[data-leaflet-heat]')) {
+                        const sh = document.createElement("script");
+                        sh.src = "/templates/leaflet/leaflet-heat.js";
+                        sh.setAttribute("data-leaflet-heat", "1");
+                        document.head.appendChild(sh);
+                    }
+                })
+                .catch(err => { console.warn("Leaflet failed to load:", err); });
         }
     })();
-    // Highcharts is bundled with Domoticz at /js/highcharts/highcharts.js. Inject
-    // it on demand the same way as Leaflet — RequireJS interferes with UMD
-    // detection, so hide window.define during the load. Idempotent; returns a
-    // shared Promise that callers await before drawing a chart.
-    let _hcPromise = null;
+    // Highcharts is bundled with Domoticz at /js/highcharts/highcharts.js.
+    // We can't just <script src=…> it: Domoticz's RequireJS sets
+    // window.define, and Highcharts' UMD wrapper sees it and registers
+    // itself as an anonymous AMD module instead of assigning
+    // window.Highcharts — leaving us unable to use it.
+    //
+    // The old workaround (set window.define = undefined, restore on
+    // script onload) had a race: anything else that loaded an AMD
+    // module during the open window (e.g. Domoticz's own EasterEggs.js
+    // during bootstrap) would hit "define is not a function". The
+    // fetch + new Function variant below scopes `define` (plus
+    // `module`/`exports` for the CommonJS branch) to function parameters
+    // so the UMD wrapper sees them as undefined ONLY inside the
+    // wrapper — window.define stays intact for everyone else.
+    //
+    // var (not let/const) so the script can be re-injected by Angular's
+    // router without throwing "Identifier '_hcPromise' has already been
+    // declared". Top-level let/const create global lexical bindings
+    // that persist for the life of the page; var is silently re-declared.
+    var _hcPromise = null;
     function _loadHighcharts() {
         if (typeof Highcharts !== "undefined") return Promise.resolve();
         if (_hcPromise) return _hcPromise;
-        _hcPromise = new Promise((resolve, reject) => {
-            const _define = window.define;
-            window.define = undefined;
-            const s = document.createElement("script");
-            s.src = "/js/highcharts/highcharts.js";
-            s.setAttribute("data-highcharts", "1");
-            s.onload  = () => {
-                window.define = _define;
-                // Highcharts defaults every datetime axis to UTC. We want
-                // the user's local time across every chart on the
-                // dashboard (analytics, polar radar, packet-type donut) —
-                // set the global option once, immediately after load.
+        _hcPromise = fetch("/js/highcharts/highcharts.js")
+            .then(r => {
+                if (!r.ok) throw new Error("HTTP " + r.status);
+                return r.text();
+            })
+            .then(code => {
+                // Shadow define/module/exports as function parameters so
+                // both AMD and CommonJS UMD branches are skipped; the
+                // wrapper falls through to its `root.Highcharts =
+                // factory()` global-assignment branch.
+                (new Function("define", "module", "exports", code))(undefined, undefined, undefined);
                 try { Highcharts.setOptions({ time: { useUTC: false } }); } catch (_) {}
-                resolve();
-            };
-            s.onerror = () => { window.define = _define; _hcPromise = null; reject(new Error("Highcharts failed to load")); };
-            document.head.appendChild(s);
-        });
+            })
+            .catch(err => {
+                _hcPromise = null;
+                throw new Error("Highcharts failed to load: " + (err && err.message || err));
+            });
         return _hcPromise;
     }
     window._loadHighcharts = _loadHighcharts;
 
-    let _hcMorePromise = null;
+    var _hcMorePromise = null;
     function _loadHighchartsMore() {
         return _loadHighcharts().then(() => {
             // highcharts-more already applied (polar support registered)
             if (Highcharts.seriesTypes && Highcharts.seriesTypes.arearange) return;
             if (_hcMorePromise) return _hcMorePromise;
-            _hcMorePromise = new Promise((resolve, reject) => {
-                const _define = window.define;
-                window.define = undefined;
-                const s = document.createElement("script");
-                s.src = "/js/highcharts/highcharts-more.js";
-                s.setAttribute("data-highcharts-more", "1");
-                s.onload  = () => { window.define = _define; resolve(); };
-                s.onerror = () => { window.define = _define; _hcMorePromise = null; reject(new Error("highcharts-more failed to load")); };
-                document.head.appendChild(s);
-            });
+            _hcMorePromise = fetch("/js/highcharts/highcharts-more.js")
+                .then(r => {
+                    if (!r.ok) throw new Error("HTTP " + r.status);
+                    return r.text();
+                })
+                .then(code => {
+                    (new Function("define", "module", "exports", code))(undefined, undefined, undefined);
+                })
+                .catch(err => {
+                    _hcMorePromise = null;
+                    throw new Error("highcharts-more failed to load: " + (err && err.message || err));
+                });
             return _hcMorePromise;
         });
     }
@@ -2827,7 +2850,7 @@
     // Stable colour mapping for known payload types — keeps the same slice/legend
     // colour across renders. Unknown types fall through to a stable hashed pick
     // from a small palette so a new firmware type stays visually identifiable.
-    const _PAYLOAD_COLORS = {
+    var _PAYLOAD_COLORS = {
         ADVERT:    "#8b5cf6",   // purple
         ANON_REQ:  "#ec4899",   // hot pink (distinct from ADVERT)
         REQ:       "#facc15",   // amber
@@ -2847,7 +2870,7 @@
     // Colours used ONLY for unknown firmware type names (deliberately avoids
     // hues that are already assigned above so a new type can never visually
     // collide with a mapped one).
-    const _PAYLOAD_FALLBACK_PALETTE = [
+    var _PAYLOAD_FALLBACK_PALETTE = [
         "#6366f1", "#14b8a6", "#f59e0b", "#0ea5e9",
         "#a855f7", "#22c55e", "#d97706", "#dc2626",
     ];
@@ -2857,7 +2880,7 @@
         for (let i = 0; i < name.length; i++) h = (h * 31 + name.charCodeAt(i)) >>> 0;
         return _PAYLOAD_FALLBACK_PALETTE[h % _PAYLOAD_FALLBACK_PALETTE.length];
     }
-    let _payloadPieChart = null;
+    var _payloadPieChart = null;
 
     // ── Polar-radar geo helpers ──────────────────────────────────────────────────
     function _haversineKm(lat1, lon1, lat2, lon2) {
@@ -2894,7 +2917,7 @@
     }
 
     // Domoticz Settings location — fetched once per session, then cached.
-    let _domoticzLocation = null;
+    var _domoticzLocation = null;
     async function _getDomoticzLocation() {
         if (_domoticzLocation !== null) return _domoticzLocation;
         try {
@@ -6256,14 +6279,22 @@
                         <i class="fa-solid fa-location-dot"></i> to show its
                         position on the map below.
                     </div>
-                    <div id="heard-purge-bar" style="display:flex;align-items:center;gap:6px;margin:8px 0 2px;flex-wrap:wrap">
-                        <span style="font-size:0.72rem;color:var(--muted)">Purge older than:</span>
-                        <select id="heard-purge-age" style="font-size:0.72rem;background:var(--surface);color:var(--text);border:1px solid var(--border);border-radius:4px;padding:2px 6px">
-                            <option value="604800">1 week</option>
-                            <option value="2592000" selected>1 month</option>
-                            <option value="31536000">1 year</option>
+                    <div id="heard-purge-bar" style="display:flex;align-items:center;gap:6px;margin:8px 0 2px;flex-wrap:nowrap">
+                        <span style="font-size:0.72rem;color:var(--muted);white-space:nowrap">Purge:</span>
+                        <select id="heard-purge-sel" style="font-size:0.72rem;background:var(--surface);color:var(--text);border:1px solid var(--border);border-radius:4px;padding:2px 6px;min-width:0;flex:1 1 auto">
+                            <optgroup label="Older than">
+                                <option value="age:604800">1 week</option>
+                                <option value="age:2592000" selected>1 month</option>
+                                <option value="age:31536000">1 year</option>
+                            </optgroup>
+                            <optgroup label="Heard less than">
+                                <option value="count:2">2 times</option>
+                                <option value="count:10">10 times</option>
+                                <option value="count:20">20 times</option>
+                                <option value="count:50">50 times</option>
+                            </optgroup>
                         </select>
-                        <button id="heard-purge-btn" class="view-btn" title="Remove heard nodes older than the selected age"><i class="fa-solid fa-broom"></i> Purge</button>
+                        <button id="heard-purge-btn" class="view-btn" title="Remove heard nodes matching the selected criterion" style="flex:0 0 auto"><i class="fa-solid fa-broom"></i> Purge</button>
                     </div>
                     <div id="heard-type-filter" style="display:flex;align-items:center;gap:4px;margin:6px 0 2px">
                         <span style="font-size:0.72rem;color:var(--muted);margin-right:4px">Show:</span>
@@ -6284,7 +6315,7 @@
                     };
                 });
                 const purgeBtn = document.getElementById("heard-purge-btn");
-                if (purgeBtn) purgeBtn.onclick = _heardPurgeOlderThan;
+                if (purgeBtn) purgeBtn.onclick = _heardPurgeRun;
             }
 
             // Refresh the per-type count badges every render.
@@ -6368,41 +6399,53 @@
             // will re-render automatically.  No explicit fetch needed.
         }
 
-        // Bulk purge: drop every heard node whose last_heard is older than
-        // the selected age. Counts the affected rows locally (against the
-        // currently visible filter) so the confirm dialog tells the user
-        // exactly what's about to happen.
-        async function _heardPurgeOlderThan() {
-            const sel = document.getElementById("heard-purge-age");
-            if (!sel) return;
-            const seconds = parseInt(sel.value, 10);
-            if (!Number.isFinite(seconds) || seconds <= 0) return;
-            const now = Math.floor(Date.now() / 1000);
-            const cutoff = now - seconds;
+        // Unified purge action: the combo dropdown encodes the criterion
+        // type in the option value as either "age:<seconds>" or
+        // "count:<threshold>". This handler decodes that, counts victims
+        // locally (so the confirm dialog says exactly how many), then
+        // dispatches to the matching backend command.
+        async function _heardPurgeRun() {
+            const sel = document.getElementById("heard-purge-sel");
+            if (!sel || !sel.value) return;
+            const [kind, raw] = sel.value.split(":");
+            const n = parseInt(raw, 10);
+            if (!Number.isFinite(n) || n <= 0) return;
             const knownPks = new Set();
-            for (const n of Object.values((_deviceMap && _deviceMap.nodes) || {}))
-                if (n.pubkey) knownPks.add(n.pubkey);
-            const victims = Object.values((_heard && _heard.nodes) || {})
-                .filter(h => h.pubkey && !knownPks.has(h.pubkey))
-                .filter(h => !h.last_heard || h.last_heard < cutoff);
-            if (!victims.length) {
-                alert(`No heard nodes are older than ${sel.options[sel.selectedIndex].text}.`);
+            for (const node of Object.values((_deviceMap && _deviceMap.nodes) || {}))
+                if (node.pubkey) knownPks.add(node.pubkey);
+            let predicate, dialogTail, cmd;
+            if (kind === "age") {
+                const cutoff = Math.floor(Date.now() / 1000) - n;
+                predicate = h => !h.last_heard || h.last_heard < cutoff;
+                const cutoffStr = new Date(cutoff * 1000).toLocaleDateString();
+                dialogTail = `last seen before ${cutoffStr}`;
+                cmd = `!purge_heard ${n}`;
+            } else if (kind === "count") {
+                predicate = h => (h.count || 0) < n;
+                dialogTail = `heard less than ${n} time(s)`;
+                cmd = `!purge_heard_count ${n}`;
+            } else {
                 return;
             }
-            const cutoffStr = new Date(cutoff * 1000).toLocaleDateString();
+            const victims = Object.values((_heard && _heard.nodes) || {})
+                .filter(h => h.pubkey && !knownPks.has(h.pubkey))
+                .filter(predicate);
+            if (!victims.length) {
+                alert(`No heard nodes match: ${dialogTail}.`);
+                return;
+            }
             if (!confirm(
-                `This will remove ${victims.length} heard node(s) last seen before ${cutoffStr}.\n\n` +
-                `Future broadcasts from these nodes will be ignored until they're heard again past the cutoff.\n\n` +
+                `This will remove ${victims.length} heard node(s) ${dialogTail}.\n\n` +
+                `Future broadcasts from these nodes will be ignored until they're heard again.\n\n` +
                 `Continue?`
             )) return;
-            // Optimistic local removal so the rows disappear immediately.
             for (const v of victims) {
                 if (_heard.nodes) delete _heard.nodes[v.pubkey];
                 if (_heardMapPk === v.pubkey) _heardToggleMap(v.pubkey);
             }
             _renderHeardIfOpen();
             if (_includeHeard) _rerenderContacts();
-            await _pluginWS.sendCmdAndWait(`!purge_heard ${seconds}`);
+            await _pluginWS.sendCmdAndWait(cmd);
         }
 
         async function _heardDelete(pk) {

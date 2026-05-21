@@ -2274,6 +2274,8 @@ class BasePlugin:
             return self._handle_forget_heard(text[len("!forget_heard "):])
         if text.startswith("!purge_heard "):
             return self._handle_purge_heard(text[len("!purge_heard "):])
+        if text.startswith("!purge_heard_count "):
+            return self._handle_purge_heard_count(text[len("!purge_heard_count "):])
         if not text.startswith("!favorite "):
             return False
         try:
@@ -2381,6 +2383,40 @@ class BasePlugin:
             Domoticz.Log(f"!purge_heard: removed {removed} heard node(s) older than {older_than_s}s")
         else:
             Domoticz.Log(f"!purge_heard: no heard nodes older than {older_than_s}s")
+        return True
+
+    def _handle_purge_heard_count(self, arg: str) -> bool:
+        """Bulk-delete heard nodes whose advert count is strictly less than
+        the supplied threshold (so threshold=2 removes 0× and 1× entries).
+        Same purge semantics as !purge_heard: removed pubkeys go into
+        _heard_purged so a queued advert does not resurrect them.
+        Returns True (always consumed)."""
+        try:
+            threshold = int(arg.strip())
+        except (ValueError, TypeError):
+            Domoticz.Log(f"!purge_heard_count: invalid threshold {arg!r}")
+            return True
+        if threshold <= 0:
+            Domoticz.Log("!purge_heard_count: threshold must be positive")
+            return True
+        removed = 0
+        with self._rx_log_lock:
+            to_remove = [
+                pk for pk, h in self._heard_nodes.items()
+                if int(h.get("count") or 0) < threshold
+            ]
+            for pk in to_remove:
+                self._heard_nodes.pop(pk, None)
+                self._heard_purged.add(pk)
+                removed += 1
+            if removed:
+                self._heard_dirty = True
+                self._ws_heard_dirty = True
+        if removed:
+            self._write_heard()
+            Domoticz.Log(f"!purge_heard_count: removed {removed} heard node(s) with count < {threshold}")
+        else:
+            Domoticz.Log(f"!purge_heard_count: no heard nodes with count < {threshold}")
         return True
 
     def _handle_forget_heard(self, pubkey_or_prefix: str) -> bool:
