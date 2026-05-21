@@ -1,0 +1,86 @@
+name: Release
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Tag & publish release
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # full history needed for git describe and log
+
+      # ── 1. Find the most recent tag ──────────────────────────────────────
+      - name: Get latest tag
+        id: latest_tag
+        run: |
+          TAG=$(git tag --sort=-v:refname | head -n 1)
+          if [ -z "$TAG" ]; then
+            TAG="v0.0.0"
+          fi
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+
+      # ── 2. Decide patch vs minor bump ────────────────────────────────────
+      #   minor  →  any commit message starting with "feat:" or "feature:"
+      #   patch  →  everything else (default)
+      - name: Determine bump type
+        id: bump
+        run: |
+          COMMITS=$(git log "${{ steps.latest_tag.outputs.tag }}..HEAD" \
+                        --pretty=format:"%s" 2>/dev/null || true)
+          if echo "$COMMITS" | grep -qiE "^(feat|feature)[:(]"; then
+            echo "type=minor" >> "$GITHUB_OUTPUT"
+          else
+            echo "type=patch" >> "$GITHUB_OUTPUT"
+          fi
+
+      # ── 3. Compute the next semver tag ───────────────────────────────────
+      - name: Compute next version
+        id: version
+        run: |
+          TAG="${{ steps.latest_tag.outputs.tag }}"
+          VERSION="${TAG#v}"
+          IFS='.' read -r MAJOR MINOR PATCH <<< "$VERSION"
+          case "${{ steps.bump.outputs.type }}" in
+            minor) MINOR=$((MINOR + 1)); PATCH=0 ;;
+            *)     PATCH=$((PATCH + 1))           ;;
+          esac
+          echo "next=v${MAJOR}.${MINOR}.${PATCH}" >> "$GITHUB_OUTPUT"
+
+      # ── 4. Push the new tag ──────────────────────────────────────────────
+      - name: Push tag
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag "${{ steps.version.outputs.next }}"
+          git push origin "${{ steps.version.outputs.next }}"
+
+      # ── 5. Bundle plugin zip (only files needed by Domoticz) ─────────────
+      #   Users install by extracting into domoticz/plugins/MeshCore/
+      - name: Bundle plugin zip
+        run: |
+          ZIP="MeshCore-${{ steps.version.outputs.next }}.zip"
+          zip -r "$ZIP" \
+            plugin.py \
+            meshcore.html \
+            assets/ \
+            requirements.txt \
+            README.md
+
+      # ── 6. Publish GitHub release with auto-generated notes ──────────────
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "${{ steps.version.outputs.next }}" \
+            "MeshCore-${{ steps.version.outputs.next }}.zip" \
+            --title "MeshCore Plugin ${{ steps.version.outputs.next }}" \
+            --generate-notes \
+            --latest
