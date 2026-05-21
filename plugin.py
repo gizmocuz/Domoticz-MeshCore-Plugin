@@ -46,8 +46,10 @@ import asyncio
 import calendar
 import collections
 import copy
+import functools
 import gc
 import json
+import math
 import os
 import queue
 import re
@@ -56,6 +58,8 @@ import sqlite3
 import threading
 import time
 import traceback
+import urllib.error
+import urllib.request
 
 try:
     from meshcore import MeshCore
@@ -228,6 +232,12 @@ class BasePlugin:
         self._node_last_advert: dict = {}
         # node_name → contact public_key hex (needed for remove_contact)
         self._node_pubkey: dict = {}
+        # node_name → out_path hex string (e.g. "22a83b") or "" for flood.
+        # Populated from the contacts list; pruned on contact removal.
+        self._node_out_path: dict = {}
+        # node_name → out_path_hash_mode (int, +1 offset matching the
+        # dashboard convention used elsewhere for device_info path_hash_mode).
+        self._node_out_path_hash_mode: dict = {}
         # node_name → DomoticzEx DeviceID (12-hex pubkey prefix). Populated
         # from contact pubkeys and from incoming message pubkey prefixes so a
         # device can be created/updated before the contacts poll runs.
@@ -396,6 +406,13 @@ class BasePlugin:
         self._heard_nodes: dict = {}
         self._heard_dirty = False
         self._known_pubkeys: set = set()
+        # Pubkeys that the user has explicitly deleted from the heard list.
+        # Full pubkey hex strings.  Persisted in meshcore_heard.json under
+        # "purged": [...] so purged nodes stay dead across restarts.
+        # Once a purged key reappears as a real contact (i.e. it shows up in
+        # _known_pubkeys via _handle_contacts) it is removed from this set so
+        # a subsequent removal can add it back to heard normally.
+        self._heard_purged: set = set()
         # Latest received signal for nodes that ARE contacts, keyed by the
         # 12-hex pubkey prefix → {snr, rssi, path_len, t, source}.
         # Last-writer-wins across ADVERT (worker, _on_rx_log) and incoming
@@ -441,6 +458,16 @@ class BasePlugin:
         self._cmd_origins: dict = {}
         self._dzv_req_id: int = 0
         self._dzv_in_seq: int = 0
+        # Time-series analytics state.
+        # Previous packet counter values for delta computation in _ts_packets_add.
+        self._ts_prev_pkt_recv:     int | None = None
+        self._ts_prev_pkt_sent:     int | None = None
+        self._ts_prev_pkt_flood_rx: int | None = None
+        self._ts_prev_pkt_flood_tx: int | None = None
+        self._ts_prev_pkt_dir_rx:   int | None = None
+        self._ts_prev_pkt_dir_tx:   int | None = None
+        # Set of panel names whose cached query results are stale after a new insert.
+        self._ts_dirty_panels: set = set()
 
     # ── dzVents command bridge helpers ────────────────────────────────────────
 
@@ -481,7 +508,14 @@ class BasePlugin:
     # Prune at most once every N inserts (cheap amortised cost).
     _MSG_STORE_PRUNE_EVERY = 200
     # Current schema version stored in the preferences table.
-    MSG_DB_SCHEMA_VERSION = 2
+    MSG_DB_SCHEMA_VERSION = 4
+
+    # ── Elevation cache ───────────────────────────────────────────────────────
+
+    # LRU cap: keep at most this many rows in elevation_cache.
+    _ELEV_PRUNE_CAP = 100_000
+    # Prune elevation cache at most once every this many seconds (5 min).
+    _ELEV_PRUNE_INTERVAL = 300
 
     def _msg_store_open(self, db_path: str):
         """Open (or create) the SQLite message store at *db_path*.
@@ -594,6 +628,83 @@ class BasePlugin:
                         self._msgdb.commit()
                     except Exception:
                         pass  # column already present — safe to ignore
+                elif ver == 3:
+                    # Elevation sample cache for the LoS tool. Keyed by quantised
+                    # (lat, lon) grid (≈11 m resolution). last_used drives LRU eviction.
+                    cur = self._msgdb.cursor()
+                    cur.execute("""
+                        CREATE TABLE IF NOT EXISTS elevation_cache (
+                            lat_q     INTEGER NOT NULL,
+                            lon_q     INTEGER NOT NULL,
+                            elev_m    REAL    NOT NULL,
+                            last_used INTEGER NOT NULL,
+                            PRIMARY KEY (lat_q, lon_q)
+                        )
+                    """)
+                    cur.execute(
+                        "CREATE INDEX IF NOT EXISTS ix_elev_last_used"
+                        " ON elevation_cache (last_used)"
+                    )
+                    self._msgdb.commit()
+                elif ver == 4:
+                    # Time-series tables for historical analytics panels.
+                    cur = self._msgdb.cursor()
+                    cur.execute("""
+                        CREATE TABLE IF NOT EXISTS ts_radio (
+                            ts        INTEGER NOT NULL,
+                            node_key  TEXT    NOT NULL,
+                            rssi      INTEGER,
+                            snr       REAL,
+                            noise     INTEGER,
+                            path_len  INTEGER,
+                            src       TEXT
+                        )
+                    """)
+                    cur.execute(
+                        "CREATE INDEX IF NOT EXISTS ix_ts_radio_ts"
+                        " ON ts_radio (ts)"
+                    )
+                    cur.execute(
+                        "CREATE INDEX IF NOT EXISTS ix_ts_radio_node_ts"
+                        " ON ts_radio (node_key, ts)"
+                    )
+                    cur.execute("""
+                        CREATE TABLE IF NOT EXISTS ts_packets_hourly (
+                            hour_ts   INTEGER PRIMARY KEY,
+                            rx_count  INTEGER NOT NULL DEFAULT 0,
+                            tx_count  INTEGER NOT NULL DEFAULT 0,
+                            flood_rx  INTEGER NOT NULL DEFAULT 0,
+                            flood_tx  INTEGER NOT NULL DEFAULT 0,
+                            direct_rx INTEGER NOT NULL DEFAULT 0,
+                            direct_tx INTEGER NOT NULL DEFAULT 0
+                        )
+                    """)
+                    cur.execute("""
+                        CREATE TABLE IF NOT EXISTS ts_packets_min (
+                            ts        INTEGER PRIMARY KEY,
+                            rx_count  INTEGER NOT NULL DEFAULT 0,
+                            tx_count  INTEGER NOT NULL DEFAULT 0
+                        )
+                    """)
+                    cur.execute("""
+                        CREATE TABLE IF NOT EXISTS ts_relay_keys (
+                            hex_key    TEXT PRIMARY KEY,
+                            name       TEXT,
+                            last_seen  INTEGER NOT NULL,
+                            count      INTEGER NOT NULL DEFAULT 0
+                        )
+                    """)
+                    cur.execute("""
+                        CREATE TABLE IF NOT EXISTS ts_hops (
+                            ts    INTEGER NOT NULL,
+                            hops  INTEGER NOT NULL
+                        )
+                    """)
+                    cur.execute(
+                        "CREATE INDEX IF NOT EXISTS ix_ts_hops_ts"
+                        " ON ts_hops (ts)"
+                    )
+                    self._msgdb.commit()
 
             self._pref_set("db_version", str(self.MSG_DB_SCHEMA_VERSION))
 
@@ -622,6 +733,719 @@ class BasePlugin:
             return None
         cleaned = "".join(c for c in str(pk).lower() if c in "0123456789abcdef")
         return cleaned[:12] or None
+
+    # ── Elevation cache helpers ───────────────────────────────────────────────
+
+    @staticmethod
+    def _elev_quantise(lat: float, lon: float) -> "tuple[int, int]":
+        """Quantise (lat, lon) to an integer grid of ~11 m resolution.
+
+        Multiplying by 1e4 gives approximately 11 m per step at the equator,
+        which is finer than the 30 m SRTM source resolution and therefore
+        lossless for caching purposes.
+
+        The rounding deliberately uses ``math.floor(x + 0.5)`` rather than
+        Python's built-in ``round()`` so that the result matches JavaScript's
+        ``Math.round`` semantics (half-away-from-+inf for positives,
+        half-toward-zero for negatives).  The frontend pre-rounds every
+        coordinate via ``Math.round(v * 1e4) / 1e4`` before sending; using
+        Python banker's rounding here would produce a 1 ULP mismatch at
+        boundary values (e.g. lat 52.00005) and cause needless cache misses.
+        """
+        return (math.floor(lat * 1e4 + 0.5), math.floor(lon * 1e4 + 0.5))
+
+    def _elevation_lookup(self, points: "list[tuple[float, float]]") -> "list":
+        """Return elevation in metres (float) for each (lat, lon) in *points*.
+
+        Results are returned in input order.  Any point whose elevation could
+        not be fetched from either upstream source is represented as None
+        (rare — should log a warning).
+
+        Cache strategy:
+        - Quantise all points and batch-SELECT from elevation_cache.
+        - Update last_used for hits.
+        - Fetch misses from open-elevation (batch ≤100), fall back to
+          opentopodata on HTTP error.
+        - INSERT OR REPLACE fetched samples.
+
+        This is a *blocking* function — it does synchronous HTTP.  Call it via
+        ``loop.run_in_executor(None, self._elevation_lookup, points)`` from the
+        worker loop.
+        """
+        if not points:
+            return []
+
+        db = self._msgdb
+        quantised = [self._elev_quantise(lat, lon) for lat, lon in points]
+        n = len(quantised)
+        results = [None] * n
+
+        # ── Cache lookup ─────────────────────────────────────────────────────
+        # Map (lat_q, lon_q) → index list (multiple input points may map to
+        # the same quantised bucket after rounding).
+        from collections import defaultdict
+        bucket_to_idxs: "dict[tuple, list[int]]" = defaultdict(list)
+        for i, q in enumerate(quantised):
+            bucket_to_idxs[q].append(i)
+
+        cached_elev: "dict[tuple, float]" = {}
+        if db is not None:
+            unique_qs = list(bucket_to_idxs.keys())
+            # SQLite 999-param limit: chunk into batches of ≤499 pairs (2 params each).
+            _CHUNK = 499
+            for chunk_start in range(0, len(unique_qs), _CHUNK):
+                chunk = unique_qs[chunk_start: chunk_start + _CHUNK]
+                if not chunk:
+                    continue
+                # Build: WHERE (lat_q=? AND lon_q=?) OR (lat_q=? AND lon_q=?) ...
+                where_parts = " OR ".join(["(lat_q=? AND lon_q=?)"] * len(chunk))
+                params = []
+                for lat_q, lon_q in chunk:
+                    params.extend([lat_q, lon_q])
+                try:
+                    with self._msgdb_lock:
+                        rows = self._msgdb.execute(
+                            f"SELECT lat_q, lon_q, elev_m FROM elevation_cache"
+                            f" WHERE {where_parts}",
+                            params,
+                        ).fetchall()
+                        if rows:
+                            now_ts = int(time.time())
+                            upd_params = []
+                            for lat_q, lon_q, elev_m in rows:
+                                cached_elev[(lat_q, lon_q)] = elev_m
+                                upd_params.extend([lat_q, lon_q])
+                            upd_where = " OR ".join(
+                                ["(lat_q=? AND lon_q=?)"] * len(rows)
+                            )
+                            self._msgdb.execute(
+                                f"UPDATE elevation_cache SET last_used=?"
+                                f" WHERE {upd_where}",
+                                [now_ts] + upd_params,
+                            )
+                            self._msgdb.commit()
+                except Exception as exc:
+                    Domoticz.Error(
+                        f"Elevation cache lookup failed (non-fatal): {exc!r}"
+                    )
+
+        # Fill hits from cache
+        for q, idxs in bucket_to_idxs.items():
+            if q in cached_elev:
+                for i in idxs:
+                    results[i] = cached_elev[q]
+
+        # ── Fetch misses from upstream ────────────────────────────────────────
+        miss_qs = [q for q in bucket_to_idxs if q not in cached_elev]
+        if miss_qs:
+            fetched: "dict[tuple, float]" = {}
+            _BATCH = 100
+
+            def _fetch_open_elevation(batch_qs):
+                """POST to open-elevation; returns {(lat_q,lon_q): elev_m} or raises."""
+                locations = [
+                    {"latitude": lq / 1e4, "longitude": oq / 1e4}
+                    for lq, oq in batch_qs
+                ]
+                body = json.dumps({"locations": locations}).encode()
+                req = urllib.request.Request(
+                    "https://api.open-elevation.com/api/v1/lookup",
+                    data=body,
+                    headers={"Content-Type": "application/json"},
+                    method="POST",
+                )
+                with urllib.request.urlopen(req, timeout=15) as resp:
+                    if resp.status != 200:
+                        raise urllib.error.HTTPError(
+                            req.full_url, resp.status, "non-200", {}, None
+                        )
+                    data = json.loads(resp.read())
+                out = {}
+                for i, r in enumerate(data.get("results", [])):
+                    out[batch_qs[i]] = float(r["elevation"])
+                return out
+
+            def _fetch_opentopodata(batch_qs):
+                """GET opentopodata; returns {(lat_q,lon_q): elev_m} or raises."""
+                loc_str = "|".join(
+                    f"{lq / 1e4},{oq / 1e4}" for lq, oq in batch_qs
+                )
+                url = (
+                    f"https://api.opentopodata.org/v1/srtm30m"
+                    f"?locations={urllib.request.quote(loc_str, safe=',|.')}"
+                )
+                req = urllib.request.Request(url, method="GET")
+                with urllib.request.urlopen(req, timeout=15) as resp:
+                    if resp.status != 200:
+                        raise urllib.error.HTTPError(
+                            req.full_url, resp.status, "non-200", {}, None
+                        )
+                    data = json.loads(resp.read())
+                out = {}
+                for i, r in enumerate(data.get("results", [])):
+                    elev = r.get("elevation")
+                    if elev is not None:
+                        out[batch_qs[i]] = float(elev)
+                return out
+
+            for batch_start in range(0, len(miss_qs), _BATCH):
+                batch = miss_qs[batch_start: batch_start + _BATCH]
+                try:
+                    batch_result = _fetch_open_elevation(batch)
+                except Exception as exc:
+                    Domoticz.Debug(
+                        f"Elevation: open-elevation failed ({exc!r}), trying opentopodata"
+                    )
+                    try:
+                        batch_result = _fetch_opentopodata(batch)
+                    except Exception as exc2:
+                        Domoticz.Error(
+                            f"Elevation: both upstream services failed for batch"
+                            f" of {len(batch)} point(s):"
+                            f" open-elevation: {exc!r}; opentopodata: {exc2!r}"
+                        )
+                        batch_result = {}
+                fetched.update(batch_result)
+
+            # Persist fetched samples
+            if fetched and db is not None:
+                now_ts = int(time.time())
+                try:
+                    with self._msgdb_lock:
+                        self._msgdb.executemany(
+                            "INSERT OR REPLACE INTO elevation_cache"
+                            " (lat_q, lon_q, elev_m, last_used) VALUES (?,?,?,?)",
+                            [
+                                (lat_q, lon_q, elev_m, now_ts)
+                                for (lat_q, lon_q), elev_m in fetched.items()
+                            ],
+                        )
+                        self._msgdb.commit()
+                except Exception as exc:
+                    Domoticz.Error(
+                        f"Elevation cache write failed (non-fatal): {exc!r}"
+                    )
+
+            # Fill misses
+            for q, idxs in bucket_to_idxs.items():
+                if q not in cached_elev and q in fetched:
+                    for i in idxs:
+                        results[i] = fetched[q]
+
+        return results
+
+    def _elev_prune(self):
+        """LRU-evict elevation_cache rows beyond _ELEV_PRUNE_CAP.
+
+        Keeps the _ELEV_PRUNE_CAP most-recently-used rows; deletes the rest.
+        Never raises into callers.
+        """
+        if self._msgdb is None:
+            return
+        try:
+            with self._msgdb_lock:
+                self._msgdb.execute(
+                    "DELETE FROM elevation_cache"
+                    " WHERE rowid NOT IN ("
+                    "   SELECT rowid FROM elevation_cache"
+                    "   ORDER BY last_used DESC"
+                    "   LIMIT ?"
+                    ")",
+                    (self._ELEV_PRUNE_CAP,),
+                )
+                self._msgdb.commit()
+        except Exception as exc:
+            Domoticz.Error(f"Elevation cache prune failed (non-fatal): {exc!r}")
+
+    # ── Time-series analytics helpers ─────────────────────────────────────────
+
+    def _ts_ingest(self, src: str, *, node_key: str = None,
+                   rssi=None, snr=None, noise=None, path_len=None):
+        """Insert one radio sample into ts_radio.
+
+        Inserts immediately — SQLite WAL mode handles concurrent writes at this
+        frequency without batching.  Marks all radio-related analytics panels
+        dirty so cached query results are invalidated.
+
+        Never raises into callers.
+        """
+        if self._msgdb is None:
+            return
+        try:
+            ts = int(time.time())
+            nk = node_key or "unknown"
+            rssi_v  = int(rssi)    if rssi  is not None else None
+            snr_v   = float(snr)   if snr   is not None else None
+            noise_v = int(noise)   if noise is not None else None
+            pl_v    = int(path_len) if path_len is not None else None
+            with self._msgdb_lock:
+                self._msgdb.execute(
+                    "INSERT INTO ts_radio (ts, node_key, rssi, snr, noise, path_len, src)"
+                    " VALUES (?,?,?,?,?,?,?)",
+                    (ts, nk, rssi_v, snr_v, noise_v, pl_v, src),
+                )
+                self._msgdb.commit()
+            self._ts_dirty_panels.update({"rssi", "snr", "noise"})
+        except Exception as exc:
+            Domoticz.Debug(f"_ts_ingest failed (non-fatal): {exc!r}")
+
+    def _ts_packets_add(self, now_ts: int, drx: int, dtx: int,
+                        flood_drx: int = 0, flood_dtx: int = 0,
+                        direct_drx: int = 0, direct_dtx: int = 0):
+        """Upsert the current-minute row in ts_packets_min and the current-hour
+        row in ts_packets_hourly in a single transaction.
+
+        All delta arguments should be non-negative counters.  Wrap-around-safe
+        deltas are computed by the caller (_handle_self_stats).
+        Never raises into callers.
+        """
+        if self._msgdb is None:
+            return
+        try:
+            min_ts  = now_ts - (now_ts % 60)
+            hour_ts = now_ts - (now_ts % 3600)
+            with self._msgdb_lock:
+                self._msgdb.execute(
+                    "INSERT INTO ts_packets_min (ts, rx_count, tx_count)"
+                    " VALUES (?,?,?)"
+                    " ON CONFLICT(ts) DO UPDATE SET"
+                    "   rx_count = rx_count + excluded.rx_count,"
+                    "   tx_count = tx_count + excluded.tx_count",
+                    (min_ts, max(0, drx), max(0, dtx)),
+                )
+                self._msgdb.execute(
+                    "INSERT INTO ts_packets_hourly"
+                    " (hour_ts, rx_count, tx_count, flood_rx, flood_tx, direct_rx, direct_tx)"
+                    " VALUES (?,?,?,?,?,?,?)"
+                    " ON CONFLICT(hour_ts) DO UPDATE SET"
+                    "   rx_count  = rx_count  + excluded.rx_count,"
+                    "   tx_count  = tx_count  + excluded.tx_count,"
+                    "   flood_rx  = flood_rx  + excluded.flood_rx,"
+                    "   flood_tx  = flood_tx  + excluded.flood_tx,"
+                    "   direct_rx = direct_rx + excluded.direct_rx,"
+                    "   direct_tx = direct_tx + excluded.direct_tx",
+                    (hour_ts,
+                     max(0, drx), max(0, dtx),
+                     max(0, flood_drx), max(0, flood_dtx),
+                     max(0, direct_drx), max(0, direct_dtx)),
+                )
+                self._msgdb.commit()
+            self._ts_dirty_panels.update({"packets", "hourly"})
+        except Exception as exc:
+            Domoticz.Debug(f"_ts_packets_add failed (non-fatal): {exc!r}")
+
+    def _ts_relay_observed(self, hex_key: str, name: str = None):
+        """Bump count and update last_seen for a 2-char hex relay token.
+
+        Updates name only if the provided name is non-empty and different from
+        the stored one.  Never raises into callers.
+        """
+        if self._msgdb is None:
+            return
+        if not hex_key or len(hex_key) != 2:
+            return
+        try:
+            ts = int(time.time())
+            with self._msgdb_lock:
+                self._msgdb.execute(
+                    "INSERT INTO ts_relay_keys (hex_key, name, last_seen, count)"
+                    " VALUES (?,?,?,1)"
+                    " ON CONFLICT(hex_key) DO UPDATE SET"
+                    "   last_seen = excluded.last_seen,"
+                    "   count = count + 1,"
+                    "   name = CASE"
+                    "     WHEN COALESCE(excluded.name, '') != ''"
+                    "      AND COALESCE(excluded.name, '') != COALESCE(ts_relay_keys.name, '')"
+                    "     THEN excluded.name"
+                    "     ELSE ts_relay_keys.name"
+                    "   END",
+                    (hex_key.lower(), name or None, ts),
+                )
+                self._msgdb.commit()
+            self._ts_dirty_panels.add("relays")
+        except Exception as exc:
+            Domoticz.Debug(f"_ts_relay_observed failed (non-fatal): {exc!r}")
+
+    def _ts_hops_record(self, ts: int, hops):
+        """Append one row to ts_hops.
+
+        Skips if hops is None, negative, or equals HOPS_SENTINEL.
+        Never raises into callers.
+        """
+        if self._msgdb is None:
+            return
+        if hops is None:
+            return
+        try:
+            hops_i = int(hops)
+        except (TypeError, ValueError):
+            return
+        if hops_i < 0 or hops_i == HOPS_SENTINEL:
+            return
+        try:
+            with self._msgdb_lock:
+                self._msgdb.execute(
+                    "INSERT INTO ts_hops (ts, hops) VALUES (?,?)",
+                    (int(ts), hops_i),
+                )
+                self._msgdb.commit()
+            self._ts_dirty_panels.add("hops")
+        except Exception as exc:
+            Domoticz.Debug(f"_ts_hops_record failed (non-fatal): {exc!r}")
+
+    def _ts_prune(self):
+        """Delete rows older than each table's retention window.
+
+        Schedules:
+          ts_radio:         14 days
+          ts_packets_min:   48 hours
+          ts_hops:          14 days
+          ts_relay_keys:    30 days (only rows with count < 100)
+          ts_packets_hourly: kept indefinitely (small table)
+        Never raises into callers.
+        """
+        if self._msgdb is None:
+            return
+        try:
+            now = int(time.time())
+            cutoffs = {
+                "ts_radio":      now - 14 * 86400,
+                "ts_packets_min": now - 48 * 3600,
+                "ts_hops":       now - 14 * 86400,
+            }
+            with self._msgdb_lock:
+                for tbl, cutoff in cutoffs.items():
+                    self._msgdb.execute(
+                        f"DELETE FROM {tbl} WHERE ts < ?", (cutoff,)
+                    )
+                relay_cutoff = now - 30 * 86400
+                self._msgdb.execute(
+                    "DELETE FROM ts_relay_keys"
+                    " WHERE last_seen < ? AND count < 100",
+                    (relay_cutoff,),
+                )
+                self._msgdb.commit()
+        except Exception as exc:
+            Domoticz.Debug(f"_ts_prune failed (non-fatal): {exc!r}")
+
+    # ── Analytics query helpers ───────────────────────────────────────────────
+
+    # Default bucket sizes (seconds) keyed by range upper bound (seconds).
+    # Chosen so charts have ~100–300 data points.
+    _TS_BUCKET_TABLE = [
+        (3  * 3600,  60),        # <= 3 h  -> 1 min buckets
+        (6  * 3600,  120),       # <= 6 h  -> 2 min buckets
+        (12 * 3600,  300),       # <= 12 h -> 5 min buckets
+        (24 * 3600,  600),       # <= 24 h -> 10 min buckets
+        (48 * 3600,  1200),      # <= 48 h -> 20 min buckets
+        (7  * 86400, 3600),      # <= 7 d  -> 1 h buckets
+    ]
+    # Hard cap on the analytics range accepted from the dashboard.
+    _TS_MAX_RANGE_S = 30 * 86400  # 30 days
+
+    @staticmethod
+    def _ts_default_bucket(range_s: int) -> int:
+        """Return a sensible default bucket size for the given time range."""
+        for upper, bucket in BasePlugin._TS_BUCKET_TABLE:
+            if range_s <= upper:
+                return bucket
+        return 3600  # > 7 d: use 1 h
+
+    def _q_rssi_snr(self, panel: str, t_from: int, t_to: int,
+                    bucket_s: int, nodes_tuple: tuple) -> dict:
+        """Return per-node time-series for the rssi or snr panel.
+
+        Shape:
+          {
+            "series": [
+              {"node": <key>, "data": [[<bucket_ts>, <avg_value>], ...]},
+              ...
+            ]
+          }
+        Only returns nodes whose series is non-empty within the range.
+        Filtered to nodes_tuple when non-empty.
+        """
+        col = "rssi" if panel == "rssi" else "snr"
+        if self._msgdb is None:
+            return {"series": []}
+        try:
+            where_nodes = ""
+            if nodes_tuple:
+                placeholders = ",".join("?" * len(nodes_tuple))
+                where_nodes = f" AND node_key IN ({placeholders})"
+            sql = (
+                f"SELECT node_key,"
+                f" (ts / ? * ?) AS bucket,"
+                f" AVG({col}) AS val"
+                f" FROM ts_radio"
+                f" WHERE ts >= ? AND ts < ? AND {col} IS NOT NULL"
+                f"{where_nodes}"
+                f" GROUP BY node_key, bucket"
+                f" ORDER BY node_key, bucket"
+            )
+            params_ordered = [bucket_s, bucket_s, t_from, t_to] + (list(nodes_tuple) if nodes_tuple else [])
+            with self._msgdb_lock:
+                rows = self._msgdb.execute(sql, params_ordered).fetchall()
+            by_node: dict = {}
+            for node_key, bucket, val in rows:
+                by_node.setdefault(node_key, []).append([bucket, round(val, 2) if val is not None else None])
+            series = [{"node": k, "data": v} for k, v in sorted(by_node.items())]
+            return {"series": series}
+        except Exception as exc:
+            Domoticz.Debug(f"_q_rssi_snr({panel}) failed (non-fatal): {exc!r}")
+            return {"series": []}
+
+    def _q_noise(self, panel: str, t_from: int, t_to: int,
+                 bucket_s: int, nodes_tuple: tuple) -> dict:
+        """Return self-node noise-floor time-series.
+
+        Shape:
+          {
+            "series": [
+              {"node": "self", "data": [[<bucket_ts>, <avg_noise>], ...]},
+            ]
+          }
+        """
+        if self._msgdb is None:
+            return {"series": []}
+        try:
+            sql = (
+                "SELECT (ts / ? * ?) AS bucket, AVG(noise) AS val"
+                " FROM ts_radio"
+                " WHERE ts >= ? AND ts < ? AND noise IS NOT NULL"
+                " GROUP BY bucket"
+                " ORDER BY bucket"
+            )
+            with self._msgdb_lock:
+                rows = self._msgdb.execute(sql, (bucket_s, bucket_s, t_from, t_to)).fetchall()
+            data = [[bucket, round(val, 2) if val is not None else None] for bucket, val in rows]
+            return {"series": [{"node": "self", "data": data}] if data else []}
+        except Exception as exc:
+            Domoticz.Debug(f"_q_noise failed (non-fatal): {exc!r}")
+            return {"series": []}
+
+    def _q_packets(self, panel: str, t_from: int, t_to: int,
+                   bucket_s: int, nodes_tuple: tuple) -> dict:
+        """Return rx+tx packet volume time-series (per-minute table, bucketed).
+
+        Shape:
+          {
+            "series": [
+              {"name": "rx", "data": [[<bucket_ts>, <sum>], ...]},
+              {"name": "tx", "data": [[<bucket_ts>, <sum>], ...]},
+            ]
+          }
+        """
+        if self._msgdb is None:
+            return {"series": []}
+        try:
+            sql = (
+                "SELECT (ts / ? * ?) AS bucket,"
+                " SUM(rx_count) AS rx, SUM(tx_count) AS tx"
+                " FROM ts_packets_min"
+                " WHERE ts >= ? AND ts < ?"
+                " GROUP BY bucket"
+                " ORDER BY bucket"
+            )
+            with self._msgdb_lock:
+                rows = self._msgdb.execute(sql, (bucket_s, bucket_s, t_from, t_to)).fetchall()
+            rx_data = [[b, r] for b, r, _ in rows]
+            tx_data = [[b, t] for b, _, t in rows]
+            return {"series": [{"name": "rx", "data": rx_data},
+                                {"name": "tx", "data": tx_data}]}
+        except Exception as exc:
+            Domoticz.Debug(f"_q_packets failed (non-fatal): {exc!r}")
+            return {"series": []}
+
+    def _q_packets_hourly(self, panel: str, t_from: int, t_to: int,
+                          bucket_s: int, nodes_tuple: tuple) -> dict:
+        """Return all hourly packet counter rows in time order.
+
+        Shape:
+          {
+            "rows": [
+              {"ts": <hour_ts>, "rx": <int>, "tx": <int>,
+               "flood_rx": <int>, "flood_tx": <int>,
+               "direct_rx": <int>, "direct_tx": <int>},
+              ...
+            ]
+          }
+        """
+        if self._msgdb is None:
+            return {"rows": []}
+        try:
+            sql = (
+                "SELECT hour_ts, rx_count, tx_count,"
+                " flood_rx, flood_tx, direct_rx, direct_tx"
+                " FROM ts_packets_hourly"
+                " WHERE hour_ts >= ? AND hour_ts < ?"
+                " ORDER BY hour_ts"
+            )
+            with self._msgdb_lock:
+                rows = self._msgdb.execute(sql, (t_from, t_to)).fetchall()
+            result = [
+                {"ts": ts, "rx": rx, "tx": tx,
+                 "flood_rx": frx, "flood_tx": ftx,
+                 "direct_rx": drx, "direct_tx": dtx}
+                for ts, rx, tx, frx, ftx, drx, dtx in rows
+            ]
+            return {"rows": result}
+        except Exception as exc:
+            Domoticz.Debug(f"_q_packets_hourly failed (non-fatal): {exc!r}")
+            return {"rows": []}
+
+    def _q_msg_per_channel(self, panel: str, t_from: int, t_to: int,
+                           bucket_s: int, nodes_tuple: tuple) -> dict:
+        """Return message count per channel from the messages table.
+
+        Excludes chan='P' (private/DM messages) so only channel traffic is
+        counted.  Uses epoch TEXT column with strftime comparison.
+
+        Shape:
+          {
+            "rows": [{"chan": <str>, "count": <int>}, ...]
+          }
+        sorted by count descending.
+        """
+        if self._msgdb is None:
+            return {"rows": []}
+        try:
+            t_from_str = time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime(t_from))
+            t_to_str   = time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime(t_to))
+            sql = (
+                "SELECT chan, COUNT(*) AS cnt"
+                " FROM messages"
+                " WHERE chan != 'P'"
+                " AND epoch >= ? AND epoch < ?"
+                " GROUP BY chan"
+                " ORDER BY cnt DESC"
+            )
+            with self._msgdb_lock:
+                rows = self._msgdb.execute(sql, (t_from_str, t_to_str)).fetchall()
+            return {"rows": [{"chan": chan, "count": cnt} for chan, cnt in rows]}
+        except Exception as exc:
+            Domoticz.Debug(f"_q_msg_per_channel failed (non-fatal): {exc!r}")
+            return {"rows": []}
+
+    def _q_hop_histogram(self, panel: str, t_from: int, t_to: int,
+                         bucket_s: int, nodes_tuple: tuple) -> dict:
+        """Return hop-count histogram within the time range.
+
+        Shape:
+          {
+            "rows": [{"hops": <int>, "count": <int>}, ...]
+          }
+        sorted by hops ascending.
+        """
+        if self._msgdb is None:
+            return {"rows": []}
+        try:
+            sql = (
+                "SELECT hops, COUNT(*) AS cnt"
+                " FROM ts_hops"
+                " WHERE ts >= ? AND ts < ?"
+                " GROUP BY hops"
+                " ORDER BY hops"
+            )
+            with self._msgdb_lock:
+                rows = self._msgdb.execute(sql, (t_from, t_to)).fetchall()
+            return {"rows": [{"hops": h, "count": c} for h, c in rows]}
+        except Exception as exc:
+            Domoticz.Debug(f"_q_hop_histogram failed (non-fatal): {exc!r}")
+            return {"rows": []}
+
+    def _q_top_relays(self, panel: str, t_from: int, t_to: int,
+                      bucket_s: int, nodes_tuple: tuple) -> dict:
+        """Return relay-key tallies ordered by count descending.
+
+        nodes_tuple[0] is treated as a limit (int) when provided; defaults to 20.
+
+        Shape:
+          {
+            "rows": [{"hex": <str>, "name": <str|null>, "count": <int>,
+                      "last_seen": <int>}, ...]
+          }
+        """
+        if self._msgdb is None:
+            return {"rows": []}
+        try:
+            limit = int(nodes_tuple[0]) if nodes_tuple else 20
+            sql = (
+                "SELECT hex_key, name, count, last_seen"
+                " FROM ts_relay_keys"
+                " ORDER BY count DESC"
+                " LIMIT ?"
+            )
+            with self._msgdb_lock:
+                rows = self._msgdb.execute(sql, (limit,)).fetchall()
+            return {"rows": [{"hex": h, "name": n, "count": c, "last_seen": ls}
+                              for h, n, c, ls in rows]}
+        except Exception as exc:
+            Domoticz.Debug(f"_q_top_relays failed (non-fatal): {exc!r}")
+            return {"rows": []}
+
+    # Dispatch table for analytics panels.
+    _ANALYTICS_PANELS = {
+        "rssi":     "_q_rssi_snr",
+        "snr":      "_q_rssi_snr",
+        "noise":    "_q_noise",
+        "packets":  "_q_packets",
+        "channels": "_q_msg_per_channel",
+        "hourly":   "_q_packets_hourly",
+        "relays":   "_q_top_relays",
+        "hops":     "_q_hop_histogram",
+    }
+
+    def _handle_analytics_query(self, panel: str, t_from, t_to,
+                                 bucket_s=None,
+                                 nodes: "list | None" = None) -> dict:
+        """Dispatch an analytics query and return a result dict for the dashboard.
+
+        Validation:
+        - panel must be a known key in _ANALYTICS_PANELS;
+        - t_from and t_to must be finite numerics;
+        - t_to - t_from in (0, _TS_MAX_RANGE_S] (30 days);
+        - bucket_s, if provided, must be a positive integer ≤ 90 days.
+
+        Cache:
+        - Results are NOT memoized across calls; each call re-queries SQLite.
+          The cheap dirty-flag set (_ts_dirty_panels) is used by ingestion to
+          signal "fresh data landed since the last query" so callers may
+          decide to refetch — it is not an LRU cache. Add @functools.lru_cache
+          here if profiling shows repeat-query overhead.
+
+        Returns:
+        - {ok: True, panel, t_from, t_to, bucket_s, ...payload}, or
+        - {ok: False, error: <str>} on validation or query failure.
+        """
+        if panel not in self._ANALYTICS_PANELS:
+            return {"ok": False, "error": "unknown panel"}
+        if not isinstance(t_from, (int, float)) or not isinstance(t_to, (int, float)):
+            return {"ok": False, "error": "timestamps must be numeric"}
+        if math.isnan(t_from) or math.isnan(t_to) or math.isinf(t_from) or math.isinf(t_to):
+            return {"ok": False, "error": "timestamps cannot be NaN or Infinity"}
+        t_from = int(t_from); t_to = int(t_to)
+        range_s = t_to - t_from
+        if range_s <= 0 or range_s > self._TS_MAX_RANGE_S:
+            return {"ok": False, "error": "range out of bounds (max 30 days)"}
+        if bucket_s is not None:
+            if not isinstance(bucket_s, int) or isinstance(bucket_s, bool) or bucket_s <= 0 or bucket_s > 86400 * 90:
+                return {"ok": False, "error": "bucket_s must be a positive integer ≤ 90 days"}
+        else:
+            bucket_s = self._ts_default_bucket(range_s)
+        nodes_tuple = tuple(nodes) if nodes else ()
+        fn_name = self._ANALYTICS_PANELS[panel]
+        fn = getattr(self, fn_name)
+        try:
+            payload = fn(panel, t_from, t_to, bucket_s, nodes_tuple)
+        except Exception as exc:
+            Domoticz.Debug(f"_handle_analytics_query({panel}) failed: {exc!r}")
+            return {"ok": False, "error": str(exc)}
+        self._ts_dirty_panels.discard(panel)
+        result = {"ok": True, "panel": panel,
+                  "t_from": t_from, "t_to": t_to, "bucket_s": bucket_s}
+        result.update(payload)
+        return result
 
     def _msg_store_add(self, chan: str, sender: str, body: str, epoch: int,
                        bad: bool = False, snr=None, hops=None, rssi=None,
@@ -1261,6 +2085,104 @@ class BasePlugin:
             if not cmd:
                 self._push("cmd_result", {"ok": False, "target": "unknown", "result": "empty cmd", "id": req_id})
                 return
+
+            # Elevation proxy: local DB + HTTP, no MC connection required.
+            if cmd == "analytics":
+                _panel   = str(payload.get("panel", "")).strip()
+                _t_from  = payload.get("from")
+                _t_to    = payload.get("to")
+                _bucket  = payload.get("bucket")
+                _nodes   = payload.get("nodes")
+                try:
+                    _t_from = int(_t_from)
+                    _t_to   = int(_t_to)
+                except (TypeError, ValueError):
+                    self._push("cmd_result", {
+                        "ok": False, "id": req_id,
+                        "error": "from and to must be integer timestamps",
+                    })
+                    return
+                if _bucket is not None:
+                    try:
+                        _bucket = int(_bucket)
+                    except (TypeError, ValueError):
+                        self._push("cmd_result", {"ok": False, "id": req_id, "error": "bucket must be a positive integer or null"})
+                        return
+                if _nodes is not None:
+                    if not isinstance(_nodes, list):
+                        self._push("cmd_result", {"ok": False, "id": req_id, "error": "nodes must be a list of strings or null"})
+                        return
+                    for _n in _nodes:
+                        if not isinstance(_n, str):
+                            self._push("cmd_result", {"ok": False, "id": req_id, "error": "nodes must be a list of strings or null"})
+                            return
+                result = self._handle_analytics_query(
+                    _panel, _t_from, _t_to,
+                    bucket_s=_bucket, nodes=_nodes,
+                )
+                result["id"] = req_id
+                self._push("cmd_result", result)
+                return
+
+            if cmd == "elevation":
+                raw_pts = payload.get("points", [])
+                if not isinstance(raw_pts, list) or len(raw_pts) > 4096:
+                    self._push("cmd_result", {
+                        "ok": False, "id": req_id,
+                        "error": "too many points",
+                    })
+                    return
+                loop = self._worker_loop
+                if loop is None:
+                    self._push("cmd_result", {
+                        "ok": False, "id": req_id,
+                        "error": "worker not running",
+                    })
+                    return
+                if not raw_pts:
+                    self._push("cmd_result", {"ok": True, "id": req_id, "elevations": []})
+                    return
+                points = []
+                try:
+                    for p in raw_pts:
+                        if not isinstance(p, (list, tuple)) or len(p) < 2:
+                            raise ValueError("point must be [lat, lon]")
+                        lat, lon = float(p[0]), float(p[1])
+                        if not (-90.0 <= lat <= 90.0 and -180.0 <= lon <= 180.0):
+                            raise ValueError("point out of bounds")
+                        points.append((lat, lon))
+                except (ValueError, TypeError) as exc:
+                    self._push("cmd_result", {
+                        "ok": False, "id": req_id,
+                        "error": f"invalid point: {exc}",
+                    })
+                    return
+
+                async def _run_elevation(pts, rid):
+                    try:
+                        elevs = await asyncio.get_event_loop().run_in_executor(
+                            None, self._elevation_lookup, pts
+                        )
+                        self._push("cmd_result", {
+                            "ok": True, "id": rid,
+                            "elevations": elevs,
+                        })
+                    except Exception as exc:
+                        Domoticz.Error(f"elevation cmd failed: {exc!r}")
+                        self._push("cmd_result", {
+                            "ok": False, "id": rid,
+                            "error": str(exc),
+                        })
+
+                try:
+                    asyncio.run_coroutine_threadsafe(_run_elevation(points, req_id), loop)
+                except Exception as exc:
+                    self._push("cmd_result", {
+                        "ok": False, "id": req_id,
+                        "error": str(exc),
+                    })
+                return
+
             if self._handle_local_only_command(cmd):
                 self._push("cmd_result", {"ok": True, "target": target, "result": "applied", "id": req_id})
                 return
@@ -1348,6 +2270,12 @@ class BasePlugin:
         _deviceMap.favorites array on click, so it doesn't need confirmation
         roundtripping through the queue.
         """
+        if text.startswith("!forget_heard "):
+            return self._handle_forget_heard(text[len("!forget_heard "):])
+        if text.startswith("!purge_heard "):
+            return self._handle_purge_heard(text[len("!purge_heard "):])
+        if text.startswith("!purge_heard_count "):
+            return self._handle_purge_heard_count(text[len("!purge_heard_count "):])
         if not text.startswith("!favorite "):
             return False
         try:
@@ -1373,6 +2301,146 @@ class BasePlugin:
         self._save_favorites()
         self._write_device_map()
         Domoticz.Debug(f"Favorite {action}: {name}")
+        return True
+
+    def _demote_contact_to_heard(self, name: str):
+        """Demote a just-removed contact into the heard-nodes store so its
+        last-known metadata is not lost.  Call this BEFORE clearing the
+        per-contact dicts so data is still available.
+
+        Merges with an existing heard entry if one was present (preserves
+        first_heard / count).  Removes the pubkey from _known_pubkeys so the
+        worker's ADVERT gate lets future broadcasts through (for the heard
+        store, not as a contact).  Sets _heard_dirty / _ws_heard_dirty.
+
+        Caller must NOT hold _rx_log_lock."""
+        pk = self._node_pubkey.get(name, "")
+        if not pk:
+            return
+        h = {
+            "pubkey":      pk,
+            "name":        name,
+            "type":        int(self._node_types.get(name, 1)),
+            "first_heard": int(self._node_last_advert.get(name, 0) or time.time()),
+            "last_heard":  int(self._node_last_advert.get(name, 0) or time.time()),
+            "count":       0,
+            "lat":         (self._node_locations.get(name) or {}).get("lat") or 0.0,
+            "lon":         (self._node_locations.get(name) or {}).get("lon") or 0.0,
+        }
+        sig = self._contact_sig.get(pk[:12]) or {}
+        h["snr"]      = sig.get("snr")
+        h["rssi"]     = sig.get("rssi")
+        h["path_len"] = sig.get("path_len", -1)
+        with self._rx_log_lock:
+            existing = self._heard_nodes.get(pk)
+            if existing:
+                # Preserve accumulator fields from the existing entry.
+                # All other fields from the freshest contact state win.
+                for k, v in h.items():
+                    if k in ("first_heard", "count"):
+                        continue  # never regress these accumulators
+                    if v not in (None, "", 0, 0.0):
+                        existing[k] = v
+            else:
+                self._heard_nodes[pk] = h
+            self._known_pubkeys.discard(pk)
+        self._heard_dirty = True
+        self._ws_heard_dirty = True
+        self._write_heard()
+        Domoticz.Log(f"Contact '{name}' removed and demoted to heard nodes")
+
+    def _handle_purge_heard(self, arg: str) -> bool:
+        """Bulk-delete heard nodes whose last_heard age is older than the
+        supplied threshold in seconds.  Matches the per-node !forget_heard
+        semantics: removed pubkeys go into _heard_purged so a queued advert
+        from one of them does not resurrect the entry. Returns True (always
+        consumed). Nodes with no last_heard at all are also pruned — they
+        carry no useful timestamp and would never satisfy any age filter."""
+        try:
+            older_than_s = int(arg.strip())
+        except (ValueError, TypeError):
+            Domoticz.Log(f"!purge_heard: invalid seconds argument {arg!r}")
+            return True
+        if older_than_s <= 0:
+            Domoticz.Log("!purge_heard: seconds must be positive")
+            return True
+        cutoff = int(time.time()) - older_than_s
+        removed = 0
+        with self._rx_log_lock:
+            to_remove = [
+                pk for pk, h in self._heard_nodes.items()
+                if not h.get("last_heard") or int(h.get("last_heard") or 0) < cutoff
+            ]
+            for pk in to_remove:
+                self._heard_nodes.pop(pk, None)
+                self._heard_purged.add(pk)
+                removed += 1
+            if removed:
+                self._heard_dirty = True
+                self._ws_heard_dirty = True
+        if removed:
+            self._write_heard()
+            Domoticz.Log(f"!purge_heard: removed {removed} heard node(s) older than {older_than_s}s")
+        else:
+            Domoticz.Log(f"!purge_heard: no heard nodes older than {older_than_s}s")
+        return True
+
+    def _handle_purge_heard_count(self, arg: str) -> bool:
+        """Bulk-delete heard nodes whose advert count is strictly less than
+        the supplied threshold (so threshold=2 removes 0× and 1× entries).
+        Same purge semantics as !purge_heard: removed pubkeys go into
+        _heard_purged so a queued advert does not resurrect them.
+        Returns True (always consumed)."""
+        try:
+            threshold = int(arg.strip())
+        except (ValueError, TypeError):
+            Domoticz.Log(f"!purge_heard_count: invalid threshold {arg!r}")
+            return True
+        if threshold <= 0:
+            Domoticz.Log("!purge_heard_count: threshold must be positive")
+            return True
+        removed = 0
+        with self._rx_log_lock:
+            to_remove = [
+                pk for pk, h in self._heard_nodes.items()
+                if int(h.get("count") or 0) < threshold
+            ]
+            for pk in to_remove:
+                self._heard_nodes.pop(pk, None)
+                self._heard_purged.add(pk)
+                removed += 1
+            if removed:
+                self._heard_dirty = True
+                self._ws_heard_dirty = True
+        if removed:
+            self._write_heard()
+            Domoticz.Log(f"!purge_heard_count: removed {removed} heard node(s) with count < {threshold}")
+        else:
+            Domoticz.Log(f"!purge_heard_count: no heard nodes with count < {threshold}")
+        return True
+
+    def _handle_forget_heard(self, pubkey_or_prefix: str) -> bool:
+        """Permanently delete a heard node and add it to the purged set so
+        re-broadcasts from that node do not resurrect it.  Accepts a 12-hex
+        prefix or a full pubkey.  Returns True (always consumed)."""
+        prefix = pubkey_or_prefix.strip().lower()
+        if not prefix:
+            Domoticz.Log("!forget_heard: no pubkey specified")
+            return True
+        with self._rx_log_lock:
+            matched_pk = next(
+                (k for k in self._heard_nodes if k.lower().startswith(prefix)), None
+            )
+            if matched_pk:
+                self._heard_nodes.pop(matched_pk, None)
+                self._heard_purged.add(matched_pk)
+                self._heard_dirty = True
+                self._ws_heard_dirty = True
+                Domoticz.Log(f"Heard node {matched_pk[:12]} deleted and purged")
+            else:
+                Domoticz.Log(f"!forget_heard: no heard node matched prefix {prefix!r}")
+        if matched_pk:
+            self._write_heard()
         return True
 
     def _delete_node_devices(self, node_name: str):
@@ -1587,7 +2655,7 @@ class BasePlugin:
         if os.path.isdir(leaflet_src):
             try:
                 os.makedirs(leaflet_dst, exist_ok=True)
-                for fname in ("leaflet.js", "leaflet.css"):
+                for fname in ("leaflet.js", "leaflet.css", "leaflet-heat.js"):
                     s = os.path.join(leaflet_src, fname)
                     if os.path.isfile(s):
                         shutil.copy2(s, os.path.join(leaflet_dst, fname))
@@ -1702,6 +2770,12 @@ class BasePlugin:
                 # Per-contact query results (status / telemetry / neighbours)
                 # from req_* sync calls. None if never queried.
                 "query":         self._contact_query_results.get(node_name, {}),
+                # Outbound path for the topology polyline renderer.
+                # out_path: hex string of repeater hash bytes (e.g. "22a83b"),
+                # empty string when the path is direct / flood, or None when unknown.
+                # out_path_hash_mode: integer +1 offset (1=1-byte, 2=2-byte, 3=3-byte).
+                "out_path":           self._node_out_path.get(node_name, ""),
+                "out_path_hash_mode": self._node_out_path_hash_mode.get(node_name, 0),
             }
 
             # Fall back to the latest received signal (advert OR message) for
@@ -2189,6 +3263,11 @@ class BasePlugin:
             if isinstance(nodes, dict):
                 self._heard_nodes = nodes
                 Domoticz.Log(f"Loaded {len(nodes)} heard node(s) from meshcore_heard.json")
+            purged = data.get("purged") if isinstance(data, dict) else None
+            if isinstance(purged, list):
+                self._heard_purged = set(purged)
+                if purged:
+                    Domoticz.Log(f"Loaded {len(purged)} purged heard pubkey(s)")
         except Exception as exc:
             Domoticz.Error(f"Could not load meshcore_heard.json: {exc}")
 
@@ -2200,6 +3279,7 @@ class BasePlugin:
             payload = {
                 "written_at": int(time.time()),
                 "nodes": {k: dict(v) for k, v in self._heard_nodes.items()},
+                "purged": sorted(self._heard_purged),
             }
         return payload
 
@@ -2553,31 +3633,16 @@ class BasePlugin:
         except Exception as exc:
             Domoticz.Error(f"Worker: subscribe failed: {exc}")
 
-        # Catch up on anything the firmware queued while we were disconnected
-        # (or before we subscribed). _drain_push_events() logs how many it
-        # pulled, so the user can SEE the missed-message count on (re)connect.
-        try:
-            n_missed = await self._drain_push_events(mc)
-            if n_missed:
-                Domoticz.Log(f"Reconnect catch-up: received {n_missed} message(s) "
-                             f"that were queued while disconnected.")
-            else:
-                Domoticz.Log("Reconnect catch-up: no messages were missed.")
-        except Exception as exc:
-            Domoticz.Debug(f"Worker: connect-time drain error: {exc}")
-
-        # Keep draining on every MESSAGES_WAITING signal for the life of this
-        # connection. start_auto_message_fetching() also does one immediate
-        # get_msg() (harmless — the drain above already emptied the queue, and
-        # the _handle_message signature de-dup collapses any redelivery, so
-        # this no longer causes duplicate inbox entries). Re-armed on every
-        # reconnect (bound to this mc); mc.disconnect() tears it down.
-        try:
-            await mc.start_auto_message_fetching()
-        except Exception as exc:
-            Domoticz.Error(f"Worker: start_auto_message_fetching failed: {exc}")
-
         # ── Initial fetches ───────────────────────────────────────────────
+        # Order matters: contacts and channel names must populate
+        # self._prefix_to_name / self._channel_names BEFORE any queued
+        # message is drained, otherwise _handle_message has no resolution
+        # table and stores the raw 12-hex pubkey prefix as the sender. The
+        # queue is processed strictly in order on the main thread, so as
+        # long as we *enqueue* the contacts payload before the message
+        # drain enqueues the messages, resolution wins. That's why the
+        # firmware drain + start_auto_message_fetching now run LAST in
+        # this block.
         if mc.self_info:
             name = mc.self_info.get("name", "")
             if name:
@@ -2610,16 +3675,39 @@ class BasePlugin:
         except Exception as exc:
             Domoticz.Debug(f"Initial flood scope error: {exc}")
 
-        # Missed-message catch-up is handled by start_auto_message_fetching()
-        # above (immediate get_msg() + MESSAGES_WAITING drain loop); the
-        # _handle_message signature de-dup prevents the historical
-        # duplicate-inbox problem. _drain_push_events() is kept as a manual
-        # fallback but is no longer needed on the connect path.
-
         try:
             await self._poll_self_stats(mc)
         except Exception as exc:
             Domoticz.Debug(f"Initial self_stats error: {exc}")
+
+        # Catch up on anything the firmware queued while we were
+        # disconnected. Runs AFTER contacts/channels so that
+        # _handle_message can resolve pubkey prefixes to contact names —
+        # otherwise a DM that arrived while the plugin was offline is
+        # stored with the raw 12-hex prefix as its sender and a reply
+        # can't address the contact by name.
+        try:
+            n_missed = await self._drain_push_events(mc)
+            if n_missed:
+                Domoticz.Log(f"Reconnect catch-up: received {n_missed} message(s) "
+                             f"that were queued while disconnected.")
+            else:
+                Domoticz.Log("Reconnect catch-up: no messages were missed.")
+        except Exception as exc:
+            Domoticz.Debug(f"Worker: connect-time drain error: {exc}")
+
+        # Keep draining on every MESSAGES_WAITING signal for the life of
+        # this connection. start_auto_message_fetching() also does one
+        # immediate get_msg() (harmless — the drain above already emptied
+        # the queue, and the _handle_message signature de-dup collapses
+        # any redelivery, so this no longer causes duplicate inbox
+        # entries). Re-armed on every reconnect (bound to this mc);
+        # mc.disconnect() tears it down. Started LAST so its built-in
+        # immediate get_msg() also runs against a populated contacts map.
+        try:
+            await mc.start_auto_message_fetching()
+        except Exception as exc:
+            Domoticz.Error(f"Worker: start_auto_message_fetching failed: {exc}")
 
         # ── Serve loop ────────────────────────────────────────────────────
         # Wrapped in try/finally so the disconnect always runs — including
@@ -2627,10 +3715,12 @@ class BasePlugin:
         # serial_asyncio_fast's executor tasks (open/close) drain so the
         # default thread pool can shut down cleanly on plugin stop.
         try:
-            last_stats     = time.monotonic()
-            last_contacts  = time.monotonic()
-            last_msg_drain = time.monotonic()   # connect-time drain just ran
-            last_rx_write  = 0.0
+            last_stats      = time.monotonic()
+            last_contacts   = time.monotonic()
+            last_msg_drain  = time.monotonic()   # connect-time drain just ran
+            last_rx_write   = 0.0
+            last_elev_prune = time.monotonic()
+            last_ts_prune   = time.monotonic()
 
             while not self._stop_event.is_set():
                 stopped = await self._wait_or_stop(1.0)
@@ -2714,6 +3804,25 @@ class BasePlugin:
                 # Runs every loop iteration; _push_dirty_feeds coalesces to
                 # ≤1 push/sec/feed using per-feed last-push timestamps.
                 self._push_dirty_feeds()
+
+                # LRU eviction for the elevation cache (every 5 min).
+                if now - last_elev_prune >= self._ELEV_PRUNE_INTERVAL:
+                    last_elev_prune = now
+                    try:
+                        await asyncio.get_event_loop().run_in_executor(
+                            None, self._elev_prune
+                        )
+                    except Exception as exc:
+                        Domoticz.Debug(f"Periodic elev_prune error: {exc}")
+                # Prune old time-series rows (every 5 min, same cadence).
+                if now - last_ts_prune >= self._ELEV_PRUNE_INTERVAL:
+                    last_ts_prune = now
+                    try:
+                        await asyncio.get_event_loop().run_in_executor(
+                            None, self._ts_prune
+                        )
+                    except Exception as exc:
+                        Domoticz.Debug(f"Periodic ts_prune error: {exc}")
         finally:
             try:
                 self._write_heard()
@@ -2897,7 +4006,8 @@ class BasePlugin:
             # already contacts. If it's a contact, the contacts poll tracks
             # it — skip. If already heard, just refresh last_heard + signal.
             if (p.get("payload_typename") == "ADVERT" and adv_key
-                    and adv_key not in self._known_pubkeys):
+                    and adv_key not in self._known_pubkeys
+                    and adv_key not in self._heard_purged):
                 h = self._heard_nodes.get(adv_key)
                 if h is None:
                     h = {"pubkey": adv_key, "first_heard": t, "count": 0}
@@ -2944,6 +4054,30 @@ class BasePlugin:
                 dl.append({"t": t, "path": pp, "snr": snr})
                 if len(dl) > 8:
                     del dl[: len(dl) - 8]
+        # Time-series ingestion for analytics panels.
+        # Use adv_key for ADVERT frames; leave node_key=None for other types
+        # (we can't reliably identify the originating contact from the RX frame).
+        ts_src    = p.get("payload_typename", "rx").lower()
+        ts_nk     = None
+        ts_snr    = p.get("snr")
+        ts_rssi   = p.get("rssi")
+        ts_pl     = p.get("path_len")
+        if p.get("payload_typename") == "ADVERT":
+            ak = p.get("adv_key")
+            if ak:
+                ts_nk = ak[:12]
+            ts_src = "adv"
+        if ts_snr is not None or ts_rssi is not None:
+            self._ts_ingest(ts_src, node_key=ts_nk,
+                            rssi=ts_rssi, snr=ts_snr, path_len=ts_pl)
+        # Hop histogram from RX_LOG frames with a valid path_len.
+        if isinstance(ts_pl, int) and 0 <= ts_pl < HOPS_SENTINEL:
+            self._ts_hops_record(int(t), ts_pl)
+        # Relay-key tally: walk each 2-char hex byte of the path string.
+        if pp:
+            clean_path = re.sub(r"[^0-9a-fA-F]", "", pp).lower()
+            for i in range(0, len(clean_path) - 1, 2):
+                self._ts_relay_observed(clean_path[i:i + 2])
         self._rx_log_dirty = True
 
     async def _refresh_contacts(self, mc):
@@ -3971,6 +5105,9 @@ class BasePlugin:
                     "id": req_id,
                 }))
                 if ok:
+                    # Demote the contact into the heard store BEFORE clearing
+                    # local state so all metadata is still available.
+                    self._demote_contact_to_heard(name)
                     # Drop from local tracking so it disappears from the dashboard immediately
                     if name in self._contact_names:
                         self._contact_names.remove(name)
@@ -3981,6 +5118,8 @@ class BasePlugin:
                     self._contact_query_results.pop(name, None)
                     self._node_last_activity.pop(name, None)
                     self._node_locations.pop(name, None)
+                    self._node_out_path.pop(name, None)
+                    self._node_out_path_hash_mode.pop(name, None)
                     self._ws_devices_dirty = True
                     if name in self._favorites:
                         self._favorites.discard(name)
@@ -4270,6 +5409,14 @@ class BasePlugin:
                 if did is not None:
                     self._set(did, OFF_STATUS, 1, "On")
                 self._write_device_map()
+            # Ingest into analytics store when the advert carries signal data.
+            _adv_pk = ap.get("adv_key") or ap.get("pubkey") or ""
+            _adv_snr  = ap.get("snr") or ap.get("SNR")
+            _adv_rssi = ap.get("rssi")
+            if _adv_snr is not None or _adv_rssi is not None:
+                self._ts_ingest("adv",
+                                node_key=_adv_pk[:12] if _adv_pk else None,
+                                rssi=_adv_rssi, snr=_adv_snr)
         elif kind == "contacts":
             self._handle_contacts(item[1])
             # First contacts batch processed — bump heartbeat back to a
@@ -4480,6 +5627,14 @@ class BasePlugin:
             if self._self_name:
                 self._set(SELF_DID, OFF_STATUS, 0, "Off")
                 self._ws_devices_dirty = True
+            # Reset packet-delta baselines so the first sample after reconnect
+            # does not produce a spurious large delta.
+            self._ts_prev_pkt_recv     = None
+            self._ts_prev_pkt_sent     = None
+            self._ts_prev_pkt_flood_rx = None
+            self._ts_prev_pkt_flood_tx = None
+            self._ts_prev_pkt_dir_rx   = None
+            self._ts_prev_pkt_dir_tx   = None
         elif kind == "ack_result":
             self._handle_ack_result(item[1])
 
@@ -4510,6 +5665,11 @@ class BasePlugin:
                     self._heard_nodes.pop(pk, None)
                     self._heard_dirty = True
                     self._ws_heard_dirty = True
+            # If a previously-purged node has been re-added as a real contact,
+            # lift the purge so a future removal can demote it back to heard.
+            purge_lift = self._heard_purged & new_known
+            if purge_lift:
+                self._heard_purged -= purge_lift
 
         # Register any new contacts (non-self) in discovery order
         for contact in contacts.values():
@@ -4573,6 +5733,15 @@ class BasePlugin:
             if pk:
                 self._node_pubkey[node_name] = pk
                 self._node_did[node_name] = pk[:12]
+
+            # Store outbound path for topology routing.
+            # out_path is a hex string of 1-byte (or N-byte) hash tokens.
+            # out_path_hash_mode from the library is 0-based; we store it as
+            # +1 to match the dashboard convention used for device_info.
+            raw_path = contact.get("out_path", "") or ""
+            self._node_out_path[node_name] = str(raw_path)
+            raw_mode = contact.get("out_path_hash_mode", 0) or 0
+            self._node_out_path_hash_mode[node_name] = int(raw_mode) + 1
 
             self._ensure_node_devices(node_name)
             did = self._device_id_for(node_name)
@@ -4880,6 +6049,19 @@ class BasePlugin:
             rssi=_msg_rssi, path=_msg_path, ack=None, direction="in",
             peer_key=self._norm_peer_key(prefix),
         )
+        # Ingest signal data for analytics (only when we have a reliable sender id).
+        if prefix and (_msg_snr is not None or _msg_rssi is not None):
+            _ts_pl = _hops if (isinstance(_hops, int) and 0 <= _hops < HOPS_SENTINEL) else None
+            self._ts_ingest("msg", node_key=prefix[:12],
+                            snr=_msg_snr, rssi=_msg_rssi, path_len=_ts_pl)
+        # Record hop count.
+        if isinstance(_hops, int) and 0 <= _hops < HOPS_SENTINEL:
+            self._ts_hops_record(now_i, _hops)
+        # Relay-key tally from the embedded per-message path.
+        if _msg_path:
+            _clean = re.sub(r"[^0-9a-fA-F]", "", str(_msg_path)).lower()
+            for _i in range(0, len(_clean) - 1, 2):
+                self._ts_relay_observed(_clean[_i:_i + 2])
 
         # Persist private (DM) messages to the sender's per-contact Messages
         # device so a favourite's conversation history is never lost.
@@ -4949,6 +6131,14 @@ class BasePlugin:
                 now_ts = int(time.time())
                 # Record activity — used by _handle_contacts for online detection
                 self._node_last_activity[node_name] = now_ts
+                # Also advance last_advert so the dashboard's "Last Heard"
+                # reflects any heard activity (advert OR message), not just
+                # the periodic advert. This dict is what the device-map
+                # snapshot publishes as `last_advert` (see _build_device_map),
+                # and it is persisted via meshcore_devices.json so the value
+                # survives plugin restarts.
+                if now_ts > self._node_last_advert.get(node_name, 0):
+                    self._node_last_advert[node_name] = now_ts
 
                 # A message means the node is clearly reachable → mark online
                 self._set(did, OFF_STATUS, 1, "On")
@@ -5029,6 +6219,44 @@ class BasePlugin:
 
         # Last seen = now (we just got data from it)
         _upd(OFF_LASTSEEN, 0, time.strftime("%Y-%m-%d %H:%M:%S"))
+
+        # Analytics ingestion: radio sample for self node.
+        _s_rssi  = stats.get("last_rssi")
+        _s_snr   = stats.get("last_snr")
+        _s_noise = stats.get("noise_floor")
+        if _s_rssi is not None or _s_snr is not None:
+            self._ts_ingest("rx", node_key="self",
+                            rssi=_s_rssi, snr=_s_snr, noise=_s_noise)
+
+        # Analytics ingestion: packet counter deltas for self node.
+        _now_ts  = int(time.time())
+        _pkt_rx  = stats.get("recv")
+        _pkt_tx  = stats.get("sent")
+        _pkt_frx = stats.get("flood_rx")
+        _pkt_ftx = stats.get("flood_tx")
+        _pkt_drx = stats.get("direct_rx")
+        _pkt_dtx = stats.get("direct_tx")
+        if _pkt_rx is not None and _pkt_tx is not None:
+            def _wrap_delta(cur, prev):
+                if prev is None:
+                    return 0
+                d = cur - prev
+                return d if d >= 0 else cur  # wrap-around: treat as absolute gain
+
+            drx = _wrap_delta(_pkt_rx, self._ts_prev_pkt_recv)
+            dtx = _wrap_delta(_pkt_tx, self._ts_prev_pkt_sent)
+            dfrx = _wrap_delta(_pkt_frx, self._ts_prev_pkt_flood_rx) if _pkt_frx is not None else 0
+            dftx = _wrap_delta(_pkt_ftx, self._ts_prev_pkt_flood_tx) if _pkt_ftx is not None else 0
+            ddrx = _wrap_delta(_pkt_drx, self._ts_prev_pkt_dir_rx)  if _pkt_drx is not None else 0
+            ddtx = _wrap_delta(_pkt_dtx, self._ts_prev_pkt_dir_tx)  if _pkt_dtx is not None else 0
+            if drx or dtx:
+                self._ts_packets_add(_now_ts, drx, dtx, dfrx, dftx, ddrx, ddtx)
+            self._ts_prev_pkt_recv     = _pkt_rx
+            self._ts_prev_pkt_sent     = _pkt_tx
+            self._ts_prev_pkt_flood_rx = _pkt_frx
+            self._ts_prev_pkt_flood_tx = _pkt_ftx
+            self._ts_prev_pkt_dir_rx   = _pkt_drx
+            self._ts_prev_pkt_dir_tx   = _pkt_dtx
 
         Domoticz.Debug(f"Self stats updated: bat={bat_mv}mV uptime={uptime_s}s rssi={rssi} snr={stats.get('last_snr')}")
         self._write_device_map()

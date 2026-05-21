@@ -35,8 +35,54 @@ This plugin connects your **[MeshCore LoRa mesh nodes](https://meshcore.co.uk/)*
 
 ----------
 
-## 📊 Screenshot 
-![screenshot](https://github.com/galadril/Domoticz-MeshCore-Plugin/blob/main/docs/images/screenshot.png?raw=true "Screenshot")
+## 📊 Screenshots
+
+![Dashboard overview](docs/images/screenshot.png "Dashboard overview")
+
+### Gallery
+
+<table>
+  <tr>
+    <td align="center" width="33%">
+      <a href="docs/images/topology.png">
+        <img src="docs/images/topology.png" alt="Mesh topology" width="320"/>
+      </a>
+      <br/><sub><b>Mesh topology</b><br/>Map view with real multi-hop repeater paths</sub>
+    </td>
+    <td align="center" width="33%">
+      <a href="docs/images/history_charts.png">
+        <img src="docs/images/history_charts.png" alt="Historical analytics" width="320"/>
+      </a>
+      <br/><sub><b>Historical analytics</b><br/>Time-series side panel — RSSI, SNR, packets, hops…</sub>
+    </td>
+    <td align="center" width="33%">
+      <a href="docs/images/heard_nodes.png">
+        <img src="docs/images/heard_nodes.png" alt="Heard nodes" width="320"/>
+      </a>
+      <br/><sub><b>Heard nodes</b><br/>Non-contact adverts with bulk purge by age / hit count</sub>
+    </td>
+  </tr>
+  <tr>
+    <td align="center" width="33%">
+      <a href="docs/images/firehose.png">
+        <img src="docs/images/firehose.png" alt="RX firehose" width="320"/>
+      </a>
+      <br/><sub><b>RX firehose</b><br/>Live packet stream with type filters</sub>
+    </td>
+    <td align="center" width="33%">
+      <a href="docs/images/statistics.png">
+        <img src="docs/images/statistics.png" alt="Statistics" width="320"/>
+      </a>
+      <br/><sub><b>Statistics</b><br/>Lifetime totals and leaderboards</sub>
+    </td>
+    <td align="center" width="33%">
+      <a href="docs/images/packet_types.png">
+        <img src="docs/images/packet_types.png" alt="Packet types" width="320"/>
+      </a>
+      <br/><sub><b>Packet types</b><br/>Donut breakdown of RX payload types</sub>
+    </td>
+  </tr>
+</table>
 
 
 ## ⚙️ Installation
@@ -232,7 +278,7 @@ Enable **Install Custom Dashboard** in the plugin settings, then navigate to:
 Setup → More Options → Custom Pages → meshcore
 ```
 
-> 🌐 **Live demo:** [galadril.github.io/Domoticz-MeshCore-Plugin](https://galadril.github.io/Domoticz-MeshCore-Plugin/#)
+> 🌐 **Feature tour:** [galadril.github.io/Domoticz-MeshCore-Plugin](https://galadril.github.io/Domoticz-MeshCore-Plugin/)
 
 ### Dashboard features
 

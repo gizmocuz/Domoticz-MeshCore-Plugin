@@ -19,3 +19,6 @@ meshcore_messages.db-wal
 meshcore_messages.db-shm
 meshcore_debug.log
 meshcore_debug.log.1
+
+# Planning notes — local only, not part of source
+plans/
