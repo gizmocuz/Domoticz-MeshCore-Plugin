@@ -1,37 +1,36 @@
 
-
 # 📡 Domoticz-MeshCore-Plugin
 
-![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)  
+![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)
 🔗 _MeshCore LoRa Mesh integration for Domoticz Home Automation_
 
-This plugin connects your **[MeshCore LoRa mesh nodes](https://meshcore.co.uk/)** to [Domoticz](https://www.domoticz.com/), exposing node telemetry, message inbox, and send controls as native Domoticz devices — ready for automations, dashboards and scripting.
+This plugin connects your **[MeshCore LoRa mesh nodes](https://meshcore.io/)** to [Domoticz](https://www.domoticz.com/), exposing node telemetry, message inbox, and send controls as native Domoticz devices — ready for automations, dashboards and scripting.
 
 > 📻 Track battery, signal quality and uptime of your connected node · 📨 Send & receive LoRa messages · 🖥️ Custom real-time dashboard included!
+
+## 📖 Documentation
+
+**Full documentation, configuration reference, device tables, automation examples and troubleshooting:**
+👉 **[galadril.github.io/Domoticz-MeshCore-Plugin](https://galadril.github.io/Domoticz-MeshCore-Plugin/)**
 
 ----------
 
 ## ✨ Features
 
 - **Auto-discovery** – All contacts advertised by the mesh are automatically discovered and tracked
-- **Self-node Telemetry** – Battery, voltage, RSSI, SNR, noise floor, uptime, airtime and packet counters for the connected node
-- **Remote Node Status** – Online/offline detection, SNR, hops and last-seen timestamp for every discovered contact
-- **Online / Offline Detection** – Automatic status based on last advertisement age (8 h threshold) or path availability
+- **Self-node Telemetry** – Battery, voltage, RSSI, SNR, noise floor, uptime, airtime and packet counters
+- **Remote Node Status** – Online/offline detection, SNR, hops and last-seen for every discovered contact
 - **Message Inbox** – Every received LoRa message appears in Domoticz with sender, channel and timestamp
-- **Send Messages** – Send direct or channel messages straight from Domoticz or the dashboard
-- **Reply Support** – Reply to any message directly from the dashboard inbox
-- **Custom Dashboard** – Built-in real-time dark-mode dashboard with node cards, message history, filters and compose bar
-- **Node Map** – Interactive dark-themed map showing nodes with GPS coordinates (auto-hidden when no location data available)
-- **Signal Quality Bars** – Visual SNR indicator with color-coded bars (excellent/good/fair/poor)
-- **Uptime Formatting** – Human-readable uptime display (e.g. "2d 5h 12m" instead of raw minutes)
-- **Message Counters** – Track total messages received and sent as Domoticz devices for automations
-- **Emoji Picker** – Full WhatsApp-style emoji picker in the compose bar
-- **@Mention Highlighting** – `@name` mentions are highlighted in the message history
-- **Channel Support** – Send to named channels with automatic channel name resolution
-- **Push Events** – Incoming messages, advertisements and status responses are received in real time
-- **TCP Keep-alive** – Automatic TCP keep-alive to prevent NAT table expiry
-- **Stale Connection Detection** – Automatic reconnect when no push events are received for 10 minutes
-- **Auto-reconnect** – Worker thread reconnects automatically after connection loss
+- **Send Messages** – Send direct or channel messages from Domoticz or the dashboard
+- **Custom Dashboard** – Built-in real-time dark-mode dashboard with node cards, message history and compose bar
+- **Node Map** – Interactive Leaflet map with GPS coordinates, path lines and activity heatmap
+- **Historical Analytics** – RSSI, SNR, packet volume, top relay keys and per-channel stats (SQLite-backed, 30-day window)
+- **DM Threads** – Per-contact conversation history with delivery ACK markers
+- **Heard Nodes** – Track and filter non-contact adverts with bulk purge
+- **Coverage & LoS Tools** – Terrain-aware propagation map and per-link path-profile chart
+- **dzVents Bridge** – React to LoRa commands from any mesh node via dzVents Lua scripts
+- **Push Events** – Incoming messages, adverts and status responses in real time
+- **Auto-reconnect** – Automatic reconnect on connection loss; stale-link detection after 10 min
 
 ----------
 
@@ -39,298 +38,60 @@ This plugin connects your **[MeshCore LoRa mesh nodes](https://meshcore.co.uk/)*
 
 ![Dashboard overview](docs/images/screenshot.png "Dashboard overview")
 
-### Gallery
-
 <table>
   <tr>
     <td align="center" width="33%">
-      <a href="docs/images/topology.png">
-        <img src="docs/images/topology.png" alt="Mesh topology" width="320"/>
-      </a>
-      <br/><sub><b>Mesh topology</b><br/>Map view with real multi-hop repeater paths</sub>
+      <a href="docs/images/topology.png"><img src="docs/images/topology.png" alt="Mesh topology" width="320"/></a>
+      <br/><sub><b>Mesh topology</b> — multi-hop path lines</sub>
     </td>
     <td align="center" width="33%">
-      <a href="docs/images/history_charts.png">
-        <img src="docs/images/history_charts.png" alt="Historical analytics" width="320"/>
-      </a>
-      <br/><sub><b>Historical analytics</b><br/>Time-series side panel — RSSI, SNR, packets, hops…</sub>
+      <a href="docs/images/history_charts.png"><img src="docs/images/history_charts.png" alt="Historical analytics" width="320"/></a>
+      <br/><sub><b>Historical analytics</b> — RSSI, SNR, packets…</sub>
     </td>
     <td align="center" width="33%">
-      <a href="docs/images/heard_nodes.png">
-        <img src="docs/images/heard_nodes.png" alt="Heard nodes" width="320"/>
-      </a>
-      <br/><sub><b>Heard nodes</b><br/>Non-contact adverts with bulk purge by age / hit count</sub>
+      <a href="docs/images/heard_nodes.png"><img src="docs/images/heard_nodes.png" alt="Heard nodes" width="320"/></a>
+      <br/><sub><b>Heard nodes</b> — non-contact adverts</sub>
     </td>
   </tr>
   <tr>
     <td align="center" width="33%">
-      <a href="docs/images/firehose.png">
-        <img src="docs/images/firehose.png" alt="RX firehose" width="320"/>
-      </a>
-      <br/><sub><b>RX firehose</b><br/>Live packet stream with type filters</sub>
+      <a href="docs/images/firehose.png"><img src="docs/images/firehose.png" alt="RX firehose" width="320"/></a>
+      <br/><sub><b>RX firehose</b> — live packet stream</sub>
     </td>
     <td align="center" width="33%">
-      <a href="docs/images/statistics.png">
-        <img src="docs/images/statistics.png" alt="Statistics" width="320"/>
-      </a>
-      <br/><sub><b>Statistics</b><br/>Lifetime totals and leaderboards</sub>
+      <a href="docs/images/statistics.png"><img src="docs/images/statistics.png" alt="Statistics" width="320"/></a>
+      <br/><sub><b>Statistics</b> — totals and leaderboards</sub>
     </td>
     <td align="center" width="33%">
-      <a href="docs/images/packet_types.png">
-        <img src="docs/images/packet_types.png" alt="Packet types" width="320"/>
-      </a>
-      <br/><sub><b>Packet types</b><br/>Donut breakdown of RX payload types</sub>
+      <a href="docs/images/packet_types.png"><img src="docs/images/packet_types.png" alt="Packet types" width="320"/></a>
+      <br/><sub><b>Packet types</b> — donut breakdown</sub>
     </td>
   </tr>
 </table>
 
+----------
 
 ## ⚙️ Installation
 
-> ✅ Domoticz with Python plugin support & Python 3.6+ required
-
-### Prerequisites
-
-- Domoticz installed and running
-  - **Minimum version: build `17956` (`2025.2.17956`, 2026-05-16) or newer.** The custom dashboard uses the plugin↔frontend WebSocket channel (`Domoticz.WebSocketSend` / `onWebSocketMessage`), which was added in that build. Older Domoticz versions can run the plugin's devices but not the real-time dashboard.
-- A [MeshCore](https://meshcore.co.uk/) node reachable over TCP (companion app or radio bridge)
-  - Alternative firmware: [MeshcoMod](https://www.meshcomod.com) — a MeshCore-compatible fork for Heltec v3 / v4 boards that adds native WiFi, so the node can expose its TCP companion port directly without a USB bridge.
-
-### Setup
+> **Minimum: Domoticz build `17956` (2025.2.17956) · Python 3.6+ · `pip install meshcore`**
 
 ```sh
 cd ~/domoticz/plugins
-git clone https://github.com/galadril/Domoticz-MeshCore-Plugin.git MeshCore
+git clone https://github.com/galadril/Domoticz-MeshCore-Plugin.git MeshCore   # folder name is just a convention
 cd MeshCore
 pip install -r requirements.txt
 sudo service domoticz.sh restart
 ```
 
-Then go to **Setup → Hardware** and add a new hardware entry of type **MeshCore**.
+Then go to **Setup → Hardware** and add a new entry of type **MeshCore**.
 
-#### Docker / Docker Compose
+**Docker:** add `pip3 install meshcore` (or `pip3 install --break-system-packages meshcore` on Debian 12) to your `customstart.sh` hook so it persists across image rebuilds.
 
-The plugin still needs the `meshcore` Python package installed inside the container. Clone the plugin into your mounted plugins folder as above, then edit `customstart.sh` (the Domoticz container's customisation hook) and add:
-
-```sh
-pip3 install meshcore
-```
-
-This runs on every container start, so the package survives image rebuilds. On Debian-12-based images you may need `pip3 install --break-system-packages meshcore`.
+> For full configuration options, device reference, and the custom dashboard guide see the **[documentation site](https://galadril.github.io/Domoticz-MeshCore-Plugin/)**.
 
 ----------
 
-## 🛠 Configuration
-
-| Field | Description |
-|---|---|
-| **Transport** | TCP or Serial |
-| **MeshCore Host** | (TCP) IP address of the MeshCore TCP endpoint |
-| **MeshCore Port** | (TCP) TCP port (default `5000`) |
-| **Serial Port** | (Serial) COM/tty port — dropdown auto-populated by Domoticz with detected adapters |
-| **Baud Rate** | (Serial) default `115200` |
-| **Install Custom Dashboard** | Yes / No — installs `meshcore.html` into Domoticz templates (default Yes) |
-| **Debug Level** | None / Basic / All |
-
-If a serial connection drops (cable unplugged, device reset), the plugin logs an error and automatically retries every 30 s. A “Connected” log line is emitted once the link is restored.
-
-> All contacts discovered by the mesh are tracked automatically — there is no manual node list to configure.
-
-----------
-
-## 🧾 Devices Created
-
-Devices are created automatically on first data received for each node.
-
-### Global devices
-
-| Device | Type | Description |
-|---|---|---|
-| **Mesh Inbox** | Text | Last received message — format `[C0\|sender] text` or `[P\|sender] text` |
-| **Mesh Send** | Text | Write here to send a message (see below) |
-| **Mesh Msgs Received** | Custom (msgs) | Running counter of messages received since plugin start |
-| **Mesh Msgs Sent** | Custom (msgs) | Running counter of messages successfully sent since plugin start |
-
-### Self (connected) node — units 10–29
-
-| Device | Type |
-|---|---|
-| Status | Switch (always On when connected) |
-| Battery | Percentage |
-| Battery V | Custom (V) |
-| RSSI | Custom (dBm) |
-| SNR | Custom (dB) |
-| Noise Floor | Custom (dBm) |
-| Last Seen | Text |
-| Uptime | Custom (min) |
-| Airtime TX | Custom (s) |
-| Pkts Sent | Custom (pkts) |
-| Pkts Recv | Custom (pkts) |
-
-### Remote (discovered) nodes — units 30+
-
-Each discovered contact gets a minimal device set:
-
-| Device | Type |
-|---|---|
-| Status | Switch (online / offline) |
-| SNR | Custom (dB) |
-| Last Seen | Text |
-| Hops | Custom (hops) — path length to reach the node |
-
-> Additional devices (battery, RSSI, noise floor, uptime, airtime, packet counters) are created for remote nodes when a STATUS_RESPONSE push event is received — requires supported firmware on the remote node.
-
-----------
-
-## 📨 Sending Messages
-
-Write to the **Mesh Send** device via the Domoticz API, a script, or the custom dashboard.
-
-| Syntax | Result |
-|---|---|
-| `hello world` | Direct message to the first discovered contact |
-| `garden: hello` | Direct message to the node named `garden` |
-| `#General: hello` | Broadcast on the channel named `General` |
-| `#0: hello` | Broadcast on channel index 0 |
-| `#flood: hello` | Broadcast on channel 0 (alias) |
-
-> **Tip:** Channel names are resolved automatically by the plugin — you don't need to look up numeric indices. Available channels are logged on startup (e.g. `MeshCore channels: #0 = General, #1 = MyRoom`).
-
-### Internal control commands
-
-The **Mesh Send** device also accepts `!`-prefixed commands that configure the
-device or plugin state instead of transmitting a message. They never appear in
-the inbox or count towards the sent-messages counter. Useful for scripting.
-
-| Command | Result |
-|---|---|
-| `!remove <name>` | Remove the named contact from the connected device |
-| `!favorite add <name>` | Mark `<name>` as a favorite (sorted first on the dashboard, persisted to `meshcore_favorites.json`) |
-| `!favorite remove <name>` | Drop favorite |
-| `!manual_add on` / `!manual_add off` | Enable/disable manual-add-contacts on the device (off = auto-add adverts) |
-| `!set telemetry_base <0\|1\|2>` | Off / Public / Always |
-| `!set telemetry_env <0\|1\|2>` | Same, for environmental telemetry |
-| `!set telemetry_loc <0\|1\|2>` | Same, for location telemetry |
-| `!set adv_loc_policy <0\|1>` | Never share / Share location in adverts |
-| `!flood_scope <#tag>` | Set the device's default flood scope (empty = global flood, e.g. `!flood_scope #nl`) |
-
-`!favorite` is handled entirely in the plugin — no MC session is opened.
-The other `!` commands open a short radio session to apply the change.
-
-----------
-
-## 📜 dzVents Example Scripts
-
-Two ready-to-use **dzVents demo scripts** are included in the [`docs/`](docs/) folder. Copy either (or both) to `~/domoticz/scripts/dzVents/generated_scripts/`, edit the `CONFIGURATION` block at the top to match your device names, channel name and node name, and enable it.
-
-### 📊 Status Report — periodic home updates
-
-Sends **readable themed messages** (Climate, Weather, Energy) one per minute on the hour, plus **instant alerts** on presence changes — perfect for keeping an eye on your house via LoRa.
-
-**Example output on the mesh:**
-```
-Climate: Indoor 20.3C, 52% | Thermostat 19.5C
-Weather: 14.8C, 65%
-Energy: Solar 1240W | Delivery 380W | Gas today 0.42 m3
-```
-
-➡️ **[Download the status report script](docs/meshcore_status_report.lua)**
-
-### 💬 Chat Responder — interactive command bot
-
-Turns your Domoticz into an **interactive chat bot** on your MeshCore channel. Send a command from any LoRa device and receive live status information back.
-
-Commands must start with a **prefix character** (default: `!`) so the bot only reacts to explicit requests and never responds to its own messages. The prefix is configurable via `CMD_PREFIX` in the script.
-
-The script filters on the channel name (matching `CHANNEL_NAME`) and queues multi-part replies one per minute to avoid LoRa TX overlap.
-
-**Supported commands** (case-insensitive):
-
-| Command | Description |
-|---|---|
-| `!help` | List available commands |
-| `!status` | Full summary (climate, weather, energy, house) |
-| `!climate` / `!klimaat` | Indoor climate + heating status |
-| `!weather` / `!weer` | Outdoor weather conditions |
-| `!energy` / `!energie` | Power, solar, battery, gas |
-| `!home` / `!huis` | Water usage, presence |
-| `!device <name>` / `!apparaat <naam>` | Query any Domoticz device by name |
-| `!switches` / `!schakelaars` | List all switches and their states |
-| `!temp` | All temperature sensors |
-
-**Example conversation on the mesh:**
-```
-[You]  → !climate
-[Bot]  → Climate: Indoor 20.3C, 52% | Thermostat 19.5C | Heat pump: Heating
-[You]  → !device Power
-[Bot]  → Power: 380W (updated: 2025-01-15 14:32:00)
-```
-
-➡️ **[Download the chat responder script](docs/meshcore_chat_responder.lua)**
-
-----------
-
-## 📊 Custom Dashboard
-
-Enable **Install Custom Dashboard** in the plugin settings, then navigate to:
-
-```
-Setup → More Options → Custom Pages → meshcore
-```
-
-> 🌐 **Feature tour:** [galadril.github.io/Domoticz-MeshCore-Plugin](https://galadril.github.io/Domoticz-MeshCore-Plugin/)
-
-### Dashboard features
-
-- **Node cards** — online/offline badge, battery bar, signal quality bars (SNR), hops, last seen — every value links to its Domoticz device log
-- **Signal quality bars** — color-coded visual SNR indicator (green = excellent, yellow = fair, red = poor)
-- **Uptime formatting** — human-readable display like "2d 5h 12m" instead of raw minutes
-- **Node map** — click the 📍 icon on any contact card / list row to open a Leaflet map side-panel centered on that node (OpenStreetMap tiles loaded from `unpkg.com`; if your browser's tracking-prevention blocks the CDN, the panel shows a fallback message with the raw coordinates)
-- **Manual node locations** — place a `meshcore_locations.json` in the plugin folder to pin nodes without GPS on the map (see below)
-- **Message inbox** — backed by the SQLite message store; server-side pagination (infinite scroll for older messages) with timestamps, channel tags and sender names
-- **Channel & search filters** — per-channel scope and search are resolved server-side within the selected scope (works across the full stored history, not just what's on screen)
-- **DM conversations** — pin a contact to see its full direct-message thread (served from the store; both directions, with delivery-ACK markers)
-- **Compose bar** — select a channel or direct target, type and send
-- **Reply** — hover any message and click ↩ Reply to pre-fill the compose bar with the right target and channel
-- **@mention highlighting** — `@name` tokens are highlighted in green in message text
-- **Emoji picker** — full categorised emoji picker (700+ emoji, WhatsApp-style) with search
-- **Mesh topology & path lines** — map view plots contacts and (optionally) heard nodes, and draws the real multi-hop repeater paths recent messages traversed
-- **Live updates** — pushed in real time over the plugin↔frontend WebSocket channel
-
-----------
-
-## 🗺️ Manual Node Locations
-
-If some of your nodes don’t broadcast GPS coordinates, you can manually pin them on the dashboard map.
-
-Create a file called `meshcore_locations.json` in the plugin directory (`domoticz/plugins/MeshCore/`):
-
-```json
-{
-    "Garden": {"lat": 52.3690, "lon": 4.9075},
-    "Garage": {"lat": 52.3665, "lon": 4.9010}
-}
-```
-
-- Node names must match the contact names exactly (case-sensitive)
-- Live GPS data from nodes automatically overrides manual coordinates
-- The file is loaded on plugin start and copied to the dashboard
-- The map section only appears when at least one node has coordinates (from GPS or manual)
-
-----------
-
-## 🔄 Poll Intervals
-
-| What | Interval |
-|---|---|
-| Contacts refresh (incremental) | every 30 s |
-| Liveness probe (full contacts refresh) | every 5 min |
-| Self-node stats (battery, RSSI, uptime, counters) | every 5 min |
-| Stale connection detection | 10 min without push events triggers reconnect |
-
-----------
-
-## 🔁 Updating
+## 🔄 Updating
 
 ```sh
 cd ~/domoticz/plugins/MeshCore
@@ -338,48 +99,29 @@ git pull
 sudo service domoticz.sh restart
 ```
 
-> **⚠️ Breaking change — DomoticzEx migration**
->
-> This release moves the plugin to the `DomoticzEx` framework so it is no
-> longer limited to ~11 remote contacts (the old 255-unit-per-plugin cap).
-> Devices are now keyed by a stable DeviceID (`self` for the connected node,
-> the 12-char public-key prefix for each remote contact).
->
-> After upgrading, your **old per-node devices become orphaned** — Domoticz
-> does not auto-migrate them. Delete them once:
-> *Setup → Devices*, filter by the MeshCore hardware, and remove the old
-> entries. The plugin recreates fresh devices automatically on the next
-> contact poll. No dashboard data is lost — `meshcore.html` re-reads its
-> JSON map every tick and the historical RX log is preserved.
-
-----------
-
-## 🧩 Troubleshooting
-
-Enable **Basic** or **All** debug logging in plugin settings for verbose logs in the Domoticz log viewer.
-
-| Problem | Solution |
-|---|---|
-| `meshcore package not installed` | Run `pip install meshcore` on the Domoticz machine, then restart |
-| Connection errors | Verify host/port are reachable; check the MeshCore companion app is running |
-| Node not appearing | The plugin auto-discovers all contacts — make sure the node is advertising on the mesh; check the log for discovered contact names |
-| Battery / stats missing for remote nodes | Requires firmware support for STATUS_RESPONSE push events |
-| Connection drops silently | The plugin detects stale connections after 10 min and reconnects; enable debug logging to diagnose |
+> **DomoticzEx migration:** if upgrading from an old version, delete orphaned per-node devices via _Setup → Devices_ (filter by MeshCore hardware). The plugin recreates them automatically. See [docs](https://galadril.github.io/Domoticz-MeshCore-Plugin/#updating) for details.
 
 ----------
 
 ## 🕘 Changelog
 
-| Version | Notes |
-|---|---|
-| Unreleased | WebSocket transport for the dashboard (no more JSON-file / JSON-API polling). SQLite message store (`meshcore_messages.db`) is now the single source of truth for the inbox **and** per-contact DM conversations, with server-side pagination + search and a schema-versioned `preferences` table for future migrations. Per-contact "Messages" DM devices retired (existing ones are left for the user to remove manually). Mesh topology now shows heard nodes (when enabled) and draws real multi-hop repeater path lines. Delivery-ACK annotation on sent DMs, heard-node hit counts + prune, per-channel message stats, and assorted dashboard fixes. |
-| 0.0.1 | Initial release — telemetry, inbox, send, custom dashboard |
+| Version | Date | Highlights |
+|---|---|---|
+| **v0.0.7** | May 2026 | Automated GitHub Actions release workflow |
+| **v0.0.6** | May 2026 | Map tools, coverage/LoS terrain tools, historical analytics panel |
+| **v0.0.5** | May 2026 | dzVents command bridge, inbox filters, clock-skew fix |
+| **v0.0.4** | May 2026 | Dashboard UI/theming fixes, collapsible node settings |
+| **v0.0.3** | May 2026 | WebSocket dashboard, SQLite message store, serial transport |
+| **v0.0.2** | Apr 2026 | dzVents example scripts (status reporter, chat responder) |
+| **v0.0.1** | Apr 2026 | Initial release — telemetry, inbox, send, custom dashboard |
+
+Full release notes: [GitHub Releases](https://github.com/galadril/Domoticz-MeshCore-Plugin/releases)
 
 ----------
 
 ## 💬 Support
 
-For bugs or feature requests please use [GitHub Issues](https://github.com/galadril/Domoticz-MeshCore-Plugin/issues).
+For bugs or feature requests: [GitHub Issues](https://github.com/galadril/Domoticz-MeshCore-Plugin/issues)
 
 ----------
 
@@ -393,5 +135,5 @@ If this plugin saves you time, consider buying me a coffee (or 🍺 beer)!
 
 ## 📄 License
 
-This project is licensed under the **MIT License**.  
+This project is licensed under the **MIT License**.
 See the [LICENSE](LICENSE) file for details.
