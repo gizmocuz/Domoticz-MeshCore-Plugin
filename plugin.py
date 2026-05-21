@@ -3559,31 +3559,16 @@ class BasePlugin:
         except Exception as exc:
             Domoticz.Error(f"Worker: subscribe failed: {exc}")
 
-        # Catch up on anything the firmware queued while we were disconnected
-        # (or before we subscribed). _drain_push_events() logs how many it
-        # pulled, so the user can SEE the missed-message count on (re)connect.
-        try:
-            n_missed = await self._drain_push_events(mc)
-            if n_missed:
-                Domoticz.Log(f"Reconnect catch-up: received {n_missed} message(s) "
-                             f"that were queued while disconnected.")
-            else:
-                Domoticz.Log("Reconnect catch-up: no messages were missed.")
-        except Exception as exc:
-            Domoticz.Debug(f"Worker: connect-time drain error: {exc}")
-
-        # Keep draining on every MESSAGES_WAITING signal for the life of this
-        # connection. start_auto_message_fetching() also does one immediate
-        # get_msg() (harmless — the drain above already emptied the queue, and
-        # the _handle_message signature de-dup collapses any redelivery, so
-        # this no longer causes duplicate inbox entries). Re-armed on every
-        # reconnect (bound to this mc); mc.disconnect() tears it down.
-        try:
-            await mc.start_auto_message_fetching()
-        except Exception as exc:
-            Domoticz.Error(f"Worker: start_auto_message_fetching failed: {exc}")
-
         # ── Initial fetches ───────────────────────────────────────────────
+        # Order matters: contacts and channel names must populate
+        # self._prefix_to_name / self._channel_names BEFORE any queued
+        # message is drained, otherwise _handle_message has no resolution
+        # table and stores the raw 12-hex pubkey prefix as the sender. The
+        # queue is processed strictly in order on the main thread, so as
+        # long as we *enqueue* the contacts payload before the message
+        # drain enqueues the messages, resolution wins. That's why the
+        # firmware drain + start_auto_message_fetching now run LAST in
+        # this block.
         if mc.self_info:
             name = mc.self_info.get("name", "")
             if name:
@@ -3616,16 +3601,39 @@ class BasePlugin:
         except Exception as exc:
             Domoticz.Debug(f"Initial flood scope error: {exc}")
 
-        # Missed-message catch-up is handled by start_auto_message_fetching()
-        # above (immediate get_msg() + MESSAGES_WAITING drain loop); the
-        # _handle_message signature de-dup prevents the historical
-        # duplicate-inbox problem. _drain_push_events() is kept as a manual
-        # fallback but is no longer needed on the connect path.
-
         try:
             await self._poll_self_stats(mc)
         except Exception as exc:
             Domoticz.Debug(f"Initial self_stats error: {exc}")
+
+        # Catch up on anything the firmware queued while we were
+        # disconnected. Runs AFTER contacts/channels so that
+        # _handle_message can resolve pubkey prefixes to contact names —
+        # otherwise a DM that arrived while the plugin was offline is
+        # stored with the raw 12-hex prefix as its sender and a reply
+        # can't address the contact by name.
+        try:
+            n_missed = await self._drain_push_events(mc)
+            if n_missed:
+                Domoticz.Log(f"Reconnect catch-up: received {n_missed} message(s) "
+                             f"that were queued while disconnected.")
+            else:
+                Domoticz.Log("Reconnect catch-up: no messages were missed.")
+        except Exception as exc:
+            Domoticz.Debug(f"Worker: connect-time drain error: {exc}")
+
+        # Keep draining on every MESSAGES_WAITING signal for the life of
+        # this connection. start_auto_message_fetching() also does one
+        # immediate get_msg() (harmless — the drain above already emptied
+        # the queue, and the _handle_message signature de-dup collapses
+        # any redelivery, so this no longer causes duplicate inbox
+        # entries). Re-armed on every reconnect (bound to this mc);
+        # mc.disconnect() tears it down. Started LAST so its built-in
+        # immediate get_msg() also runs against a populated contacts map.
+        try:
+            await mc.start_auto_message_fetching()
+        except Exception as exc:
+            Domoticz.Error(f"Worker: start_auto_message_fetching failed: {exc}")
 
         # ── Serve loop ────────────────────────────────────────────────────
         # Wrapped in try/finally so the disconnect always runs — including
