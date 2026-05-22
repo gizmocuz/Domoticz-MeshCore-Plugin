@@ -3894,8 +3894,18 @@ class BasePlugin:
                     deferred = True
         _dbg(f"_on_ack: code={ack_code!r} matched={matched_rec is not None} "
              f"deferred={deferred} pending_codes={list(self._pending_acks.keys())}")
+        # Visible info-level log so users can see ACK delivery without having
+        # to enable debug. Three outcomes:
+        #   - matched: ACK consumed and annotated on the inbox row
+        #   - deferred: matched but send_result hadn't reconciled yet — the
+        #     back-fill path will emit the ack_result once the row id lands
+        #   - unmatched: ACK arrived but no expected_ack was captured for it
+        #     (older firmware path, or ACK for someone else's send)
         if matched_rec:
-            Domoticz.Debug(f"ACK matched: code={ack_code} target={matched_rec.get('target')!r}")
+            Domoticz.Log(
+                f"ACK delivered (code={ack_code}) -> "
+                f"target={matched_rec.get('target') or '?'}"
+            )
             self._queue.put(("ack_result", {
                 "ack_code":   ack_code,
                 "delivered":  True,
@@ -3906,6 +3916,17 @@ class BasePlugin:
                 "dm_name":    matched_rec.get("dm_name"),
                 "msg_rowid":  matched_rec.get("msg_rowid"),
             }))
+        elif deferred:
+            Domoticz.Log(
+                f"ACK delivered (code={ack_code}) -> deferred annotation, "
+                f"waiting for send_result to reconcile the inbox row"
+            )
+        else:
+            Domoticz.Log(
+                f"ACK received (code={ack_code or '?'}) but no matching "
+                f"outgoing message — recipient may have ACKed a send from "
+                f"another client, or the expected_ack was not captured."
+            )
         synth = {
             "payload_typename": "ACK",
             "payload_type":     -1,
@@ -4082,19 +4103,25 @@ class BasePlugin:
 
     async def _refresh_contacts(self, mc):
         """Issue get_contacts and post the snapshot to the main thread."""
+        Domoticz.Log("Fetching contact list from node...")
+        t0 = time.monotonic()
         for attempt in range(3):
             try:
                 await asyncio.wait_for(mc.commands.get_contacts(), timeout=COMMAND_TIMEOUT)
             except asyncio.TimeoutError:
-                Domoticz.Debug(f"get_contacts timed out (attempt {attempt + 1})")
+                Domoticz.Log(f"get_contacts timed out (attempt {attempt + 1}), retrying…")
             except Exception as exc:
                 Domoticz.Debug(f"get_contacts error (attempt {attempt + 1}): {exc}")
             await asyncio.sleep(0)
             if mc.contacts:
                 break
             await asyncio.sleep(1)
+        elapsed = time.monotonic() - t0
         if mc.contacts:
+            Domoticz.Log(f"Contact list received: {len(mc.contacts)} contact(s) in {elapsed:.1f}s")
             self._queue.put(("contacts", {k: dict(v) for k, v in mc.contacts.items()}))
+        else:
+            Domoticz.Log(f"Contact list empty after {elapsed:.1f}s (node may have no contacts yet)")
 
     async def _refresh_flood_scope(self, mc):
         r = await asyncio.wait_for(mc.commands.get_default_flood_scope(), timeout=5.0)
