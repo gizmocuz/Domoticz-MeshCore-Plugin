@@ -11085,7 +11085,7 @@ Larger = more reliable routing but smaller mesh diameter.">Path hash size</label
             const input = document.getElementById('compose-input');
             if (!input) return;
             input.value = input.value.slice(0, _eacColon) + emoji + input.value.slice(_eacCaret);
-            const pos = _eacColon + [...emoji].length;
+            const pos = _eacColon + emoji.length;
             input.setSelectionRange(pos, pos);
             input.focus();
             _updateCharCounter(input.value);
