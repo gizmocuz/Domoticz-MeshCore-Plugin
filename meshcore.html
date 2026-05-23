@@ -2389,6 +2389,58 @@
         }
         #emoji-picker-search:focus { border-color: var(--accent); }
 
+        /* ── Inline emoji autocomplete popup (:query) ─────────────────────── */
+        #emoji-autocomplete {
+            display: none;
+            position: absolute;
+            bottom: calc(100% + 4px);
+            left: 0;
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: var(--radius);
+            padding: 4px 0;
+            z-index: 210;
+            min-width: 220px;
+            max-width: 360px;
+            max-height: 200px;
+            overflow-y: auto;
+            box-shadow: 0 4px 16px rgba(0,0,0,0.4);
+        }
+        #emoji-autocomplete.open { display: block; }
+        .eac-item {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            padding: 5px 12px;
+            cursor: pointer;
+            font-size: 0.85rem;
+            color: var(--text);
+            white-space: nowrap;
+        }
+        .eac-item:hover, .eac-item.active {
+            background: var(--accent);
+            color: #fff;
+        }
+        .eac-emoji { font-size: 1.2rem; flex-shrink: 0; line-height: 1; }
+        .eac-kw { overflow: hidden; text-overflow: ellipsis; opacity: 0.85; }
+
+        #emoji-picker-hint {
+            font-size: 0.72rem;
+            color: var(--muted);
+            padding: 0 2px 6px;
+            border-bottom: 1px solid var(--border);
+            margin-bottom: 4px;
+        }
+        #emoji-picker-hint kbd {
+            font-family: monospace;
+            background: var(--bg);
+            border: 1px solid var(--border);
+            border-radius: 3px;
+            padding: 1px 4px;
+            font-size: 0.72rem;
+            color: var(--accent);
+        }
+
         #emoji-scroll { max-height: 260px; overflow-y: auto; overflow-x: hidden; }
         #emoji-scroll::-webkit-scrollbar { width: 5px; }
         #emoji-scroll::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
@@ -2667,11 +2719,13 @@
         <div id="compose-bar" style="position:relative">
             <select id="compose-target" title="Send to"></select>
             <input id="compose-input" type="text" placeholder="Type a message…"
-                   oninput="_updateCharCounter(this.value)"
-                   onkeydown="if(event.key==='Enter')_sendMessage()">
+                   oninput="_onComposeInput(this)"
+                   onkeydown="_onComposeKeydown(event)">
+            <div id="emoji-autocomplete"></div>
             <button id="emoji-btn" onclick="_toggleEmojiPicker(event)" title="Insert emoji">😊</button>
             <div id="emoji-picker">
                 <input id="emoji-picker-search" type="search" placeholder="Search…" oninput="_filterEmoji(this.value)" autocomplete="off">
+                <div id="emoji-picker-hint">Tip: type <kbd>:keyword</kbd> while composing to quickly find &amp; insert emoji</div>
                 <div id="emoji-scroll"><div id="emoji-grid"></div></div>
             </div>
             <div id="compose-actions">
@@ -10887,7 +10941,7 @@ Larger = more reliable routing but smaller mesh diameter.">Path hash size</label
         function _buildEmojiGrid(list, categorised) {
             const grid = document.getElementById("emoji-grid");
             if (!grid) return;
-            const cell = (e, kw) => `<div class="emoji-cell" data-emoji="${e.replace(/"/g, '&quot;')}" title="${kw}">${e}</div>`;
+            const cell = (e, kw) => `<div class="emoji-cell" data-emoji="${e.replace(/"/g, '&quot;')}" title=":${kw}:">${e}</div>`;
             if (categorised) {
                 grid.innerHTML = EMOJI_CATEGORIES.map(cat =>
                     `<div class="emoji-category-label">${cat.label}</div>` +
@@ -10938,6 +10992,94 @@ Larger = more reliable routing but smaller mesh diameter.">Path hash size</label
             _emojiOpen = false;
         }
 
+        // ── Inline emoji autocomplete (:query → popup above compose) ──────────
+        let _eacActive = false;
+        let _eacIdx    = -1;
+        let _eacColon  = 0;   // caret position of the ':' trigger character
+        let _eacCaret  = 0;   // caret position at the last input event
+
+        function _onComposeInput(input) {
+            _updateCharCounter(input.value);
+            const q = _eacQueryAt(input);
+            if (q && q.word.length >= 2) {
+                _eacColon = q.colonPos;
+                _eacCaret = q.caretPos;
+                _showEac(q.word);
+            } else {
+                _hideEac();
+            }
+        }
+
+        function _onComposeKeydown(event) {
+            if (_eacActive) {
+                const items = document.querySelectorAll('#emoji-autocomplete .eac-item');
+                if (event.key === 'ArrowDown') {
+                    event.preventDefault();
+                    _eacIdx = Math.min(_eacIdx + 1, items.length - 1);
+                    _eacHighlight(items);
+                    return;
+                }
+                if (event.key === 'ArrowUp') {
+                    event.preventDefault();
+                    _eacIdx = Math.max(_eacIdx - 1, 0);
+                    _eacHighlight(items);
+                    return;
+                }
+                if (event.key === 'Enter' || event.key === 'Tab') {
+                    const sel = items[_eacIdx >= 0 ? _eacIdx : 0];
+                    if (sel) { event.preventDefault(); _eacPick(sel.dataset.emoji); return; }
+                }
+                if (event.key === 'Escape') { _hideEac(); return; }
+            }
+            if (event.key === 'Enter') _sendMessage();
+        }
+
+        function _eacQueryAt(input) {
+            const val = input.value;
+            const pos = input.selectionStart ?? val.length;
+            const m   = val.slice(0, pos).match(/:([a-zA-Z0-9_+\-]*)$/);
+            if (!m) return null;
+            return { word: m[1].toLowerCase(), colonPos: pos - m[0].length, caretPos: pos };
+        }
+
+        function _showEac(word) {
+            const ac = document.getElementById('emoji-autocomplete');
+            if (!ac) return;
+            const hits = EMOJI_FLAT.filter(([, kw]) => kw.includes(word)).slice(0, 20);
+            if (!hits.length) { _hideEac(); return; }
+            ac.innerHTML = hits.map(([e, kw]) =>
+                `<div class="eac-item" data-emoji="${e.replace(/"/g, '&quot;')}">` +
+                `<span class="eac-emoji">${e}</span><span class="eac-kw">:${kw}:</span></div>`
+            ).join('');
+            _eacIdx = 0;
+            _eacHighlight(ac.querySelectorAll('.eac-item'));
+            ac.classList.add('open');
+            _eacActive = true;
+        }
+
+        function _hideEac() {
+            const ac = document.getElementById('emoji-autocomplete');
+            if (ac) ac.classList.remove('open');
+            _eacActive = false;
+            _eacIdx    = -1;
+        }
+
+        function _eacHighlight(items) {
+            items.forEach((el, i) => el.classList.toggle('active', i === _eacIdx));
+            if (items[_eacIdx]) items[_eacIdx].scrollIntoView({ block: 'nearest' });
+        }
+
+        function _eacPick(emoji) {
+            const input = document.getElementById('compose-input');
+            if (!input) return;
+            input.value = input.value.slice(0, _eacColon) + emoji + input.value.slice(_eacCaret);
+            const pos = _eacColon + emoji.length;
+            input.setSelectionRange(pos, pos);
+            input.focus();
+            _updateCharCounter(input.value);
+            _hideEac();
+        }
+
         // Single delegated listener: handles emoji cell clicks AND outside-click close
         if (!window._mcEmojiListenerAdded) {
             window._mcEmojiListenerAdded = true;
@@ -10947,6 +11089,18 @@ Larger = more reliable routing but smaller mesh diameter.">Path hash size</label
                 e.stopPropagation();
                 _insertEmoji(cell.dataset.emoji);
                 return;
+            }
+            // Inline autocomplete item click
+            const eacItem = e.target.closest(".eac-item");
+            if (eacItem && eacItem.dataset.emoji) {
+                e.stopPropagation();
+                _eacPick(eacItem.dataset.emoji);
+                return;
+            }
+            // Close autocomplete on outside click
+            if (_eacActive) {
+                const ac = document.getElementById('emoji-autocomplete');
+                if (ac && !ac.contains(e.target)) _hideEac();
             }
             if (!_emojiOpen) return;
             const picker = document.getElementById("emoji-picker");
@@ -12212,6 +12366,8 @@ Larger = more reliable routing but smaller mesh diameter.">Path hash size</label
         window._sendMessage        = _sendMessage;
         window._toggleEmojiPicker  = _toggleEmojiPicker;
         window._filterEmoji        = _filterEmoji;
+        window._onComposeInput     = _onComposeInput;
+        window._onComposeKeydown   = _onComposeKeydown;
         window._replyTo            = _replyTo;
         window._updateCharCounter  = _updateCharCounter;
         window._openSidePanel      = _openSidePanel;
