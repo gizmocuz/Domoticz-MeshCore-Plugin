@@ -339,6 +339,10 @@
             cursor: ew-resize;
             z-index: 1001;
             background: transparent;
+            /* Don't let the browser interpret a horizontal touch drag on
+               this strip as a horizontal scroll. */
+            touch-action: none;
+            -ms-touch-action: none;
         }
         #map-panel-resizer:hover,
         #map-panel.resizing #map-panel-resizer { background: var(--accent); opacity: 0.5; }
@@ -1584,6 +1588,11 @@
             align-items: center;
             justify-content: center;
             transition: background 0.15s;
+            /* Tell the browser not to interpret a vertical drag on this
+               handle as a scroll gesture — required for touch devices,
+               otherwise pointermove never fires on a touch drag. */
+            touch-action: none;
+            -ms-touch-action: none;
         }
         /* Visible grip so it's obvious the bar is draggable. */
         #inbox-resizer::before {
@@ -1729,18 +1738,6 @@
         }
         #inbox-search:focus { border-color: var(--accent); }
 
-        #inbox-page-size {
-            font-size: 0.75rem;
-            padding: 3px 8px;
-            border-radius: 20px;
-            border: 1px solid var(--border);
-            background: var(--surface);
-            color: var(--text);
-            outline: none;
-            cursor: pointer;
-            align-self: flex-start;
-        }
-        #inbox-page-size:focus { border-color: var(--accent); }
 
         #inbox-empty {
             padding: 20px 16px;
@@ -2665,13 +2662,6 @@
                 </div>
             </div>
             <input id="inbox-search" type="search" placeholder="Search sender / text…" oninput="_onInboxSearch(this.value)">
-            <select id="inbox-page-size" title="Messages per page" onchange="_onInboxPageSize(this.value)">
-                <option value="25">25</option>
-                <option value="50">50</option>
-                <option value="100">100</option>
-                <option value="250">250</option>
-                <option value="all">All</option>
-            </select>
         </div>
         <!-- compose bar -->
         <div id="compose-bar" style="position:relative">
@@ -2796,10 +2786,12 @@
     // so the UMD wrapper sees them as undefined ONLY inside the
     // wrapper — window.define stays intact for everyone else.
     //
-    // var (not let/const) so the script can be re-injected by Angular's
-    // router without throwing "Identifier '_hcPromise' has already been
-    // declared". Top-level let/const create global lexical bindings
-    // that persist for the life of the page; var is silently re-declared.
+    // The declarations below use var (not let/const) so the script can be
+    // re-injected by Angular's router without throwing "Identifier already
+    // declared". Top-level let/const create persistent global lexical
+    // bindings; var is silently re-declared on each injection.
+    // Applies to: _hcPromise, _hcMorePromise, _PAYLOAD_COLORS,
+    //             _PAYLOAD_FALLBACK_PALETTE, _payloadPieChart, _domoticzLocation.
     var _hcPromise = null;
     function _loadHighcharts() {
         if (typeof Highcharts !== "undefined") return Promise.resolve();
@@ -3251,23 +3243,27 @@
         // Drives the same render path that loadData() formerly triggered after
         // reloading meshcore_devices.json.
         function _onDeviceMapUpdated() {
-            // Skip if the snapshot's initialRender() hasn't completed yet.
-            // The data is already merged into _deviceMap; initialRender() (called
-            // by _onSnapshotReady immediately after the snapshot) will render the
-            // fresh state.  In steady state _initialRenderDone is true so live
-            // device updates continue to flow through within ~1 s.
             if (!_initialRenderDone) return;
-            // Re-use the existing live-data render path if it has already run.
-            // _lastLiveSlotsOf is set after the first fetchDevices() completes;
-            // skip _renderContacts until that resolver is available so a
-            // devices_delta arriving before loadData() finishes cannot render
-            // stale live-slot values.
             if (_lastLiveSlotsOf) {
+                // Steady-state fast path: re-render with the existing live resolver.
                 const { selfName, remoteNodes } = _nodeList([]);
                 if (selfName || remoteNodes.length) {
                     _lastRemoteNodes = remoteNodes;
                     _renderContacts(remoteNodes, _lastLiveSlotsOf);
                 }
+            } else {
+                // Live resolver not yet set — contacts may have arrived after an
+                // initially-empty render (plugin took >1 s to load the contact
+                // list). Trigger loadData() to run Phase 2 (fetchDevices) and
+                // establish _lastLiveSlotsOf. Debounced so rapid delta bursts
+                // only trigger one load.
+                const hasNodes = _deviceMap && _deviceMap.nodes &&
+                    Object.keys(_deviceMap.nodes).length > 0;
+                if (hasNodes && !_loadDataPending) {
+                    _loadDataPending = true;
+                    loadData().catch(() => {}).finally(() => { _loadDataPending = false; });
+                }
+                return;
             }
             _populateComposeTargets();
             _refreshNodeSettingsActive();
@@ -4093,31 +4089,12 @@
         //         recv {t:'inbox_page',  id, scope, search, rows, has_more, oldest_id}
         // rows: [{id, chan, sender, epoch, bad, body, hops, snr, rssi, path, ack, dir}]
 
-        // Page size is user-selectable (25/50/100/250/All) and persisted.
-        // Stored raw value: "25".."250" or "all". Wire limit: the number, or
-        // 0 for "all" (the plugin treats limit<=0 as "no row limit").
-        const LS_INBOX_PAGE_SIZE = "meshcore.inboxPageSize";
-        let _inboxPageSizeRaw = (() => {
-            try {
-                const v = localStorage.getItem(LS_INBOX_PAGE_SIZE);
-                return ["25", "50", "100", "250", "all"].includes(v) ? v : "50";
-            } catch (_) { return "50"; }
-        })();
-        function _inboxPageLimit() {
-            return _inboxPageSizeRaw === "all" ? 0 : parseInt(_inboxPageSizeRaw, 10) || 50;
-        }
-        function _onInboxPageSize(val) {
-            _inboxPageSizeRaw = ["25", "50", "100", "250", "all"].includes(val) ? val : "50";
-            try { localStorage.setItem(LS_INBOX_PAGE_SIZE, _inboxPageSizeRaw); } catch (_) {}
-            // Re-fetch the newest page at the new size (conversation or main).
-            if (_convNode) _convQueryNewest();
-            else           _mainQueryNewest();
-        }
+        const _INBOX_PAGE_LIMIT = 50;
 
         function _sendInboxQuery(scope, before, search) {
             if (!_pluginWS) return 0;
             const id = ++_inboxReqId;
-            const msg = { t: 'inbox_query', id, scope: scope || "", limit: _inboxPageLimit() };
+            const msg = { t: 'inbox_query', id, scope: scope || "", limit: _INBOX_PAGE_LIMIT };
             if (before != null) msg.before = before;
             if (search)         msg.search = search;
             _pluginWS.sendPluginCommand(msg);
@@ -5035,9 +5012,13 @@
         // Phase 2 (live):    fetch the Domoticz API and patch values in-place.
 
         let _initialRenderDone = false;
+        let _loadDataPending   = false;   // debounce: prevents concurrent loadData() calls
 
         async function initialRender() {
             if (!_deviceMap) return;   // nothing to show yet
+            // Mark done before the early-return so _onDeviceMapUpdated gates
+            // correctly even when the snapshot arrived with an empty contact list.
+            _initialRenderDone = true;
 
             const { selfName, remoteNodes } = _nodeList([]);
             if (!selfName && !remoteNodes.length) return;
@@ -5075,8 +5056,6 @@
                 document.getElementById("last-updated").textContent =
                     `Snapshot ${d.getHours().toString().padStart(2, "0")}:${d.getMinutes().toString().padStart(2, "0")}:${d.getSeconds().toString().padStart(2, "0")}`;
             }
-
-            _initialRenderDone = true;
         }
 
         async function loadData() {
@@ -5655,13 +5634,7 @@
                 _analyticsStopTimer();
                 if (_analyticsUnsubWS) { try { _analyticsUnsubWS(); } catch (_) {} _analyticsUnsubWS = null; }
                 if (_analyticsResizeObs) { try { _analyticsResizeObs.disconnect(); } catch (_) {} _analyticsResizeObs = null; }
-                try { if (_analyticsRssiChart)    { _analyticsRssiChart.destroy();    _analyticsRssiChart    = null; } } catch (_) {}
-                try { if (_analyticsSnrChart)     { _analyticsSnrChart.destroy();     _analyticsSnrChart     = null; } } catch (_) {}
-                try { if (_analyticsPacketsChart) { _analyticsPacketsChart.destroy(); _analyticsPacketsChart = null; } } catch (_) {}
-                try { if (_analyticsNoiseChart)   { _analyticsNoiseChart.destroy();   _analyticsNoiseChart   = null; } } catch (_) {}
-                try { if (_analyticsHourlyChart)  { _analyticsHourlyChart.destroy();  _analyticsHourlyChart  = null; } } catch (_) {}
-                try { if (_analyticsHopsChart)    { _analyticsHopsChart.destroy();    _analyticsHopsChart    = null; } } catch (_) {}
-                try { if (_analyticsChanChart)    { _analyticsChanChart.destroy();    _analyticsChanChart    = null; } } catch (_) {}
+                _analyticsDestroyCharts();
                 const _mp = document.getElementById("map-panel");
                 if (_mp) _mp.classList.remove("panel-analytics-wide");
             }
@@ -6407,7 +6380,9 @@
         async function _heardPurgeRun() {
             const sel = document.getElementById("heard-purge-sel");
             if (!sel || !sel.value) return;
-            const [kind, raw] = sel.value.split(":");
+            const parts = sel.value.split(":");
+            if (parts.length !== 2) return;
+            const [kind, raw] = parts;
             const n = parseInt(raw, 10);
             if (!Number.isFinite(n) || n <= 0) return;
             const knownPks = new Set();
@@ -10268,13 +10243,7 @@ Larger = more reliable routing but smaller mesh diameter.">Path hash size</label
                 _analyticsStopTimer();
                 if (_analyticsUnsubWS) { try { _analyticsUnsubWS(); } catch (_) {} _analyticsUnsubWS = null; }
                 if (_analyticsResizeObs) { try { _analyticsResizeObs.disconnect(); } catch (_) {} _analyticsResizeObs = null; }
-                try { if (_analyticsRssiChart)    { _analyticsRssiChart.destroy();    _analyticsRssiChart    = null; } } catch (_) {}
-                try { if (_analyticsSnrChart)     { _analyticsSnrChart.destroy();     _analyticsSnrChart     = null; } } catch (_) {}
-                try { if (_analyticsPacketsChart) { _analyticsPacketsChart.destroy(); _analyticsPacketsChart = null; } } catch (_) {}
-                try { if (_analyticsNoiseChart)   { _analyticsNoiseChart.destroy();   _analyticsNoiseChart   = null; } } catch (_) {}
-                try { if (_analyticsHourlyChart)  { _analyticsHourlyChart.destroy();  _analyticsHourlyChart  = null; } } catch (_) {}
-                try { if (_analyticsHopsChart)    { _analyticsHopsChart.destroy();    _analyticsHopsChart    = null; } } catch (_) {}
-                try { if (_analyticsChanChart)    { _analyticsChanChart.destroy();    _analyticsChanChart    = null; } } catch (_) {}
+                _analyticsDestroyCharts();
                 panel.classList.remove("panel-analytics-wide");
             }
             _sidePanelView = null;
@@ -10312,27 +10281,39 @@ Larger = more reliable routing but smaller mesh diameter.">Path hash size</label
                     if (_leafletMap) _leafletMap.invalidateSize();
                 });
             };
-            resizer.addEventListener("mousedown", (e) => {
+            // Pointer Events unify mouse/touch/pen with one API.
+            // setPointerCapture routes every subsequent move/up to the
+            // resizer itself even if the finger drifts off the 6px-wide
+            // strip — essential for touch resizing on tablets.
+            let ptrId = null;
+            resizer.addEventListener("pointerdown", (e) => {
                 dragging = true;
+                ptrId = e.pointerId;
+                try { resizer.setPointerCapture(ptrId); } catch (_) {}
                 panel.classList.add("resizing");
                 e.preventDefault();
             });
-            document.addEventListener("mousemove", (e) => {
-                if (!dragging) return;
+            resizer.addEventListener("pointermove", (e) => {
+                if (!dragging || e.pointerId !== ptrId) return;
                 // Panel is anchored to the right edge: width = (viewportW - clientX)
                 const w = Math.max(360, Math.min(window.innerWidth - 80, window.innerWidth - e.clientX));
                 panel.style.width = w + "px";
                 _scheduleMapInvalidate();
                 _scheduleAnalyticsReflow();
             });
-            document.addEventListener("mouseup", () => {
+            const _endPanelDrag = (e) => {
                 if (!dragging) return;
+                if (e && ptrId !== null && e.pointerId !== ptrId) return;
                 dragging = false;
+                try { if (ptrId !== null) resizer.releasePointerCapture(ptrId); } catch (_) {}
+                ptrId = null;
                 panel.classList.remove("resizing");
                 if (_leafletMap) _leafletMap.invalidateSize();
                 _scheduleAnalyticsReflow();
                 try { localStorage.setItem(LS_KEY, parseInt(panel.style.width, 10) || 480); } catch (_) {}
-            });
+            };
+            resizer.addEventListener("pointerup", _endPanelDrag);
+            resizer.addEventListener("pointercancel", _endPanelDrag);
         })();
 
         async function _toggleFavorite(name) {
@@ -10387,10 +10368,6 @@ Larger = more reliable routing but smaller mesh diameter.">Path hash size</label
                 _initContactClickToCompose();
                 const _ce = document.getElementById("conv-banner-exit");
                 if (_ce) _ce.onclick = _exitConversation;
-
-                // Reflect the persisted page-size choice in the selector.
-                const _ps = document.getElementById("inbox-page-size");
-                if (_ps) _ps.value = _inboxPageSizeRaw;
 
                 // ── Resizable inbox + auto-fill contacts ──
                 // The inbox section is pinned to the bottom of the viewport
@@ -10485,32 +10462,43 @@ Larger = more reliable routing but smaller mesh diameter.">Path hash size</label
                             window.innerHeight - FOOTER_GAP - floorTop - chrome);
                     };
 
-                    let dragging = false, startY = 0, startInbox = 0;
-                    grip.addEventListener("mousedown", (e) => {
+                    // Pointer Events unify mouse/touch/pen with one API.
+                    // setPointerCapture routes every subsequent move/up to
+                    // the grip even if the finger drifts off it, so tablet
+                    // users don't lose the drag mid-gesture.
+                    let dragging = false, startY = 0, startInbox = 0, ptrId = null;
+                    grip.addEventListener("pointerdown", (e) => {
                         dragging = true;
                         startY = e.clientY;
                         startInbox = box.getBoundingClientRect().height;
+                        ptrId = e.pointerId;
+                        try { grip.setPointerCapture(ptrId); } catch (_) {}
                         document.body.classList.add("inbox-resizing");
                         e.preventDefault();
                     });
-                    document.addEventListener("mousemove", (e) => {
-                        if (!dragging) return;
+                    grip.addEventListener("pointermove", (e) => {
+                        if (!dragging || e.pointerId !== ptrId) return;
                         const d = startY - e.clientY;             // up => grow
                         const newInbox = Math.max(_minInbox,
                             Math.min(_maxInbox(), startInbox + d));
                         _setInbox(newInbox);
                         _layout();
                     });
-                    document.addEventListener("mouseup", () => {
+                    const _endInboxDrag = (e) => {
                         if (!dragging) return;
+                        if (e && ptrId !== null && e.pointerId !== ptrId) return;
                         dragging = false;
+                        try { if (ptrId !== null) grip.releasePointerCapture(ptrId); } catch (_) {}
+                        ptrId = null;
                         document.body.classList.remove("inbox-resizing");
                         try {
                             localStorage.setItem(LS_H,
                                 parseInt(box.style.height, 10) || _minInbox);
                         } catch (_) {}
                         _layout();
-                    });
+                    };
+                    grip.addEventListener("pointerup", _endInboxDrag);
+                    grip.addEventListener("pointercancel", _endInboxDrag);
 
                     window._scheduleDock = (() => {
                         let raf = 0;
@@ -11167,6 +11155,26 @@ Larger = more reliable routing but smaller mesh diameter.">Path hash size</label
         // is active; disconnected on view leave.
         let _analyticsResizeObs = null;
 
+        // Destroy all analytics Highcharts instances and null their refs.
+        // Single source of truth — add new chart vars here when new charts
+        // are added to the analytics panel so _closeMapPanel and the
+        // view-switch path both stay in sync automatically.
+        function _analyticsDestroyCharts() {
+            const _charts = [
+                [() => _analyticsRssiChart,    c => { _analyticsRssiChart    = c; }],
+                [() => _analyticsSnrChart,     c => { _analyticsSnrChart     = c; }],
+                [() => _analyticsPacketsChart, c => { _analyticsPacketsChart = c; }],
+                [() => _analyticsNoiseChart,   c => { _analyticsNoiseChart   = c; }],
+                [() => _analyticsHourlyChart,  c => { _analyticsHourlyChart  = c; }],
+                [() => _analyticsHopsChart,    c => { _analyticsHopsChart    = c; }],
+                [() => _analyticsChanChart,    c => { _analyticsChanChart    = c; }],
+            ];
+            for (const [get, set] of _charts) {
+                const c = get();
+                if (c) { try { c.destroy(); } catch (_) {} set(null); }
+            }
+        }
+
         // Reflow all analytics charts in a single rAF tick (called from the
         // side-panel resize handler so charts track the container width).
         let _analyticsReflowPending = false;
@@ -11339,21 +11347,54 @@ Larger = more reliable routing but smaller mesh diameter.">Path hash size</label
             }));
         }
 
+        // Resolve a raw node_key (12-hex pubkey prefix, or "self", or
+        // "unknown") to a human-readable contact name using the live
+        // _deviceMap. Falls back to the key itself when no match is
+        // found (e.g. a node that left the contact list since the
+        // analytics samples were stored). "self" maps to the connected
+        // node's name when known.
+        function _analyticsResolveNodeKey(key) {
+            if (!key) return key;
+            if (key === 'self') {
+                const sn = (_deviceMap && _deviceMap.self && _deviceMap.self.name);
+                return sn || 'self';
+            }
+            if (key === 'unknown') return 'unknown';
+            const nodes = (_deviceMap && _deviceMap.nodes) || {};
+            // Exact pubkey-prefix match: each contact's full pubkey starts
+            // with its node_key, but the backend stores the 12-hex prefix.
+            // Walk contacts and compare prefixes — cheap enough for the
+            // contact-list sizes we care about (low hundreds max).
+            for (const [name, n] of Object.entries(nodes)) {
+                const pk = n && n.pubkey;
+                if (pk && typeof pk === 'string' && pk.startsWith(key)) return name;
+            }
+            return key;
+        }
+
         // Cap series to top-8 by sample count; collapse the rest into "Other" (averaged).
         function _analyticsCapSeries(rawSeries) {
             const MAX = 8;
-            if (rawSeries.length <= MAX) {
-                return rawSeries.map(s => ({
-                    name: _escAnalyticsName(s.node || s.name),
+            // Resolve each series' raw node_key to a display name BEFORE
+            // capping so the legend, palette and dedupe all key on the
+            // human-readable label.
+            const named = rawSeries.map(s => {
+                const rawKey = s.node || s.name || '';
+                const displayName = _analyticsResolveNodeKey(rawKey);
+                return Object.assign({}, s, { _rawKey: rawKey, _displayName: displayName });
+            });
+            if (named.length <= MAX) {
+                return named.map(s => ({
+                    name: _escAnalyticsName(s._displayName),
                     data: (s.data || []).map(([ts, v]) => [ts * 1000, v]),
-                    color: _nodePalette(s.node || s.name || ''),
+                    color: _nodePalette(s._displayName || s._rawKey || ''),
                     type: 'spline',
                     lineWidth: 1.5,
                     marker: { enabled: false }
                 }));
             }
             // Sort by sample count descending.
-            const sorted = [...rawSeries].sort((a, b) => (b.data || []).length - (a.data || []).length);
+            const sorted = [...named].sort((a, b) => (b.data || []).length - (a.data || []).length);
             const top = sorted.slice(0, MAX);
             const rest = sorted.slice(MAX);
             // Build Other: merge all timestamps and average same-bucket values.
@@ -11371,9 +11412,9 @@ Larger = more reliable routing but smaller mesh diameter.">Path hash size</label
                 .map(ts => [parseInt(ts, 10) * 1000, otherMap[ts] / otherCount[ts]]);
 
             const result = top.map(s => ({
-                name: _escAnalyticsName(s.node || s.name),
+                name: _escAnalyticsName(s._displayName),
                 data: (s.data || []).map(([ts, v]) => [ts * 1000, v]),
-                color: _nodePalette(s.node || s.name || ''),
+                color: _nodePalette(s._displayName || s._rawKey || ''),
                 type: 'spline',
                 lineWidth: 1.5,
                 marker: { enabled: false }
