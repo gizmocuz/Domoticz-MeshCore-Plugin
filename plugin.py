@@ -144,7 +144,7 @@ RECONNECT_DELAY_S  = 30
 
 # Periodic refresh intervals on the persistent connection
 STATS_REFRESH_S    = 300   # self-node stats (battery, radio, packets)
-CONTACTS_REFRESH_S = 60    # contact list refresh (catches new contacts + path changes)
+CONTACTS_REFRESH_S = 300   # contact list refresh (catches new contacts + path changes)
 MSG_DRAIN_S        = 10    # periodic get_msg() drain — safety net for firmware
                            # that doesn't emit MESSAGES_WAITING / unsolicited
                            # push, so the node's message queue never piles up
@@ -3659,7 +3659,7 @@ class BasePlugin:
             Domoticz.Debug(f"Initial device_info error: {exc}")
 
         try:
-            await self._refresh_contacts(mc)
+            await self._refresh_contacts(mc, verbose=True)
         except Exception as exc:
             Domoticz.Debug(f"Initial get_contacts error: {exc}")
 
@@ -4101,9 +4101,10 @@ class BasePlugin:
                 self._ts_relay_observed(clean_path[i:i + 2])
         self._rx_log_dirty = True
 
-    async def _refresh_contacts(self, mc):
+    async def _refresh_contacts(self, mc, verbose=False):
         """Issue get_contacts and post the snapshot to the main thread."""
-        Domoticz.Log("Fetching contact list from node...")
+        log = Domoticz.Log if verbose else Domoticz.Debug
+        log("Fetching contact list from node...")
         t0 = time.monotonic()
         for attempt in range(3):
             try:
@@ -4118,7 +4119,7 @@ class BasePlugin:
             await asyncio.sleep(1)
         elapsed = time.monotonic() - t0
         if mc.contacts:
-            Domoticz.Log(f"Contact list received: {len(mc.contacts)} contact(s) in {elapsed:.1f}s")
+            log(f"Contact list received: {len(mc.contacts)} contact(s) in {elapsed:.1f}s")
             self._queue.put(("contacts", {k: dict(v) for k, v in mc.contacts.items()}))
         else:
             Domoticz.Log(f"Contact list empty after {elapsed:.1f}s (node may have no contacts yet)")
@@ -5197,7 +5198,7 @@ class BasePlugin:
                     self._write_heard()
                     Domoticz.Log(f"Added heard node '{contact['adv_name']}' to contacts.")
                     # Refresh contacts so the new device/dashboard entry appears
-                    await asyncio.wait_for(self._refresh_contacts(mc), timeout=COMMAND_TIMEOUT)
+                    await asyncio.wait_for(self._refresh_contacts(mc, verbose=True), timeout=COMMAND_TIMEOUT)
                 self._queue.put(("send_result", {
                     "ok": ok, "target": "!heard_add",
                     "body": contact["adv_name"],
