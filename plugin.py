@@ -1034,6 +1034,22 @@ class BasePlugin:
         except Exception as exc:
             Domoticz.Debug(f"_ts_packets_add failed (non-fatal): {exc!r}")
 
+    def _resolve_relay_key(self, hex_byte: str) -> "str | None":
+        """Return the contact name whose pubkey prefix starts with hex_byte.
+
+        Uses a 1-byte (2-char hex) hash match against the first byte of each
+        known contact's pubkey prefix.  Returns None when no match is found or
+        when two contacts share the same first byte (ambiguous).
+        """
+        want = hex_byte.lower()
+        match = None
+        for prefix, name in list(self._prefix_to_name.items()):
+            if prefix[:2] == want:
+                if match is not None:
+                    return None  # ambiguous — two contacts collide on this byte
+                match = name
+        return match
+
     def _ts_relay_observed(self, hex_key: str, name: str = None):
         """Bump count and update last_seen for a 2-char hex relay token.
 
@@ -1190,10 +1206,26 @@ class BasePlugin:
             for node_key, bucket, val in rows:
                 by_node.setdefault(node_key, []).append([bucket, round(val, 2) if val is not None else None])
             series = [{"node": k, "data": v} for k, v in sorted(by_node.items())]
-            return {"series": series}
+            # Build a node_key → display_name map so the frontend can resolve
+            # historic nodes that may no longer be in the active contact list.
+            names: dict = {}
+            if self._self_name:
+                names["self"] = self._self_name
+            for nk in by_node:
+                if nk in ("self", "unknown"):
+                    continue
+                resolved = self._prefix_to_name.get(nk)
+                if not resolved:
+                    for pk, h in list(self._heard_nodes.items()):
+                        if pk[:12] == nk and h.get("name"):
+                            resolved = h["name"]
+                            break
+                if resolved:
+                    names[nk] = resolved
+            return {"series": series, "names": names}
         except Exception as exc:
             Domoticz.Debug(f"_q_rssi_snr({panel}) failed (non-fatal): {exc!r}")
-            return {"series": []}
+            return {"series": [], "names": {}}
 
     def _q_noise(self, panel: str, t_from: int, t_to: int,
                  bucket_s: int, nodes_tuple: tuple) -> dict:
@@ -1670,6 +1702,62 @@ class BasePlugin:
             result["error"] = error
         return result
 
+    # Valid sort_by values for heard_query.
+    _HEARD_SORT_KEYS = frozenset(("recent", "least_hops", "max_hops", "times_heard"))
+
+    def _handle_heard_query(
+        self,
+        offset: int = 0,
+        limit: int = 100,
+        search: str = "",
+        type_filter: "int | None" = None,
+        sort_by: str = "recent",
+    ) -> dict:
+        """Return a paginated page of heard nodes.
+
+        offset: number of items to skip (position cursor — works for any sort).
+        sort_by: "recent" | "least_hops" | "max_hops" | "times_heard".
+        Returns: {rows, has_more, offset, total}
+        Filters out nodes that are already known contacts.
+        """
+        if sort_by not in self._HEARD_SORT_KEYS:
+            sort_by = "recent"
+        known_pks = set(self._node_pubkey.values())
+        with self._rx_log_lock:
+            items = [
+                (pk, dict(h))
+                for pk, h in self._heard_nodes.items()
+                if pk not in known_pks
+            ]
+        # Sort according to requested order.
+        if sort_by == "least_hops":
+            items.sort(key=lambda kv: (
+                kv[1].get("path_len") if isinstance(kv[1].get("path_len"), int)
+                and kv[1].get("path_len") >= 0 else 9999
+            ))
+        elif sort_by == "max_hops":
+            items.sort(key=lambda kv: (
+                kv[1].get("path_len") if isinstance(kv[1].get("path_len"), int)
+                and kv[1].get("path_len") >= 0 else -1
+            ), reverse=True)
+        elif sort_by == "times_heard":
+            items.sort(key=lambda kv: kv[1].get("count") or 0, reverse=True)
+        else:  # "recent"
+            items.sort(key=lambda kv: kv[1].get("last_heard") or 0, reverse=True)
+        # Apply filters before counting total.
+        if type_filter is not None:
+            items = [(pk, h) for pk, h in items if h.get("type") == type_filter]
+        if search:
+            sl = search.lower()
+            items = [(pk, h) for pk, h in items if sl in (h.get("name") or "").lower()]
+        total = len(items)
+        # Offset-based cursor (works for any sort order).
+        start = max(0, offset)
+        page = items[start:start + limit]
+        rows = [{"pubkey": pk, **h} for pk, h in page]
+        return {"rows": rows, "has_more": (start + limit) < total,
+                "offset": start, "total": total}
+
     def _force_close_serial(self, mc):
         """Synchronously close the underlying pyserial port.
 
@@ -1986,7 +2074,7 @@ class BasePlugin:
             snap = self._build_snapshot_payload()
             self._push("snapshot", snap)
             try:
-                self._push("heard", {"heard": self._build_heard_payload()})
+                self._push("heard", {"heard": self._build_heard_slim_payload()})
             except Exception as _hexc:
                 Domoticz.Debug(f"_broadcast_snapshot({reason}): deferred heard push failed: {_hexc}")
             _dbg(f"_broadcast_snapshot({reason}): snapshot pushed")
@@ -2049,7 +2137,7 @@ class BasePlugin:
         # resolve the exact promise that triggered the command rather than
         # relying on FIFO shift().
         req_id = payload.get("id")
-        if t in ("cmd", "inbox_query", "hello", "resync"):
+        if t in ("cmd", "inbox_query", "heard_query", "hello", "resync"):
             _dbg(f"onWebSocketMessage IN: t={t!r} id={req_id!r} "
                  f"cmd={payload.get('cmd')!r} scope={payload.get('scope')!r}")
         Domoticz.Debug(f"onWebSocketMessage: t={t!r} id={req_id!r}")
@@ -2068,7 +2156,7 @@ class BasePlugin:
                 # sent as a separate frame right after the lean snapshot rather
                 # than inflating it. The frontend t:'heard' handler applies it.
                 try:
-                    self._push("heard", {"heard": self._build_heard_payload()})
+                    self._push("heard", {"heard": self._build_heard_slim_payload()})
                 except Exception as _hexc:
                     Domoticz.Debug(f"hello: deferred heard push failed: {_hexc}")
             except Exception as exc:
@@ -2256,6 +2344,30 @@ class BasePlugin:
                     "has_more": False,
                     "oldest_id": None,
                     "error":    str(exc),
+                })
+
+        elif t == "heard_query":
+            # Paginated heard-nodes query.  Queries in-memory store, pushes page.
+            try:
+                _raw_lim = payload.get("limit", 100)
+                _limit   = min(int(_raw_lim) if isinstance(_raw_lim, (int, float)) else 100, 500)
+                _raw_off = payload.get("offset", 0)
+                _offset  = int(_raw_off) if isinstance(_raw_off, (int, float)) else 0
+                _search  = str(payload.get("search") or "")
+                _tf_raw  = payload.get("type_filter")
+                _type_f  = int(_tf_raw) if _tf_raw is not None else None
+                _sort    = str(payload.get("sort_by") or "recent")
+                page = self._handle_heard_query(
+                    offset=_offset, limit=_limit,
+                    search=_search, type_filter=_type_f, sort_by=_sort,
+                )
+                page["id"] = req_id
+                self._push("heard_page", page)
+            except Exception as exc:
+                Domoticz.Error(f"heard_query handler failed: {exc!r}")
+                self._push("heard_page", {
+                    "id": req_id, "rows": [], "has_more": False,
+                    "offset": 0, "total": 0, "error": str(exc),
                 })
 
         else:
@@ -3272,16 +3384,36 @@ class BasePlugin:
             Domoticz.Error(f"Could not load meshcore_heard.json: {exc}")
 
     def _build_heard_payload(self) -> dict:
-        """Build and return the heard-nodes dict (persisted to plugin dir and
-        pushed as ``t:'heard'`` over WebSocket).
-        Caller must NOT hold _rx_log_lock when calling this."""
+        """Build and return the full heard-nodes dict for file writes.
+
+        Caller must NOT hold _rx_log_lock when calling this.
+        """
         with self._rx_log_lock:
-            payload = {
-                "written_at": int(time.time()),
-                "nodes": {k: dict(v) for k, v in self._heard_nodes.items()},
-                "purged": sorted(self._heard_purged),
+            nodes = {k: dict(v) for k, v in self._heard_nodes.items()}
+            purged = sorted(self._heard_purged)
+        return {"written_at": int(time.time()), "nodes": nodes, "purged": purged}
+
+    def _build_heard_slim_payload(self) -> dict:
+        """Slim heard payload for WS push — strips redundant/rarely-needed fields.
+
+        Strips ``pubkey`` (the key is already the pubkey), ``first_heard``, and
+        ``node_ts`` from each node value to reduce payload size.  Adds ``total``
+        count.  Does NOT include the full purged list.
+        Caller must NOT hold _rx_log_lock when calling this.
+        """
+        _SLIM_SKIP = frozenset(("pubkey", "first_heard", "node_ts"))
+        with self._rx_log_lock:
+            nodes = {
+                pk: {k: v for k, v in h.items() if k not in _SLIM_SKIP}
+                for pk, h in self._heard_nodes.items()
             }
-        return payload
+            purged = sorted(self._heard_purged)
+        return {
+            "written_at": int(time.time()),
+            "total": len(nodes),
+            "nodes": nodes,
+            "purged": purged,
+        }
 
     def _write_heard(self):
         """Atomically persist the heard-nodes store to the plugin directory."""
@@ -3465,7 +3597,7 @@ class BasePlugin:
         if self._ws_heard_dirty and (now - self._heard_last_push) >= _PUSH_MIN_INTERVAL:
             self._ws_heard_dirty = False
             self._heard_last_push = now
-            self._push("heard", {"heard": self._build_heard_payload()})
+            self._push("heard", {"heard": self._build_heard_slim_payload()})
 
         if self._ws_channels_dirty and (now - self._channels_last_push) >= _PUSH_MIN_INTERVAL:
             self._ws_channels_dirty = False
@@ -4098,7 +4230,8 @@ class BasePlugin:
         if pp:
             clean_path = re.sub(r"[^0-9a-fA-F]", "", pp).lower()
             for i in range(0, len(clean_path) - 1, 2):
-                self._ts_relay_observed(clean_path[i:i + 2])
+                rb = clean_path[i:i + 2]
+                self._ts_relay_observed(rb, name=self._resolve_relay_key(rb))
         self._rx_log_dirty = True
 
     async def _refresh_contacts(self, mc, verbose=False):
@@ -6089,7 +6222,8 @@ class BasePlugin:
         if _msg_path:
             _clean = re.sub(r"[^0-9a-fA-F]", "", str(_msg_path)).lower()
             for _i in range(0, len(_clean) - 1, 2):
-                self._ts_relay_observed(_clean[_i:_i + 2])
+                _rb = _clean[_i:_i + 2]
+                self._ts_relay_observed(_rb, name=self._resolve_relay_key(_rb))
 
         # Persist private (DM) messages to the sender's per-contact Messages
         # device so a favourite's conversation history is never lost.

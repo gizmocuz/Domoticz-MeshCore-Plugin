@@ -3109,7 +3109,14 @@
                 // guards below).
                 if (msg.deviceMap && typeof msg.deviceMap === 'object') _deviceMap    = msg.deviceMap;
                 if (msg.stats     && typeof msg.stats     === 'object') _stats        = msg.stats;
-                if (msg.heard     && typeof msg.heard     === 'object') _heard        = msg.heard;
+                if (msg.heard     && typeof msg.heard     === 'object') {
+                    // Restore pubkey field (slim format strips it from node values).
+                    const rawNodes = msg.heard.nodes || {};
+                    const nodes = {};
+                    for (const [pk, h] of Object.entries(rawNodes))
+                        nodes[pk] = Object.assign({}, h, { pubkey: pk });
+                    _heard = { nodes, purged: msg.heard.purged || [], total: msg.heard.total || 0 };
+                }
                 if (msg.channels  && typeof msg.channels  === 'object') _channelNames = msg.channels;
                 // F7: record the device-map delta baseline seq so the first
                 // devices_delta can validate its gap-free continuity.
@@ -3172,10 +3179,25 @@
                 }
             } else if (t === 'heard') {
                 if (msg.heard && typeof msg.heard === 'object') {
-                    _heard = msg.heard;
+                    // Slim payload: pubkey is the key, not a field in the value.
+                    // Restore it so consumers (topology, _heardList, etc.) can
+                    // continue to read h.pubkey without changes.
+                    const rawNodes = (msg.heard && msg.heard.nodes) || {};
+                    const nodes = {};
+                    for (const [pk, h] of Object.entries(rawNodes)) {
+                        nodes[pk] = Object.assign({}, h, { pubkey: pk });
+                    }
+                    _heard = {
+                        nodes,
+                        purged: (msg.heard && msg.heard.purged) || [],
+                        total:  (msg.heard && msg.heard.total)  || 0,
+                    };
+                    _updateHeardTypeBadges();
                     _renderHeardIfOpen();
                     if (_includeHeard) _rerenderContacts();
                 }
+            } else if (t === 'heard_page') {
+                _onHeardPage(msg);
             } else if (t === 'channels') {
                 if (msg.channels && typeof msg.channels === 'object') {
                     _channelNames = msg.channels;
@@ -5467,17 +5489,20 @@
             // the raw hash; the all-FF/CC wildcard is labelled as such.
             let pathRow = null;
             if (msgObj.path) {
-                const hopLen = (phm || 2) * 2;                 // hex chars per hop
+                // Default to 1-byte path hashes (2 hex chars per hop) — the
+                // most common MeshCore network setting.  Use device_info only
+                // when explicitly set.
+                const hopLen = (phm || 1) * 2;
                 const raw = String(msgObj.path).toLowerCase();
-                const hops = [];
+                const hopLabels = [];
                 for (let i = 0; i + hopLen <= raw.length; i += hopLen) {
                     const tok = raw.slice(i, i + hopLen);
-                    const nm = _resolvePathHop(tok);   // shared resolver (incl. heard nodes)
-                    if (nm) hops.push(`${nm} (${tok})`);
-                    else if (/^(ff)+$/.test(tok) || /^(cc)+$/.test(tok)) hops.push(`flood (${tok})`);
-                    else hops.push(tok);
+                    const nm = _resolvePathHop(tok);
+                    if (nm) hopLabels.push(nm);
+                    else if (/^(ff)+$/.test(tok) || /^(cc)+$/.test(tok)) hopLabels.push(`flood`);
+                    else hopLabels.push(tok);
                 }
-                if (hops.length) pathRow = ["Repeater path", hops.join("  →  "), "text"];
+                if (hopLabels.length) pathRow = ["Path", hopLabels.join(" → "), "text"];
             }
 
             const rows = [
@@ -5486,9 +5511,9 @@
                 ["Channel",   msgObj.channel || "—", "text"],
                 ["Sender",    msgObj.sender || "—", "text"],
                 ...(msgObj.hops != null ? [["Hops", `${msgObj.hops} hop(s)`, ""]] : []),
+                ...(pathRow ? [pathRow] : []),
                 ...(msgObj.snr  != null ? [["SNR",  `${msgObj.snr} dB`, ""]] : []),
                 ...(msgObj.rssi != null ? [["RSSI", `${msgObj.rssi} dBm`, ""]] : []),
-                ...(pathRow ? [pathRow] : []),
                 ["Text",      msgObj.text || "", "text"],
                 ["Char count",`${chars} characters`, ""],
                 ["Path hash size", phm ? `${phm}-byte (node config)` : "—", ""],
@@ -6203,6 +6228,19 @@
         let _heardMapPk = null;        // pubkey currently shown on the map
         let _contactMap = null;        // Leaflet instance for the contact panel
 
+        // Pagination state for the heard panel (server-side, infinite scroll).
+        let _heardPageRows          = [];    // accumulated rows from all loaded pages
+        let _heardPageHasMore       = false;
+        let _heardPageOffset        = 0;     // offset cursor for next page
+        let _heardPageLoading       = false;
+        let _heardPageTotal         = 0;
+        let _heardQuerySeq          = 0;     // discard stale responses
+        let _heardScrollObs         = null;  // IntersectionObserver for sentinel
+        let _heardTypeFilter        = null;  // null = all, 1/2/3/4 = single type
+        let _heardSearch            = "";
+        let _heardSortBy            = "recent";
+        let _heardListRenderedCount = 0;     // append-only render cursor
+
         // Per-type counts of heard (non-contact) nodes, ignoring the active
         // type filter — so the toggle badges show how many exist of each.
         function _heardTypeCounts() {
@@ -6229,30 +6267,183 @@
                 .sort((a, b) => (b.last_heard || 0) - (a.last_heard || 0));
         }
 
+        function _heardPanelQueryFirst() {
+            _heardPageRows          = [];
+            _heardPageHasMore       = false;
+            _heardPageOffset        = 0;
+            _heardPageLoading       = false;
+            _heardListRenderedCount = 0;
+            _heardPanelQueryMore();
+        }
+
+        function _heardPanelQueryMore() {
+            if (_heardPageLoading) return;
+            if (_heardPageRows.length > 0 && !_heardPageHasMore) return;
+            _heardPageLoading = true;
+            const id = ++_heardQuerySeq;
+            const cmd = { t: 'heard_query', id, limit: 100, offset: _heardPageOffset };
+            if (_heardTypeFilter != null) cmd.type_filter = _heardTypeFilter;
+            if (_heardSearch)             cmd.search = _heardSearch;
+            if (_heardSortBy !== "recent") cmd.sort_by = _heardSortBy;
+            if (_pluginWS) _pluginWS.sendPluginCommand(cmd);
+        }
+
+        function _onHeardPage(msg) {
+            if (msg.id !== _heardQuerySeq) return; // stale response
+            _heardPageLoading = false;
+            _heardPageHasMore = !!msg.has_more;
+            _heardPageOffset  = (msg.offset || 0) + (msg.rows || []).length;
+            _heardPageTotal   = msg.total || 0;
+            // Filter out nodes that have become contacts since the query ran.
+            const knownPks = new Set();
+            for (const n of Object.values((_deviceMap && _deviceMap.nodes) || {}))
+                if (n.pubkey) knownPks.add(n.pubkey);
+            const newRows = (msg.rows || []).filter(h => h.pubkey && !knownPks.has(h.pubkey));
+            _heardPageRows = [..._heardPageRows, ...newRows];
+            _renderHeardPageList();
+        }
+
+        function _updateHeardTypeBadges() {
+            const view = document.getElementById("heard-view");
+            if (!view) return;
+            const _htc = _heardTypeCounts();
+            view.querySelectorAll(".heard-type-btn").forEach(b => {
+                const span = b.querySelector(".htc");
+                if (span) span.textContent = _htc[b.dataset.htype] || 0;
+            });
+        }
+
+        function _heardRowHtml(h) {
+            const pk  = h.pubkey;
+            const t   = h.last_heard ? new Date(h.last_heard * 1000).toLocaleString() : "?";
+            const sig = `${h.snr ?? "?"}/${h.rssi ?? "?"}`;
+            const kind = _HEARD_ADV_TYPE[h.type] || "?";
+            const hops = (h.path_len !== undefined && h.path_len >= 0) ? `${h.path_len}h` : "?";
+            let skewWrong = false, skewTip = "";
+            if (h.node_ts && h.last_heard
+                && Math.abs(h.node_ts - h.last_heard) > CLOCK_WRONG_TOLERANCE_S) {
+                skewWrong = true;
+                skewTip = `Node clock looks wrong (off by >1h).\n`
+                        + `Received: ${new Date(h.last_heard * 1000).toLocaleString()}\n`
+                        + `Node reported: ${new Date(h.node_ts * 1000).toLocaleString()}`;
+            }
+            const hasLoc = !!(h.lat || h.lon);
+            const gpsBtn = hasLoc
+                ? `<button class="heard-act gps" data-pk="${escHtml(pk)}" title="Show on map (${h.lat}, ${h.lon})"><i class="fa-solid fa-location-dot"></i></button>`
+                : "";
+            return `<div class="heard-row">
+                <div class="heard-row-top">
+                    <div class="heard-name">${escHtml(h.name || "(unnamed)")}</div>
+                    <div class="heard-acts">
+                        ${gpsBtn}
+                        <button class="heard-act add" data-pk="${escHtml(pk)}" data-name="${escHtml(h.name || "")}" title="Add to contacts"><i class="fa-solid fa-user-plus"></i></button>
+                        <button class="heard-act del" data-pk="${escHtml(pk)}" title="Delete from heard list"><i class="fa-solid fa-trash"></i></button>
+                    </div>
+                </div>
+                <div class="heard-meta">
+                    <span class="heard-chip">${escHtml(kind)}</span>
+                    <span class="heard-chip">${hops}</span>
+                    <span class="heard-chip">${escHtml(sig)} dB/dBm</span>
+                    <span class="heard-chip" title="Adverts received">${(h.count || 0)}&times;</span>
+                </div>
+                <div class="heard-pk" title="${escHtml(pk)}">${escHtml(pk)}</div>
+                <div class="heard-extra"><span title="Last heard at">${escHtml(t)}</span>${skewWrong ? `<i class="fa-solid fa-triangle-exclamation clock-warn" title="${escHtml(skewTip).replace(/\n/g, "&#10;")}"></i>` : ""}</div>
+            </div>`;
+        }
+
+        function _bindHeardRow(rowEl, h) {
+            const pk = h.pubkey;
+            const addBtn = rowEl.querySelector('.heard-act.add');
+            const delBtn = rowEl.querySelector('.heard-act.del');
+            const gpsBtn = rowEl.querySelector('.heard-act.gps');
+            if (addBtn) addBtn.onclick = () => _heardAdd(pk, h.name || '');
+            if (delBtn) delBtn.onclick = () => _heardDelete(pk);
+            if (gpsBtn) gpsBtn.onclick = () => _heardToggleMap(pk);
+        }
+
+        function _renderHeardPageList() {
+            const listWrap = document.getElementById('heard-list-wrap');
+            if (!listWrap) return;
+
+            if (_heardScrollObs) { _heardScrollObs.disconnect(); _heardScrollObs = null; }
+
+            const isFirstPage = _heardListRenderedCount === 0;
+            if (isFirstPage) {
+                listWrap.innerHTML = '';
+                if (!_heardPageRows.length && !_heardPageLoading) {
+                    listWrap.innerHTML = '<div style="color:var(--text);opacity:.7;padding-top:10px">Nothing heard yet — wait for repeaters to beacon.</div>';
+                    return;
+                }
+                const itemsDiv = document.createElement('div');
+                itemsDiv.className = 'heard-list';
+                itemsDiv.id = 'heard-items';
+                listWrap.appendChild(itemsDiv);
+                const statusDiv = document.createElement('div');
+                statusDiv.id = 'heard-page-status';
+                listWrap.appendChild(statusDiv);
+            }
+
+            const itemsDiv = document.getElementById('heard-items');
+            const statusDiv = document.getElementById('heard-page-status');
+            if (!itemsDiv) return;
+
+            // Append only new rows (append-only).
+            const newRows = _heardPageRows.slice(_heardListRenderedCount);
+            for (const h of newRows) {
+                const el = document.createElement('div');
+                el.innerHTML = _heardRowHtml(h);
+                const row = el.firstElementChild;
+                _bindHeardRow(row, h);
+                itemsDiv.appendChild(row);
+            }
+            _heardListRenderedCount = _heardPageRows.length;
+
+            // Update sentinel / footer.
+            if (statusDiv) {
+                if (_heardPageHasMore) {
+                    statusDiv.innerHTML = '<div id="heard-sentinel" style="height:4px"></div>';
+                    const sentinel = document.getElementById('heard-sentinel');
+                    if (sentinel) {
+                        _heardScrollObs = new IntersectionObserver(entries => {
+                            if (entries[0].isIntersecting) _heardPanelQueryMore();
+                        }, { root: null, rootMargin: '200px', threshold: 0 });
+                        _heardScrollObs.observe(sentinel);
+                    }
+                } else if (_heardPageRows.length > 0) {
+                    const shown = _heardPageRows.length;
+                    statusDiv.innerHTML = `<div style="text-align:center;padding:8px 0;font-size:0.72rem;color:var(--muted)">${_heardPageTotal.toLocaleString()} total · showing ${shown.toLocaleString()}</div>`;
+                }
+            }
+
+            _updateHeardTypeBadges();
+        }
+
         function _renderHeardIfOpen() {
             if (!_isOpen("heard")) return;
             const view = document.getElementById("heard-view");
             if (!view) return;
 
-            // Build the shell ONCE per panel open. The 3 s refresh only
-            // rewrites #heard-list-wrap — the #heard-map element is left
-            // untouched so its Leaflet instance stays bound to a live DOM
+            // Build the shell ONCE per panel open.  The #heard-map element is
+            // left untouched so its Leaflet instance stays bound to a live DOM
             // node (rebuilding it every tick made the map flash and die).
             let listWrap = document.getElementById("heard-list-wrap");
             if (!listWrap) {
                 // Fresh shell — any prior Leaflet instance is now orphaned.
                 if (_heardMap) { try { _heardMap.remove(); } catch (_) {} _liveMaps.delete(_heardMap); _heardMap = null; }
                 view.innerHTML = `
-                    <div style="font-size:0.82rem;color:var(--text);opacity:0.85;line-height:1.5">
-                        Nodes heard over the air whose pubkey isn't in your
-                        contacts. This list is persistent. Use
-                        <i class="fa-solid fa-user-plus"></i> to add a node to
-                        your contacts, <i class="fa-solid fa-trash"></i> to drop
-                        it from this list, or
-                        <i class="fa-solid fa-location-dot"></i> to show its
-                        position on the map below.
+                    <div style="display:flex;align-items:center;gap:6px;margin-bottom:6px">
+                        <input id="heard-search" type="search" placeholder="Search name…"
+                            style="font-size:0.75rem;padding:4px 10px;border-radius:20px;border:1px solid var(--border);background:var(--surface);color:var(--text);outline:none;flex:1 1 auto;min-width:0"
+                            autocomplete="off" spellcheck="false">
+                        <select id="heard-sort-sel" title="Sort order"
+                            style="font-size:0.72rem;background:var(--surface);color:var(--text);border:1px solid var(--border);border-radius:4px;padding:3px 6px;flex:0 0 auto">
+                            <option value="recent">Heard Recently</option>
+                            <option value="least_hops">Least Hops</option>
+                            <option value="max_hops">Max Hops</option>
+                            <option value="times_heard">Times Heard</option>
+                        </select>
                     </div>
-                    <div id="heard-purge-bar" style="display:flex;align-items:center;gap:6px;margin:8px 0 2px;flex-wrap:nowrap">
+                    <div id="heard-purge-bar" style="display:flex;align-items:center;gap:6px;margin:4px 0 2px;flex-wrap:nowrap">
                         <span style="font-size:0.72rem;color:var(--muted);white-space:nowrap">Purge:</span>
                         <select id="heard-purge-sel" style="font-size:0.72rem;background:var(--surface);color:var(--text);border:1px solid var(--border);border-radius:4px;padding:2px 6px;min-width:0;flex:1 1 auto">
                             <optgroup label="Older than">
@@ -6280,78 +6471,66 @@
                 listWrap = document.getElementById("heard-list-wrap");
                 view.querySelectorAll(".heard-type-btn").forEach(b => {
                     b.onclick = () => {
-                        const t = b.dataset.htype;
+                        const t = +b.dataset.htype;
                         _heardShowType[t] = !_heardShowType[t];
                         try { localStorage.setItem(LS_HEARD_TYPE[t], _heardShowType[t] ? "1" : "0"); } catch (_) {}
                         b.classList.toggle("active", _heardShowType[t]);
-                        _renderHeardIfOpen();
+                        // Map multi-select to single server-side type filter:
+                        // null = all, or the one enabled type if exactly one is on.
+                        const activeTypes = [1,2,3,4].filter(x => _heardShowType[x]);
+                        _heardTypeFilter = activeTypes.length === 1 ? activeTypes[0] : null;
+                        _heardPanelQueryFirst();
                     };
                 });
                 const purgeBtn = document.getElementById("heard-purge-btn");
                 if (purgeBtn) purgeBtn.onclick = _heardPurgeRun;
+
+                // Search input — debounced, server-side.
+                let _heardSearchTimer = null;
+                const searchEl = document.getElementById("heard-search");
+                if (searchEl) {
+                    searchEl.value = _heardSearch;
+                    searchEl.addEventListener("input", () => {
+                        clearTimeout(_heardSearchTimer);
+                        _heardSearchTimer = setTimeout(() => {
+                            const v = searchEl.value.trim();
+                            if (v === _heardSearch) return;
+                            _heardSearch = v;
+                            _heardPanelQueryFirst();
+                        }, 300);
+                    });
+                    searchEl.addEventListener("search", () => {
+                        // Fires when the × clear button is clicked on type="search".
+                        clearTimeout(_heardSearchTimer);
+                        if ("" !== _heardSearch) { _heardSearch = ""; _heardPanelQueryFirst(); }
+                    });
+                    searchEl.addEventListener("focus", () => {
+                        searchEl.style.borderColor = "var(--accent)";
+                    });
+                    searchEl.addEventListener("blur", () => {
+                        searchEl.style.borderColor = "";
+                    });
+                }
+
+                // Sort dropdown — immediate, server-side.
+                const sortSel = document.getElementById("heard-sort-sel");
+                if (sortSel) {
+                    sortSel.value = _heardSortBy;
+                    sortSel.addEventListener("change", () => {
+                        _heardSortBy = sortSel.value;
+                        _heardPanelQueryFirst();
+                    });
+                }
+
+                // Kick off the first page load for this panel open.
+                _heardPanelQueryFirst();
             }
 
-            // Refresh the per-type count badges every render.
-            const _htc = _heardTypeCounts();
-            view.querySelectorAll(".heard-type-btn").forEach(b => {
-                const span = b.querySelector(".htc");
-                if (span) span.textContent = _htc[b.dataset.htype] || 0;
-            });
+            // Refresh the per-type count badges (driven from slim _heard.nodes).
+            _updateHeardTypeBadges();
 
-            const list = _heardList();
-            if (!list.length) {
-                listWrap.innerHTML = `<div style="color:var(--text);opacity:.7;padding-top:10px">
-                    Nothing heard yet — wait for repeaters to beacon.</div>`;
-            } else {
-                listWrap.innerHTML = `<div class="heard-list">` + list.map(h => {
-                    const pk   = h.pubkey;
-                    const t    = h.last_heard ? new Date(h.last_heard * 1000).toLocaleString() : "?";
-                    const sig  = `${h.snr ?? "?"}/${h.rssi ?? "?"}`;
-                    const kind = _HEARD_ADV_TYPE[h.type] || "?";
-                    const hops = (h.path_len !== undefined && h.path_len >= 0) ? `${h.path_len}h` : "?";
-                    let skewWrong = false, skewTip = "";
-                    if (h.node_ts && h.last_heard
-                        && Math.abs(h.node_ts - h.last_heard) > CLOCK_WRONG_TOLERANCE_S) {
-                        skewWrong = true;
-                        skewTip = `Node clock looks wrong (off by >1h).\n`
-                                + `Received: ${new Date(h.last_heard * 1000).toLocaleString()}\n`
-                                + `Node reported: ${new Date(h.node_ts * 1000).toLocaleString()}`;
-                    }
-                    const hasLoc = !!(h.lat || h.lon);
-                    const gpsBtn = hasLoc
-                        ? `<button class="heard-act gps" data-pk="${escHtml(pk)}" title="Show on map (${h.lat}, ${h.lon})"><i class="fa-solid fa-location-dot"></i></button>`
-                        : "";
-                    return `<div class="heard-row">
-                        <div class="heard-row-top">
-                            <div class="heard-name">${escHtml(h.name || "(unnamed)")}</div>
-                            <div class="heard-acts">
-                                ${gpsBtn}
-                                <button class="heard-act add" data-pk="${escHtml(pk)}" data-name="${escHtml(h.name || "")}" title="Add to contacts"><i class="fa-solid fa-user-plus"></i></button>
-                                <button class="heard-act del" data-pk="${escHtml(pk)}" title="Delete from heard list"><i class="fa-solid fa-trash"></i></button>
-                            </div>
-                        </div>
-                        <div class="heard-meta">
-                            <span class="heard-chip">${escHtml(kind)}</span>
-                            <span class="heard-chip">${hops}</span>
-                            <span class="heard-chip">${escHtml(sig)} dB/dBm</span>
-                            <span class="heard-chip" title="Adverts received from this node">${(h.count || 0)}&times;</span>
-                        </div>
-                        <div class="heard-pk" title="${escHtml(pk)}">${escHtml(pk)}</div>
-                        <div class="heard-extra"><span title="Last heard at">${escHtml(t)}</span>${skewWrong ? `<i class="fa-solid fa-triangle-exclamation clock-warn" title="${escHtml(skewTip).replace(/\n/g, "&#10;")}"></i>` : ""}</div>
-                    </div>`;
-                }).join("") + `</div>`;
-
-                listWrap.querySelectorAll(".heard-act.add").forEach(b =>
-                    b.onclick = () => _heardAdd(b.dataset.pk, b.dataset.name));
-                listWrap.querySelectorAll(".heard-act.del").forEach(b =>
-                    b.onclick = () => _heardDelete(b.dataset.pk));
-                listWrap.querySelectorAll(".heard-act.gps").forEach(b =>
-                    b.onclick = () => _heardToggleMap(b.dataset.pk));
-            }
-
-            // Keep an open map visible if its node is still present.
-            // force=false → don't reset the user's zoom/pan on refresh.
-            if (_heardMapPk && list.some(h => h.pubkey === _heardMapPk)) {
+            // Keep an open map visible if its node is still in the loaded pages.
+            if (_heardMapPk && _heardPageRows.some(h => h.pubkey === _heardMapPk)) {
                 _heardShowMap(_heardMapPk, false);
             } else if (_heardMapPk) {
                 _heardMapPk = null;
@@ -6365,7 +6544,9 @@
             // Optimistic: drop locally so it disappears immediately.
             if (_heard.nodes) delete _heard.nodes[pk];
             if (_heardMapPk === pk) _heardToggleMap(pk);
-            _renderHeardIfOpen();
+            _heardPageRows = _heardPageRows.filter(r => r.pubkey !== pk);
+            _heardListRenderedCount = 0;
+            _renderHeardPageList();
             if (_includeHeard) _rerenderContacts();
             await _sendDeviceCmd(`!heard_add ${pk}`);
             // The plugin will push t:'devices' and t:'heard' shortly; the reducer
@@ -6414,11 +6595,14 @@
                 `Future broadcasts from these nodes will be ignored until they're heard again.\n\n` +
                 `Continue?`
             )) return;
+            const victimPks = new Set(victims.map(v => v.pubkey));
             for (const v of victims) {
                 if (_heard.nodes) delete _heard.nodes[v.pubkey];
                 if (_heardMapPk === v.pubkey) _heardToggleMap(v.pubkey);
             }
-            _renderHeardIfOpen();
+            _heardPageRows = _heardPageRows.filter(r => !victimPks.has(r.pubkey));
+            _heardListRenderedCount = 0;
+            _renderHeardPageList();
             if (_includeHeard) _rerenderContacts();
             await _pluginWS.sendCmdAndWait(cmd);
         }
@@ -6430,7 +6614,9 @@
             // Optimistic update: remove locally so the row vanishes immediately.
             if (_heard.nodes) delete _heard.nodes[pk];
             if (_heardMapPk === pk) _heardToggleMap(pk);
-            _renderHeardIfOpen();
+            _heardPageRows = _heardPageRows.filter(r => r.pubkey !== pk);
+            _heardListRenderedCount = 0;
+            _renderHeardPageList();
             if (_includeHeard) _rerenderContacts();
             await _pluginWS.sendCmdAndWait(`!forget_heard ${pk}`);
         }
@@ -11299,7 +11485,7 @@ Larger = more reliable routing but smaller mesh diameter.">Path hash size</label
                 if (_analyticsRssiChart) { try { _analyticsRssiChart.destroy(); } catch (_) {} _analyticsRssiChart = null; }
                 return;
             }
-            const series = _analyticsCapSeries(data.series);
+            const series = _analyticsCapSeries(data.series, data.names);
             if (_analyticsRssiChart && _analyticsRssiChart.series &&
                 _analyticsRssiChart.series.length === series.length &&
                 _analyticsRssiChart.series.every((s, i) => s.name === series[i].name)) {
@@ -11330,7 +11516,7 @@ Larger = more reliable routing but smaller mesh diameter.">Path hash size</label
                 if (_analyticsSnrChart) { try { _analyticsSnrChart.destroy(); } catch (_) {} _analyticsSnrChart = null; }
                 return;
             }
-            const series = _analyticsCapSeries(data.series);
+            const series = _analyticsCapSeries(data.series, data.names);
             if (_analyticsSnrChart && _analyticsSnrChart.series &&
                 _analyticsSnrChart.series.length === series.length &&
                 _analyticsSnrChart.series.every((s, i) => s.name === series[i].name)) {
@@ -11348,39 +11534,60 @@ Larger = more reliable routing but smaller mesh diameter.">Path hash size</label
         }
 
         // Resolve a raw node_key (12-hex pubkey prefix, or "self", or
-        // "unknown") to a human-readable contact name using the live
-        // _deviceMap. Falls back to the key itself when no match is
-        // found (e.g. a node that left the contact list since the
-        // analytics samples were stored). "self" maps to the connected
-        // node's name when known.
-        function _analyticsResolveNodeKey(key) {
+        // "unknown") to a human-readable contact name.  Resolution order:
+        //   1. nameMap (server-provided at query time — includes historic nodes)
+        //   2. current _deviceMap contacts (pubkey prefix match)
+        //   3. _heard nodes (nodes heard but not in contacts)
+        //   4. fallback: the raw key itself
+        function _analyticsResolveNodeKey(key, nameMap) {
             if (!key) return key;
+            if (nameMap && nameMap[key]) return nameMap[key];
             if (key === 'self') {
                 const sn = (_deviceMap && _deviceMap.self && _deviceMap.self.name);
                 return sn || 'self';
             }
             if (key === 'unknown') return 'unknown';
             const nodes = (_deviceMap && _deviceMap.nodes) || {};
-            // Exact pubkey-prefix match: each contact's full pubkey starts
-            // with its node_key, but the backend stores the 12-hex prefix.
-            // Walk contacts and compare prefixes — cheap enough for the
-            // contact-list sizes we care about (low hundreds max).
             for (const [name, n] of Object.entries(nodes)) {
                 const pk = n && n.pubkey;
                 if (pk && typeof pk === 'string' && pk.startsWith(key)) return name;
             }
+            // Also search heard nodes (not in contacts but have a pubkey + name).
+            const hn = (_heard && _heard.nodes) || {};
+            for (const [pk, h] of Object.entries(hn)) {
+                if (pk.startsWith(key) && h && h.name) return h.name;
+            }
             return key;
         }
 
+        // Resolve a 1-byte (2-char hex) relay path token to a contact name
+        // by matching the first byte of each known node's pubkey prefix.
+        function _resolveRelayHex(hex) {
+            const want = (hex || '').toLowerCase().slice(0, 2);
+            if (want.length !== 2) return null;
+            const nodes = (_deviceMap && _deviceMap.nodes) || {};
+            for (const [name, n] of Object.entries(nodes)) {
+                const pk = n && (n.pubkey_prefix || n.pubkey);
+                if (pk && pk.slice(0, 2) === want) return name;
+            }
+            const hn = (_heard && _heard.nodes) || {};
+            for (const [pk, h] of Object.entries(hn)) {
+                if (pk.slice(0, 2) === want && h && h.name) return h.name;
+            }
+            return null;
+        }
+
         // Cap series to top-8 by sample count; collapse the rest into "Other" (averaged).
-        function _analyticsCapSeries(rawSeries) {
+        // nameMap: optional server-provided {node_key: display_name} for historic nodes.
+        function _analyticsCapSeries(rawSeries, nameMap) {
+            nameMap = nameMap || {};
             const MAX = 8;
             // Resolve each series' raw node_key to a display name BEFORE
             // capping so the legend, palette and dedupe all key on the
             // human-readable label.
             const named = rawSeries.map(s => {
                 const rawKey = s.node || s.name || '';
-                const displayName = _analyticsResolveNodeKey(rawKey);
+                const displayName = _analyticsResolveNodeKey(rawKey, nameMap);
                 return Object.assign({}, s, { _rawKey: rawKey, _displayName: displayName });
             });
             if (named.length <= MAX) {
@@ -11898,7 +12105,7 @@ Larger = more reliable routing but smaller mesh diameter.">Path hash size</label
             const tbody = document.createElement('tbody');
             for (const row of rows) {
                 const hex = String(row.hex || row.hex_key || '??');
-                const name = row.name || null;
+                const name = row.name || _resolveRelayHex(hex) || null;
                 const count = (row.count || 0).toLocaleString();
 
                 const tr = document.createElement('tr');
@@ -11935,7 +12142,7 @@ Larger = more reliable routing but smaller mesh diameter.">Path hash size</label
             // Title bar above the table wrapper.
             const titleBar = document.createElement('div');
             titleBar.className = 'analytics-panel-title';
-            titleBar.textContent = 'TOP RELAY KEYS (path 2-char hex) ';
+            titleBar.textContent = 'TOP RELAY KEYS (1-byte path hash) ';
             const noteText = document.createElement('span');
             noteText.className = 'relays-note';
             noteText.textContent = 'lifetime totals · not filtered by time range';
