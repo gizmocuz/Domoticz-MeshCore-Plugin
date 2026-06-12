@@ -2013,6 +2013,12 @@
         #chan-slots-list {
             max-height: 340px;
             overflow-y: auto;
+            /* .panel-view is a flex column; an overflow:auto child has an
+               automatic minimum size of 0, so once the hashes-heard table
+               below grows past the panel height, flex shrinks this list to
+               zero and the slot rows (with their Add/Remove buttons) vanish.
+               Opt out of shrinking — the list scrolls within its own cap. */
+            flex: none;
         }
         .chan-slot-row {
             display: grid;
