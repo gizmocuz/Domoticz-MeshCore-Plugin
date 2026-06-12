@@ -1,43 +1,53 @@
-﻿--[[
-    MeshCore – dzVents Status Report (demo)
-    ========================================
-    Example script that sends periodic home-status updates to a
-    MeshCore channel. Messages are split into readable themed groups
-    and spaced apart so the plugin can serialise each LoRa TX.
+--[[
+    MeshCore Status Report v2 (dzVents bridge)
+    ===========================================
+    Sends periodic home-status updates to a MeshCore channel.
+    Messages are split into themed groups and spaced one-per-minute
+    to avoid LoRa TX overlap.
 
-    The script runs every minute. On the hour it builds themed
-    message groups and sends one per minute. Once all groups are
-    sent the script idles until the next hour.
+    Requires MeshCore plugin v1.0.3+ with a Command Bridge Channel
+    configured (Mode3). The bridge exposes two devices used here:
 
-    MESSAGE SYNTAX
-    --------------
-    The MeshCore plugin accepts messages on the Mesh Send device:
-      "#General: hello"   → broadcast on the channel named 'General'
-      "#0: hello"         → broadcast on channel index 0
-      "garden: hello"     → direct message to node named 'garden'
-      "hello"             → direct message to first discovered contact
+      - MeshCore Reply  (Text, unit 6)   -- write JSON message here
+      - MeshCore Send   (Switch, unit 7, Push On) -- turn On to dispatch
 
-    Set CHANNEL_NAME below to your target channel name.
-    The plugin resolves the name to the correct index automatically.
-    Channel names are logged by the plugin on startup and visible
-    on the MeshCore dashboard.
+    MESSAGE FORMAT (JSON written to MeshCore Reply)
+    ------------------------------------------------
+      { "to": "#ChannelName", "text": "your message" }
+
+    The plugin resolves the channel name to the correct index automatically.
+    Channel names are visible in the MeshCore dashboard and logged on startup.
+
+    BEHAVIOUR
+    ---------
+    - Every hour (minute == 0): builds themed status messages and queues them.
+    - Every minute: drains one queued message (so they arrive one-per-minute).
+    - On presence change: sends an immediate alert.
+
+    CONFIGURATION
+    -------------
+    1. Set CHANNEL_NAME to your target channel name (or index like '0').
+    2. Set MESHCORE_REPLY / MESHCORE_SEND to your bridge device names.
+    3. Fill DEVICES with your actual Domoticz device names.
+       Set any entry to nil to silently skip it.
 ]]--
 
 -- ═══════════════════════════════════════════════════════════════════
 -- CONFIGURATION – adjust these to match your setup
 -- ═══════════════════════════════════════════════════════════════════
-local CHANNEL_NAME      = 'General'                 -- Channel name to send to (or use a number like '0')
-local MESHCORE_SEND     = 'MeshCore - Mesh Send'    -- Name of the MeshCore Send device
+local CHANNEL_NAME  = 'General'            -- Channel name (or index like '0')
+local MESHCORE_REPLY = 'MeshCore Reply'    -- JSON reply output   (Text, unit 6)
+local MESHCORE_SEND  = 'MeshCore Send'    -- Dispatch trigger    (Switch, unit 7)
 
--- Device names – replace with your own Domoticz device names
+-- Device names – set any entry to nil to skip it
 local DEVICES = {
-    tempIndoor      = 'Temperature - Living Room',  -- Temp + Humidity sensor
-    tempOutdoor     = 'Temperature - Outside',      -- Temp + Humidity sensor
-    thermostat      = 'Thermostat',                 -- Setpoint device
-    power           = 'Power',                      -- P1 Smart Meter (energy)
-    solar           = 'Solar Power',                -- kWh device
-    gas             = 'Gas',                         -- P1 Smart Meter (gas)
-    presence        = 'Presence',                   -- Selector switch (home/away/etc)
+    tempIndoor  = 'Temperature - Living Room',  -- Temp (+Humidity) sensor
+    tempOutdoor = 'Temperature - Outside',      -- Temp (+Humidity) sensor
+    thermostat  = 'Thermostat',                 -- Setpoint device
+    power       = 'Power',                      -- P1 Smart Meter (energy)
+    solar       = 'Solar Power',                -- kWh / Solar device (optional)
+    gas         = 'Gas',                        -- P1 Smart Meter (gas, optional)
+    presence    = 'Presence',                   -- Selector switch (home/away/etc)
 }
 -- ═══════════════════════════════════════════════════════════════════
 
@@ -66,40 +76,40 @@ return {
     execute = function(dz, triggeredItem)
 
         -- Safe device lookup: dzVents throws when a device is not found,
-        -- so we must use pcall to avoid crashing the whole script.
+        -- so we use pcall to avoid crashing the whole script.
         local function safeDev(name)
+            if (name == nil or name == '') then return nil end
             local ok, d = pcall(dz.devices, name)
             if ok and d then return d end
             return nil
         end
 
-        local sendDev = safeDev(MESHCORE_SEND)
+        local replyDev = safeDev(MESHCORE_REPLY)
+        local sendDev  = safeDev(MESHCORE_SEND)
+
+        if (replyDev == nil) then
+            dz.log('MeshCore Reply device not found! Expected: ' .. MESHCORE_REPLY, dz.LOG_ERROR)
+            return
+        end
         if (sendDev == nil) then
             dz.log('MeshCore Send device not found! Expected: ' .. MESHCORE_SEND, dz.LOG_ERROR)
-            dz.log('Make sure the MeshCore hardware is added and named correctly.', dz.LOG_ERROR)
             return
         end
 
-        -- Helper: send a message to the configured channel
+        -- Send a message to the configured channel
         local function sendMsg(message)
-            local payload = '#' .. CHANNEL_NAME .. ': ' .. message
-            dz.log('Sending: ' .. payload, dz.LOG_INFO)
-            sendDev.updateText(payload)
+            local payload = dz.utils.toJSON({ to = '#' .. CHANNEL_NAME, text = message })
+            dz.log('Sending to #' .. CHANNEL_NAME .. ': ' .. message, dz.LOG_INFO)
+            replyDev.updateText(payload)
+            sendDev.switchOn()
         end
 
-        -- Helper: round a number
         local function round(num, dec)
             if (num == nil) then return 0 end
             local m = 10 ^ (dec or 1)
             return math.floor(num * m + 0.5) / m
         end
 
-        -- Helper: safe device lookup
-        local function dev(name)
-            return safeDev(name)
-        end
-
-        -- Helper: nil-safe value access
         local function safeVal(val, fallback)
             if (val == nil) then return fallback or 0 end
             return val
@@ -140,11 +150,11 @@ return {
 
         -- 1) Climate
         local climate = {}
-        local indoor = dev(DEVICES.tempIndoor)
+        local indoor = safeDev(DEVICES.tempIndoor)
         if (indoor) then
             table.insert(climate, 'Indoor ' .. round(indoor.temperature) .. 'C, ' .. safeVal(indoor.humidity, 0) .. '%')
         end
-        local thermo = dev(DEVICES.thermostat)
+        local thermo = safeDev(DEVICES.thermostat)
         if (thermo) then
             table.insert(climate, 'Thermostat ' .. safeVal(thermo.setPoint, '?') .. 'C')
         end
@@ -154,7 +164,7 @@ return {
 
         -- 2) Weather
         local weather = {}
-        local outdoor = dev(DEVICES.tempOutdoor)
+        local outdoor = safeDev(DEVICES.tempOutdoor)
         if (outdoor) then
             table.insert(weather, round(outdoor.temperature) .. 'C, ' .. safeVal(outdoor.humidity, 0) .. '%')
         end
@@ -164,24 +174,24 @@ return {
 
         -- 3) Energy
         local energy = {}
-        local pw = dev(DEVICES.power)
+        local pw = safeDev(DEVICES.power)
         if (pw) then
             local use = pw.usage or 0
             local del = pw.usageDelivered or 0
             if (del > 0) then
-                table.insert(energy, 'Delivery ' .. del .. 'W')
+                table.insert(energy, 'Delivering ' .. del .. 'W')
             else
-                table.insert(energy, 'Usage ' .. use .. 'W')
+                table.insert(energy, 'Using ' .. use .. 'W')
             end
         end
-        local sol = dev(DEVICES.solar)
+        local sol = safeDev(DEVICES.solar)
         if (sol) then
             local w = sol.WhActual or 0
             if (w > 0) then
                 table.insert(energy, 'Solar ' .. w .. 'W')
             end
         end
-        local gas = dev(DEVICES.gas)
+        local gas = safeDev(DEVICES.gas)
         if (gas) then
             table.insert(energy, 'Gas today ' .. gas.counterToday)
         end
@@ -189,11 +199,14 @@ return {
             table.insert(messages, 'Energy: ' .. table.concat(energy, ' | '))
         end
 
-        -- Send first message now, queue the rest (one per minute)
-        if (#messages > 0) then
-            sendMsg(table.remove(messages, 1))
-            dz.data.pendingMsgs = messages
+        if (#messages == 0) then
+            dz.log('No devices available for status report', dz.LOG_DEBUG)
+            return
         end
+
+        -- Send first message now, queue the rest (one per minute)
+        sendMsg(table.remove(messages, 1))
+        dz.data.pendingMsgs = messages
 
         dz.log('Built ' .. (#messages + 1) .. ' status message(s) for #' .. CHANNEL_NAME, dz.LOG_INFO)
     end
