@@ -1034,31 +1034,45 @@ class BasePlugin:
         except Exception as exc:
             Domoticz.Debug(f"_ts_packets_add failed (non-fatal): {exc!r}")
 
-    def _resolve_relay_key(self, hex_byte: str) -> "str | None":
-        """Return the contact name whose pubkey prefix starts with hex_byte.
+    def _path_token_chars(self) -> int:
+        """Hex-char width of one path-hash hop token (2/4/6).
 
-        Uses a 1-byte (2-char hex) hash match against the first byte of each
-        known contact's pubkey prefix.  Returns None when no match is found or
-        when two contacts share the same first byte (ambiguous).
+        Derived from the node's reported device_info path_hash_mode (stored
+        1-based: 1/2/3 = byte width); falls back to 1-byte when the node has
+        not reported yet. Clamped to the firmware's valid 1–3 range.
         """
-        want = hex_byte.lower()
+        try:
+            mode = int((self._device_info or {}).get("path_hash_mode") or 1)
+        except (TypeError, ValueError):
+            mode = 1
+        return 2 * min(3, max(1, mode))
+
+    def _resolve_relay_key(self, hex_token: str) -> "str | None":
+        """Return the contact name whose pubkey prefix starts with hex_token.
+
+        hex_token is one path-hash hop token (2/4/6 hex chars depending on
+        the mesh's path_hash_mode).  Returns None when no match is found or
+        when two contacts share the same prefix (ambiguous).
+        """
+        want = hex_token.lower()
         match = None
         for prefix, name in list(self._prefix_to_name.items()):
-            if prefix[:2] == want:
+            if prefix.startswith(want):
                 if match is not None:
-                    return None  # ambiguous — two contacts collide on this byte
+                    return None  # ambiguous — two contacts collide on this token
                 match = name
         return match
 
     def _ts_relay_observed(self, hex_key: str, name: str = None):
-        """Bump count and update last_seen for a 2-char hex relay token.
+        """Bump count and update last_seen for one hex relay token
+        (2/4/6 chars = 1/2/3-byte path hash).
 
         Updates name only if the provided name is non-empty and different from
         the stored one.  Never raises into callers.
         """
         if self._msgdb is None:
             return
-        if not hex_key or len(hex_key) != 2:
+        if not hex_key or len(hex_key) not in (2, 4, 6):
             return
         try:
             ts = int(time.time())
@@ -1391,6 +1405,10 @@ class BasePlugin:
         """Return relay-key tallies ordered by count descending.
 
         nodes_tuple[0] is treated as a limit (int) when provided; defaults to 20.
+        Only keys matching the current path_hash_mode token width are returned,
+        so rows tallied under a previous hash-size setting don't pollute the
+        table after a mode switch (they stay in the DB and age out via the
+        normal retention pass).
 
         Shape:
           {
@@ -1405,11 +1423,12 @@ class BasePlugin:
             sql = (
                 "SELECT hex_key, name, count, last_seen"
                 " FROM ts_relay_keys"
+                " WHERE length(hex_key) = ?"
                 " ORDER BY count DESC"
                 " LIMIT ?"
             )
             with self._msgdb_lock:
-                rows = self._msgdb.execute(sql, (limit,)).fetchall()
+                rows = self._msgdb.execute(sql, (self._path_token_chars(), limit)).fetchall()
             return {"rows": [{"hex": h, "name": n, "count": c, "last_seen": ls}
                               for h, n, c, ls in rows]}
         except Exception as exc:
@@ -3177,11 +3196,14 @@ class BasePlugin:
         Domoticz.Debug(f"_push_rx_log_delta: seq={seq} new={len(new_entries)}")
 
     def _load_rx_log(self):
-        """Restore the packet-time history and chan_hash_names on startup.
+        """Restore the packet-time history, chan_hash_names and the heard
+        channel-hash counters on startup.
 
         Packet timestamps power the packets/hour heatmap; chan_hash_names
         avoid a cold-start gap where configured channel hashes show as
-        "unknown" until _fetch_channel_names completes its first round-trip.
+        "unknown" until _fetch_channel_names completes its first round-trip;
+        chan_hash_counts keep the "Hashes heard on air" table in the channels
+        panel populated across a restart instead of resetting to empty.
         The rolling frame buffer / sparklines rebuild from live RX events.
         """
         # Only seed an empty buffer. On a warm disable→enable (Domoticz still
@@ -3212,6 +3234,22 @@ class BasePlugin:
                     with self._rx_log_lock:
                         self._chan_hash_to_name = restored
                     Domoticz.Log(f"Restored {len(restored)} chan_hash->name mapping(s) from rx-log")
+            stats = data.get("stats")
+            counts = stats.get("chan_hash_counts") if isinstance(stats, dict) else None
+            if isinstance(counts, dict):
+                restored_counts: dict = {}
+                for k, v in counts.items():
+                    if k and isinstance(v, (int, float)) and int(v) > 0:
+                        key = str(k).lower()
+                        restored_counts[key] = restored_counts.get(key, 0) + int(v)
+                if restored_counts:
+                    # Only seed when empty — a warm disable→enable keeps the
+                    # live counters and re-adding the persisted ones on top
+                    # would double-count.
+                    with self._rx_log_lock:
+                        if not self._chan_hash_counts:
+                            self._chan_hash_counts.update(restored_counts)
+                            Domoticz.Log(f"Restored {len(restored_counts)} heard channel-hash counter(s) from rx-log")
         except Exception as exc:
             Domoticz.Error(f"Could not load packet times from meshcore_rx_log.json: {exc}")
 
@@ -4226,11 +4264,13 @@ class BasePlugin:
         # Hop histogram from RX_LOG frames with a valid path_len.
         if isinstance(ts_pl, int) and 0 <= ts_pl < HOPS_SENTINEL:
             self._ts_hops_record(int(t), ts_pl)
-        # Relay-key tally: walk each 2-char hex byte of the path string.
+        # Relay-key tally: walk the path string one hop token at a time
+        # (token width follows the node's path_hash_mode: 2/4/6 hex chars).
         if pp:
             clean_path = re.sub(r"[^0-9a-fA-F]", "", pp).lower()
-            for i in range(0, len(clean_path) - 1, 2):
-                rb = clean_path[i:i + 2]
+            tok = self._path_token_chars()
+            for i in range(0, len(clean_path) - tok + 1, tok):
+                rb = clean_path[i:i + tok]
                 self._ts_relay_observed(rb, name=self._resolve_relay_key(rb))
         self._rx_log_dirty = True
 
@@ -6218,11 +6258,13 @@ class BasePlugin:
         # Record hop count.
         if isinstance(_hops, int) and 0 <= _hops < HOPS_SENTINEL:
             self._ts_hops_record(now_i, _hops)
-        # Relay-key tally from the embedded per-message path.
+        # Relay-key tally from the embedded per-message path (token width
+        # follows the node's path_hash_mode: 2/4/6 hex chars).
         if _msg_path:
             _clean = re.sub(r"[^0-9a-fA-F]", "", str(_msg_path)).lower()
-            for _i in range(0, len(_clean) - 1, 2):
-                _rb = _clean[_i:_i + 2]
+            _tok = self._path_token_chars()
+            for _i in range(0, len(_clean) - _tok + 1, _tok):
+                _rb = _clean[_i:_i + _tok]
                 self._ts_relay_observed(_rb, name=self._resolve_relay_key(_rb))
 
         # Persist private (DM) messages to the sender's per-contact Messages

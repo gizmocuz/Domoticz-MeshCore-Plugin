@@ -1315,9 +1315,38 @@
         .contact-row-header .row-bulk-actions button:disabled {
             opacity: 0.4; cursor: not-allowed;
         }
+        .contact-row-header-bulk {
+            border-top: none;
+            padding-top: 0;
+        }
+        .contact-list-head {
+            position: sticky;
+            top: 0;
+            z-index: 2;
+            background: var(--bg);
+            border-radius: var(--dz-border-radius, 8px) var(--dz-border-radius, 8px) 0 0;
+        }
+        .row-sort {
+            cursor: pointer;
+            user-select: none;
+            white-space: nowrap;
+        }
+        .row-sort:hover { color: var(--text); }
+        .row-sort-active { color: var(--text); }
+        .sort-caret { opacity: 0.35; }
+        .sort-caret-active { opacity: 1; color: var(--accent); }
         .contact-row { cursor: pointer; transition: background 0.1s; }
         .contact-row:last-child { border-bottom: none; }
         .contact-row:hover { background: rgba(var(--dz-overlay-rgb, 255,255,255), 0.04); }
+        .contacts-sentinel {
+            text-align: center;
+            padding: 8px 4px;
+            font-size: 0.78rem;
+            color: var(--muted);
+            /* Span the full row inside the flex-wrap cards grid */
+            flex: 0 0 100%;
+            width: 100%;
+        }
         .contact-row.compose-selected { background: rgba(var(--dz-accent-rgb,  78,154,241), 0.08); }
         .contact-row.row-selected     { background: rgba(var(--dz-danger-rgb, 224,85,85),   0.08); }
         /* Custom icon-based checkbox (Domoticz host CSS sometimes hides native ones). */
@@ -3254,7 +3283,7 @@
                     };
                     _updateHeardTypeBadges();
                     _renderHeardIfOpen();
-                    if (_includeHeard) _rerenderContacts();
+                    if (_includeHeard) _scheduleContactsRender();
                 }
             } else if (t === 'heard_page') {
                 _onHeardPage(msg);
@@ -3271,6 +3300,9 @@
                     _rxLog = { entries: msg.entries, stats: msg.stats };
                     if (msg.known_channels && typeof msg.known_channels === 'object') {
                         _rxLog.known_channels = msg.known_channels;
+                    }
+                    if (msg.chan_hash_names && typeof msg.chan_hash_names === 'object') {
+                        _rxLog.chan_hash_names = msg.chan_hash_names;
                     }
                     _rxLogSeq = (typeof msg.seq === 'number') ? msg.seq : _rxLogSeq;
                     if (!_rxLogFirehosePaused) _renderFirehoseIfOpen();
@@ -3303,6 +3335,9 @@
                 if (msg.stats && typeof msg.stats === 'object') {
                     _rxLog.stats = msg.stats;
                 }
+                if (msg.chan_hash_names && typeof msg.chan_hash_names === 'object') {
+                    _rxLog.chan_hash_names = msg.chan_hash_names;
+                }
                 if (!_rxLogFirehosePaused) _renderFirehoseIfOpen();
                 _renderTrafficIfOpen();
                 _renderChannelsIfOpen();
@@ -3331,7 +3366,7 @@
                 const { selfName, remoteNodes } = _nodeList([]);
                 if (selfName || remoteNodes.length) {
                     _lastRemoteNodes = remoteNodes;
-                    _renderContacts(remoteNodes, _lastLiveSlotsOf);
+                    _scheduleContactsRender();
                 }
             } else {
                 // Live resolver not yet set — contacts may have arrived after an
@@ -4830,6 +4865,16 @@
         let _viewMode = (() => {
             try { const v = localStorage.getItem(LS_VIEW_MODE); return v === "list" ? "list" : "cards"; } catch (_) { return "cards"; }
         })();
+        const LS_CONTACT_SORT = "meshcore.contacts.sort";
+        // null = default grouped sort; {key, dir} = single-key sort (dir: 1 asc, -1 desc)
+        let _contactSort = (() => {
+            try {
+                const v = JSON.parse(localStorage.getItem(LS_CONTACT_SORT));
+                const validKeys = new Set(["status", "name", "type", "last", "snr", "hops"]);
+                if (v && validKeys.has(v.key) && (v.dir === 1 || v.dir === -1)) return v;
+            } catch (_) {}
+            return null;
+        })();
         const LS_INCLUDE_HEARD = "meshcore.includeHeard";
         let _includeHeard = (() => {
             try { return localStorage.getItem(LS_INCLUDE_HEARD) === "1"; } catch (_) { return false; }
@@ -4848,8 +4893,33 @@
         let _lastLiveSlotsOf = null;
         let _lastRemoteNodes = [];
 
-        // Build sorted/filtered groups for the contacts area.
-        // Returns an array of { groupLabel, contacts: [{name, slots, type, online, lastTs}] }
+        const CONTACTS_PAGE_SIZE = 150;
+        const CONTACTS_RENDER_COALESCE_MS = 3000;
+        let _contactsRenderLimit = CONTACTS_PAGE_SIZE;
+        let _contactsItems = [];       // last filtered+sorted array (full set)
+        let _contactsObserver = null;  // IntersectionObserver for cards grid only
+        let _contactsRenderTimer = null;
+        let _contactsLastRenderAt = 0;
+        let _contactsRenderSig = "";
+
+        // Virtual scroller state for list view.
+        const VLIST_OVERSCAN = 20;
+        let _vlistRowH = 26;           // measured row height in px; updated after each full render
+        let _vlistHeaderH = 0;         // cached sticky-header height; updated after each full render
+        let _vlistStart = 0;           // first rendered index (inclusive)
+        let _vlistEnd = 0;             // last rendered index (exclusive)
+        let _vlistScrollRaf = null;    // pending rAF handle for scroll handler
+        let _vlistScrollHandler = null; // bound handler reference for removal
+
+        // Build sorted/filtered contacts for the contacts area.
+        // Returns a flat sorted array of { name, slots, type, online, lastTs, favorite, snrNum, hopsNum }
+        // Strip leading non-letter/non-digit characters (emoji, symbols) so that
+        // names like "📡 NodeA" sort by the actual word, not by Unicode codepoint.
+        function _sortKeyName(n) {
+            return String(n || "").toLowerCase().replace(/^[^\p{L}\p{N}]+/u, "");
+        }
+
+        // (heard synthetic items also carry _heardPk).
         function _buildContactGroups(remoteNodes, liveSlotsOf, extraItems = []) {
             const items = remoteNodes.map(name => {
                 const slots = liveSlotsOf(name);
@@ -4865,15 +4935,19 @@
                 // present "no trustworthy time yet". last_advert is only used
                 // as a last-resort fallback when no local time exists at all.
                 let lastTs = 0;
+                let lastLocalTs = NaN;
                 if (slots.last_seen) {
                     const raw = _slotValue(slots.last_seen);
                     if (raw) {
                         const d = new Date(String(raw).replace(" ", "T"));
-                        if (!isNaN(d.getTime())) lastTs = Math.floor(d.getTime() / 1000);
+                        if (!isNaN(d.getTime())) {
+                            lastLocalTs = Math.floor(d.getTime() / 1000);
+                            lastTs = lastLocalTs;
+                        }
                     }
                 }
                 if (!lastTs) lastTs = Number(slots.last_advert) || 0;
-                return { name, slots, type, online, lastTs, favorite: _isFavorite(name) };
+                return { name, slots, type, online, lastTs, lastLocalTs, favorite: _isFavorite(name) };
             });
             // Merge heard nodes into the SAME list so they sort together with
             // real contacts (online/favorite/type/last-seen) rather than being
@@ -4894,22 +4968,63 @@
             filtered = filtered.filter(it =>
                 !(it.type in _showType) || _showType[it.type]);
 
-            // Sort:
-            //   1. online before offline
-            //   2. favorites before non-favorites (within the same online/offline group)
-            //   3. type rank: Contact(1) → Sensor(4) → Room(3) → Repeater(2) → Unknown(0)
-            //   4. newer last_advert first
-            //   5. by name
-            const TYPE_RANK = { 1: 0, 4: 1, 3: 2, 2: 3, 0: 4 };
-            filtered.sort((a, b) => {
-                if (a.online !== b.online)     return a.online ? -1 : 1;
-                if (a.favorite !== b.favorite) return a.favorite ? -1 : 1;
-                const ra = TYPE_RANK[a.type] ?? 9;
-                const rb = TYPE_RANK[b.type] ?? 9;
-                if (ra !== rb) return ra - rb;
-                if (a.lastTs !== b.lastTs) return b.lastTs - a.lastTs;
-                return a.name.localeCompare(b.name);
-            });
+            // Pre-parse numeric snr/hops once for the comparator (avoids repeated string work).
+            for (const it of filtered) {
+                it.snrNum  = it.slots.snr  ? parseFloat(String(_slotValue(it.slots.snr)).replace(/\s*dB$/i, ""))   : NaN;
+                it.hopsNum = it.slots.hops ? parseFloat(String(_slotValue(it.slots.hops)).replace(/\s*hops?$/i, "")) : NaN;
+            }
+
+            if (_contactSort) {
+                // Single-key sort with NaN-to-bottom rule and name tiebreaker.
+                const { key, dir } = _contactSort;
+                const nameCmp = (a, b) => _sortKeyName(a.name).localeCompare(_sortKeyName(b.name));
+                const nanLast = (a, b, va, vb) => {
+                    const aNaN = isNaN(va), bNaN = isNaN(vb);
+                    if (aNaN && bNaN) return nameCmp(a, b);
+                    if (aNaN) return 1;
+                    if (bNaN) return -1;
+                    const d = (va - vb) * dir;
+                    return d !== 0 ? d : nameCmp(a, b);
+                };
+                filtered.sort((a, b) => {
+                    switch (key) {
+                        case "status": {
+                            if (a.online !== b.online) return a.online ? -dir : dir;
+                            return nameCmp(a, b);
+                        }
+                        case "name":
+                            return nameCmp(a, b) * dir;
+                        case "type": {
+                            const la = TYPE_LABELS[a.type] || "";
+                            const lb = TYPE_LABELS[b.type] || "";
+                            const d = la.localeCompare(lb) * dir;
+                            return d !== 0 ? d : nameCmp(a, b);
+                        }
+                        case "last":
+                            return nanLast(a, b, a.lastLocalTs, b.lastLocalTs);
+                        case "snr":  return nanLast(a, b, a.snrNum,  b.snrNum);
+                        case "hops": return nanLast(a, b, a.hopsNum, b.hopsNum);
+                        default:     return nameCmp(a, b);
+                    }
+                });
+            } else {
+                // Default sort:
+                //   1. online before offline
+                //   2. favorites before non-favorites (within the same online/offline group)
+                //   3. type rank: Contact(1) → Sensor(4) → Room(3) → Repeater(2) → Unknown(0)
+                //   4. newer last_advert first
+                //   5. by name
+                const TYPE_RANK = { 1: 0, 4: 1, 3: 2, 2: 3, 0: 4 };
+                filtered.sort((a, b) => {
+                    if (a.online !== b.online)     return a.online ? -1 : 1;
+                    if (a.favorite !== b.favorite) return a.favorite ? -1 : 1;
+                    const ra = TYPE_RANK[a.type] ?? 9;
+                    const rb = TYPE_RANK[b.type] ?? 9;
+                    if (ra !== rb) return ra - rb;
+                    if (a.lastTs !== b.lastTs) return b.lastTs - a.lastTs;
+                    return a.name.localeCompare(b.name);
+                });
+            }
 
             return filtered;
         }
@@ -4963,17 +5078,49 @@
             const count = visibleNames.filter(n => _selectedContacts.has(n)).length;
             const headIcon = allChecked ? "fa-square-check" : (indeterminate ? "fa-square-minus" : "fa-square");
             const headCls  = allChecked ? "row-check-box checked" : (indeterminate ? "row-check-box indeterminate" : "row-check-box");
-            return `
-        <div class="contact-row-header">
-          <span class="row-check"><span id="bulk-toggle" class="${headCls}" data-checked="${allChecked ? 1 : 0}" role="checkbox" aria-checked="${allChecked}"><i class="fa-regular ${headIcon}"></i></span></span>
+
+            // Build sortable column header cells.
+            const sortCols = [
+                { key: "status", label: null },
+                { key: "name",   label: "Name" },
+                { key: "type",   label: "Type" },
+                { key: "last",   label: "Last Heard" },
+                { key: "snr",    label: "SNR" },
+                { key: "hops",   label: "Hops" },
+            ];
+            const colHtml = sortCols.map(({ key, label }) => {
+                const active = _contactSort && _contactSort.key === key;
+                const caretCls = active ? "sort-caret sort-caret-active" : "sort-caret";
+                const caretIcon = active && _contactSort.dir === -1 ? "fa-caret-down" : "fa-caret-up";
+                if (label === null) {
+                    // Status column: icon-only, no text (column is only 18px wide)
+                    const iconCls = active
+                        ? `fa-solid ${caretIcon} ${caretCls}`
+                        : "fa-solid fa-circle sort-caret";
+                    return `<span class="row-sort${active ? " row-sort-active" : ""}" data-sort="${key}" title="Sort by online status" style="overflow:hidden;font-size:0.65rem;line-height:1"><i class="${iconCls}"></i></span>`;
+                }
+                return `<span class="row-sort${active ? " row-sort-active" : ""}" data-sort="${key}">${label} <i class="fa-solid ${caretIcon} ${caretCls}"></i></span>`;
+            }).join("");
+
+            // Second header line: shown only when at least one row is selected.
+            const bulkLine = count > 0 ? `
+        <div class="contact-row-header contact-row-header-bulk">
+          <span></span>
           <span></span>
           <div class="row-bulk-actions">
-            <span class="selected-count">${count > 0 ? count + " selected" : ""}</span>
-            <button id="bulk-delete" class="danger" ${count === 0 ? "disabled" : ""}>
+            <span class="selected-count">${count} selected</span>
+            <button id="bulk-delete" class="danger">
               <i class="fa-solid fa-trash"></i> Delete selected
             </button>
           </div>
-        </div>`;
+        </div>` : "";
+
+            return `<div class="contact-list-head">
+        <div class="contact-row-header">
+          <span class="row-check"><span id="bulk-toggle" class="${headCls}" data-checked="${allChecked ? 1 : 0}" role="checkbox" aria-checked="${allChecked}"><i class="fa-regular ${headIcon}"></i></span></span>
+          ${colHtml}
+          <span></span>
+        </div>${bulkLine}</div>`;
         }
 
         // Synthesize contact-pipeline items for heard nodes so they render
@@ -5009,28 +5156,164 @@
                 return {
                     name: h.name || h.pubkey.slice(0, 12),
                     slots, type: h.type || 0, online: false,
-                    lastTs: h.last_heard || 0, favorite: false, _heardPk: h.pubkey,
+                    lastTs: h.last_heard || 0, lastLocalTs: h.last_heard || NaN, favorite: false, _heardPk: h.pubkey,
                 };
             });
         }
 
-        function _renderContacts(remoteNodes, liveSlotsOf) {
+        // Disconnect any existing sentinel observer and clear the sentinel element.
+        function _detachSentinelObserver() {
+            if (_contactsObserver) {
+                _contactsObserver.disconnect();
+                _contactsObserver = null;
+            }
+        }
+
+        // Build the sentinel element and (re-)attach the IntersectionObserver on the
+        // given CARDS GRID scroll container. Never called for list view.
+        function _attachSentinelObserver(container) {
+            _detachSentinelObserver();
+            const sentinel = container.querySelector("#contacts-sentinel");
+            if (!sentinel) return;
+            _contactsObserver = new IntersectionObserver((entries) => {
+                if (!entries[0].isIntersecting) return;
+                // Grow the window and append the next slice before the sentinel.
+                _contactsRenderLimit += CONTACTS_PAGE_SIZE;
+                const start = _contactsRenderLimit - CONTACTS_PAGE_SIZE;
+                const end   = _contactsRenderLimit;
+                const nextSlice = _contactsItems.slice(start, end);
+                if (!nextSlice.length) {
+                    sentinel.remove();
+                    _detachSentinelObserver();
+                    return;
+                }
+                const html = nextSlice.map(it => renderNode(it.name, it.slots, false)).join("");
+                sentinel.insertAdjacentHTML("beforebegin", html);
+                // Update or remove the sentinel.
+                if (_contactsRenderLimit >= _contactsItems.length) {
+                    sentinel.remove();
+                    _detachSentinelObserver();
+                } else {
+                    sentinel.textContent = `Showing ${_contactsRenderLimit} of ${_contactsItems.length} — scroll for more`;
+                }
+            }, { root: container, rootMargin: "200px" });
+            _contactsObserver.observe(sentinel);
+        }
+
+        // Detach the rAF-throttled scroll handler from #contacts-list (if any).
+        function _detachVlistScroll() {
+            const list = document.getElementById("contacts-list");
+            if (list && _vlistScrollHandler) {
+                list.removeEventListener("scroll", _vlistScrollHandler);
+            }
+            _vlistScrollHandler = null;
+            if (_vlistScrollRaf) { cancelAnimationFrame(_vlistScrollRaf); _vlistScrollRaf = null; }
+        }
+
+        // Compute the virtual window [start, end) for the list view given a scrollTop.
+        function _vlistComputeWindow(scrollTop, total, headerH) {
+            const list = document.getElementById("contacts-list");
+            const viewH = (list ? list.clientHeight : 400) - headerH;
+            const viewportRows = viewH / _vlistRowH;
+            const scrolled = Math.max(0, scrollTop - headerH);
+            const first = Math.floor(scrolled / _vlistRowH);
+            const start = Math.max(0, first - VLIST_OVERSCAN);
+            const end   = Math.min(total, first + Math.ceil(viewportRows) + VLIST_OVERSCAN);
+            return { start, end };
+        }
+
+        // Render the current virtual window into #contacts-vrows and update spacers.
+        // Does NOT touch the sticky header. Calls _reapplyComposeSelection() after.
+        // Uses the already-measured _vlistRowH — no reflow triggered here.
+        function _vlistRenderWindow() {
+            const list = document.getElementById("contacts-list");
+            const vrows   = list && list.querySelector("#contacts-vrows");
+            const vtop    = list && list.querySelector("#contacts-vtop");
+            const vbottom = list && list.querySelector("#contacts-vbottom");
+            if (!vrows || !vtop || !vbottom) return;
+
+            const total = _contactsItems.length;
+            const slice = _contactsItems.slice(_vlistStart, _vlistEnd);
+            vrows.innerHTML = slice.map(_renderListRow).join("");
+            vtop.style.height    = (_vlistStart * _vlistRowH) + "px";
+            vbottom.style.height = ((total - _vlistEnd) * _vlistRowH) + "px";
+
+            _reapplyComposeSelection();
+        }
+
+        // Attach the rAF-throttled scroll handler on #contacts-list (called once per
+        // list-view render). The handler recomputes the window on scroll and re-renders
+        // only when the window shifts by more than half the overscan (hysteresis).
+        function _attachVlistScroll() {
+            _detachVlistScroll();
+            const list = document.getElementById("contacts-list");
+            if (!list) return;
+            _vlistScrollHandler = function _onVlistScroll() {
+                if (_vlistScrollRaf) return;
+                _vlistScrollRaf = requestAnimationFrame(() => {
+                    _vlistScrollRaf = null;
+                    const headerH = (list.querySelector(".contact-list-head") || {}).offsetHeight || 0;
+                    _vlistHeaderH = headerH;
+                    const total = _contactsItems.length;
+                    const { start, end } = _vlistComputeWindow(list.scrollTop, total, headerH);
+                    // Hysteresis: only re-render when the window has shifted enough.
+                    const halfOverscan = VLIST_OVERSCAN / 2;
+                    if (Math.abs(start - _vlistStart) < halfOverscan &&
+                        Math.abs(end   - _vlistEnd)   < halfOverscan) return;
+                    _vlistStart = start;
+                    _vlistEnd   = end;
+                    _vlistRenderWindow();
+                });
+            };
+            list.addEventListener("scroll", _vlistScrollHandler, { passive: true });
+        }
+
+        function _renderContacts(remoteNodes, liveSlotsOf, opts) {
+            const fromData = opts && opts.fromData;
             const heardItems = _heardSyntheticItems();
             // Heard nodes are merged INTO the same list inside
             // _buildContactGroups so they sort together with real contacts.
             const items = _buildContactGroups(remoteNodes, liveSlotsOf, heardItems);
+            // Cache the full filtered+sorted array — the virtual scroller and
+            // cards observer both read from it.
+            _contactsItems = items;
+
+            // Build a cheap signature of the rendered window + headline counts.
+            // Used to skip DOM updates when data-driven renders change nothing visible.
+            // List mode: signature covers the current virtual window slice.
+            // Cards mode: signature covers the current paged slice.
+            const heardShownCount = items.filter(it => it._heardPk).length;
+            const sigSlice = _viewMode === "list"
+                ? items.slice(_vlistStart, _vlistEnd)
+                : items.slice(0, _contactsRenderLimit);
+            const sig = items.length + "|" + heardShownCount + "|" + _viewMode + "|" +
+                sigSlice
+                     .map(it => `${it.name}\x01${it.online ? 1 : 0}\x01${it.lastTs}\x01${
+                         _slotValue((it.slots && it.slots.snr) || {}) }\x01${ _slotValue((it.slots && it.slots.hops) || {}) }`)
+                     .join("\x02");
+
+            if (fromData && sig === _contactsRenderSig) {
+                // Window unchanged — _contactsItems is already updated above so
+                // search/select-all see fresh data, but the DOM is untouched.
+                return;
+            }
+            _contactsRenderSig = sig;
+
             const grid = document.getElementById("contacts-grid");
             const list = document.getElementById("contacts-list");
             if (!grid || !list) return;
 
-            // Update the count badge next to the "Contacts" header
+            // Disconnect any in-flight observer/scroll handler; re-attached below.
+            _detachSentinelObserver();
+            _detachVlistScroll();
+
+            // Update the count badge next to the "Contacts" header.
             const countEl = document.getElementById("contacts-count");
             if (countEl) {
                 const total = remoteNodes.length;
-                const heardShown = items.filter(it => it._heardPk).length;
-                const shown = items.length - heardShown;
+                const shown = items.length - heardShownCount;
                 let txt = shown === total ? `(${total})` : `(${shown} / ${total})`;
-                if (heardShown) txt += ` + ${heardShown} heard`;
+                if (heardShownCount) txt += ` + ${heardShownCount} heard`;
                 countEl.textContent = txt;
             }
 
@@ -5039,19 +5322,72 @@
 
             if (_viewMode === "list") {
                 grid.style.display = "none";
+                grid.innerHTML = "";
                 list.style.display = "";
                 if (empty) {
                     list.innerHTML = emptyHtml;
                 } else {
+                    // visibleNames = FULL filtered non-heard list so select-all
+                    // semantics match the entire filtered dataset, not just the window.
                     const visibleNames = items.filter(it => !it._heardPk).map(it => it.name);
-                    list.innerHTML = _renderListHeader(visibleNames) + items.map(_renderListRow).join("");
+
+                    // Preserve or reset scroll position.
+                    const savedScroll = fromData ? list.scrollTop : 0;
+
+                    if (!fromData) {
+                        _vlistStart = 0;
+                        _vlistEnd   = 0;
+                    }
+                    // Derive initial window using the cached header height from the
+                    // previous render so the window is accurate from the first paint.
+                    const win = _vlistComputeWindow(savedScroll, items.length, _vlistHeaderH);
+                    _vlistStart = win.start;
+                    _vlistEnd   = win.end;
+
+                    const winSlice = items.slice(_vlistStart, _vlistEnd);
+                    list.innerHTML =
+                        _renderListHeader(visibleNames) +
+                        `<div id="contacts-vtop" style="height:${_vlistStart * _vlistRowH}px"></div>` +
+                        `<div id="contacts-vrows">${winSlice.map(_renderListRow).join("")}</div>` +
+                        `<div id="contacts-vbottom" style="height:${(items.length - _vlistEnd) * _vlistRowH}px"></div>`;
+
+                    // Update cached header height from the just-rendered DOM.
+                    _vlistHeaderH = (list.querySelector(".contact-list-head") || {}).offsetHeight || _vlistHeaderH;
+
+                    // Re-measure row height from actual rendered rows.
+                    const vrows = list.querySelector("#contacts-vrows");
+                    if (vrows && winSlice.length > 0 && vrows.scrollHeight > 0) {
+                        _vlistRowH = Math.max(1, vrows.scrollHeight / winSlice.length);
+                        // Re-apply spacer heights with measured row height.
+                        const vtop    = list.querySelector("#contacts-vtop");
+                        const vbottom = list.querySelector("#contacts-vbottom");
+                        if (vtop)    vtop.style.height    = (_vlistStart * _vlistRowH) + "px";
+                        if (vbottom) vbottom.style.height = ((items.length - _vlistEnd) * _vlistRowH) + "px";
+                    }
+
+                    // Restore scroll position after spacers are final so the browser
+                    // does not clamp it against a too-small content height.
+                    if (fromData && savedScroll) list.scrollTop = savedScroll;
+
+                    _attachVlistScroll();
+                    _reapplyComposeSelection();
                 }
             } else {
                 list.style.display = "none";
+                list.innerHTML = "";
                 grid.style.display = "";
-                grid.innerHTML = empty ? emptyHtml : items.map(it => renderNode(it.name, it.slots, false)).join("");
+                const pageItems = items.slice(0, _contactsRenderLimit);
+                const hasMore = items.length > _contactsRenderLimit;
+                const sentinelHtml = hasMore
+                    ? `<div id="contacts-sentinel" class="contacts-sentinel">Showing ${_contactsRenderLimit} of ${items.length} — scroll for more</div>`
+                    : "";
+                const savedScroll = fromData ? grid.scrollTop : 0;
+                grid.innerHTML = empty ? emptyHtml
+                    : pageItems.map(it => renderNode(it.name, it.slots, false)).join("") + sentinelHtml;
+                if (fromData && savedScroll) grid.scrollTop = savedScroll;
+                if (hasMore) _attachSentinelObserver(grid);
+                _reapplyComposeSelection();
             }
-            _reapplyComposeSelection();
         }
 
         function _reapplyComposeSelection() {
@@ -5223,6 +5559,35 @@
         // Uses event delegation so it survives re-renders.
         function _initContactClickToCompose() {
             const handler = (ev) => {
+                // Sortable column header click
+                const sortEl = ev.target.closest(".row-sort");
+                if (sortEl) {
+                    ev.stopPropagation();
+                    const key = sortEl.dataset.sort;
+                    if (key) {
+                        // Natural first-click direction per column:
+                        //   status → online first (dir=1); name/type → A→Z (dir=1);
+                        //   last → newest first (dir=-1); snr → highest first (dir=-1);
+                        //   hops → lowest first (dir=1).
+                        const NATURAL_DIR = { status: 1, name: 1, type: 1, last: -1, snr: -1, hops: 1 };
+                        const nat = NATURAL_DIR[key] ?? 1;
+                        const inv = -nat;
+                        if (!_contactSort || _contactSort.key !== key) {
+                            _contactSort = { key, dir: nat };
+                        } else if (_contactSort.dir === nat) {
+                            _contactSort = { key, dir: inv };
+                        } else {
+                            _contactSort = null;
+                        }
+                        try {
+                            if (_contactSort) localStorage.setItem(LS_CONTACT_SORT, JSON.stringify(_contactSort));
+                            else localStorage.removeItem(LS_CONTACT_SORT);
+                        } catch (_) {}
+                        _resetContactsWindow();
+                        _rerenderContacts();
+                    }
+                    return;
+                }
                 // Bulk-delete button
                 if (ev.target.closest("#bulk-delete")) {
                     ev.stopPropagation();
@@ -5332,6 +5697,7 @@
                 nameInput.addEventListener("input", (e) => {
                     _filterName = e.target.value;
                     _selectedContacts.clear();   // changing the filter resets the bulk selection
+                    _resetContactsWindow();
                     _rerenderContacts();
                 });
             }
@@ -5344,6 +5710,7 @@
                     _viewMode = "cards";
                     try { localStorage.setItem(LS_VIEW_MODE, "cards"); } catch (_) {}
                     btnCards.classList.add("active"); btnList.classList.remove("active");
+                    _resetContactsWindow();
                     _rerenderContacts();
                 });
             }
@@ -5353,6 +5720,7 @@
                     _viewMode = "list";
                     try { localStorage.setItem(LS_VIEW_MODE, "list"); } catch (_) {}
                     btnList.classList.add("active"); btnCards.classList.remove("active");
+                    _resetContactsWindow();
                     _rerenderContacts();
                 });
             }
@@ -5365,6 +5733,7 @@
                     _showType[t] = !_showType[t];
                     try { localStorage.setItem(LS_SHOW_TYPE[t], _showType[t] ? "1" : "0"); } catch (_) {}
                     b.classList.toggle("active", _showType[t]);
+                    _resetContactsWindow();
                     _rerenderContacts();
                 });
             }
@@ -5376,22 +5745,46 @@
                     _includeHeard = !_includeHeard;
                     try { localStorage.setItem(LS_INCLUDE_HEARD, _includeHeard ? "1" : "0"); } catch (_) {}
                     btnHeard.classList.toggle("active", _includeHeard);
+                    _resetContactsWindow();
                     _rerenderContacts();
                 });
             }
         }
 
+        function _resetContactsWindow() {
+            _contactsRenderLimit = CONTACTS_PAGE_SIZE;
+            const c = document.getElementById(_viewMode === "list" ? "contacts-list" : "contacts-grid");
+            if (c) c.scrollTop = 0;
+            if (_viewMode === "list") {
+                _vlistStart = 0;
+                _vlistEnd   = 0;
+            }
+        }
+
+        function _scheduleContactsRender() {
+            if (_contactsRenderTimer) return;
+            const elapsed = Date.now() - _contactsLastRenderAt;
+            const delay = Math.max(0, CONTACTS_RENDER_COALESCE_MS - elapsed);
+            _contactsRenderTimer = setTimeout(() => {
+                _contactsRenderTimer = null;
+                _contactsLastRenderAt = Date.now();
+                _rerenderContacts({ fromData: true });
+            }, delay);
+        }
+
         // Rerender contacts using the last live-resolver from loadData() if we have one,
         // otherwise fall back to the JSON snapshot.
-        function _rerenderContacts() {
+        function _rerenderContacts(opts) {
+            // User-driven renders supersede any queued data render.
+            if (!opts || !opts.fromData) { if (_contactsRenderTimer) { clearTimeout(_contactsRenderTimer); _contactsRenderTimer = null; } }
             if (_lastLiveSlotsOf && _lastRemoteNodes.length) {
-                _renderContacts(_lastRemoteNodes, _lastLiveSlotsOf);
+                _renderContacts(_lastRemoteNodes, _lastLiveSlotsOf, opts);
                 return;
             }
             if (!_deviceMap || !_deviceMap.nodes) return;
             const { selfName } = _nodeList([]);
             const remoteNodes = Object.keys(_deviceMap.nodes).filter(n => n !== selfName);
-            _renderContacts(remoteNodes, (n) => (_deviceMap.nodes && _deviceMap.nodes[n]) || {});
+            _renderContacts(remoteNodes, (n) => (_deviceMap.nodes && _deviceMap.nodes[n]) || {}, opts);
         }
 
         // Re-apply active highlights on all settings buttons based on the current device map.
@@ -6143,10 +6536,11 @@
             const view = document.getElementById("channels-view");
             if (!view) return;
             const counts = (_rxLog.stats && _rxLog.stats.chan_hash_counts) || {};
-            // Try to build a hash → channel-name map from recent entries
-            // (the firmware tags each GRP_TXT entry with chan_name when we
-            // have its key, which lets us resolve hashes to readable names).
-            const hashToName = {};
+            // Hash → channel-name resolution: seed from the plugin's persisted
+            // chan_hash_names map (covers configured channels even right after
+            // a restart, when the entries buffer is still empty), then let
+            // names seen on live GRP_TXT entries override.
+            const hashToName = Object.assign({}, _rxLog.chan_hash_names || {});
             for (const e of (_rxLog.entries || [])) {
                 if (e.chan_hash && e.chan_name) hashToName[e.chan_hash] = e.chan_name;
             }
@@ -7972,7 +8366,7 @@ onmessage=function(ev){
 
         // Build a name→{lat,lon} index from all available coordinate sources so
         // rxlog src/from fields (which may be a node name, pubkey prefix, or
-        // 1-byte path hash) can be resolved to a map position.
+        // path hash token) can be resolved to a map position.
         function _buildNodeCoordIndex() {
             const idx = {};
             const nodes = (_deviceMap && _deviceMap.nodes) || {};
@@ -8037,7 +8431,7 @@ onmessage=function(ev){
                 const src = entry.src || entry.from || entry.adv_name;
                 if (!src) continue;
                 let xy = coordIdx[src] || coordIdx[String(src).toLowerCase()];
-                // Fallback: try resolving as a 1-byte path hash
+                // Fallback: try resolving as a path hash token
                 if (!xy) {
                     const resolved = _resolvePathHop(src);
                     if (resolved) xy = coordIdx[resolved];
@@ -11720,19 +12114,20 @@ Larger = more reliable routing but smaller mesh diameter.">Path hash size</label
             return key;
         }
 
-        // Resolve a 1-byte (2-char hex) relay path token to a contact name
-        // by matching the first byte of each known node's pubkey prefix.
+        // Resolve a relay path token (2/4/6 hex chars = 1/2/3-byte path
+        // hash) to a contact name by matching it against the start of each
+        // known node's pubkey prefix.
         function _resolveRelayHex(hex) {
-            const want = (hex || '').toLowerCase().slice(0, 2);
-            if (want.length !== 2) return null;
+            const want = (hex || '').toLowerCase();
+            if (want.length < 2 || want.length % 2 !== 0) return null;
             const nodes = (_deviceMap && _deviceMap.nodes) || {};
             for (const [name, n] of Object.entries(nodes)) {
                 const pk = n && (n.pubkey_prefix || n.pubkey);
-                if (pk && pk.slice(0, 2) === want) return name;
+                if (pk && pk.toLowerCase().startsWith(want)) return name;
             }
             const hn = (_heard && _heard.nodes) || {};
             for (const [pk, h] of Object.entries(hn)) {
-                if (pk.slice(0, 2) === want && h && h.name) return h.name;
+                if (pk.toLowerCase().startsWith(want) && h && h.name) return h.name;
             }
             return null;
         }
@@ -12302,7 +12697,8 @@ Larger = more reliable routing but smaller mesh diameter.">Path hash size</label
             // Title bar above the table wrapper.
             const titleBar = document.createElement('div');
             titleBar.className = 'analytics-panel-title';
-            titleBar.textContent = 'TOP RELAY KEYS (1-byte path hash) ';
+            const relayPhm = (_deviceMap && _deviceMap.device_info && _deviceMap.device_info.path_hash_mode) || 1;
+            titleBar.textContent = `TOP RELAY KEYS (${relayPhm}-byte path hash) `;
             const noteText = document.createElement('span');
             noteText.className = 'relays-note';
             noteText.textContent = 'lifetime totals · not filtered by time range';
