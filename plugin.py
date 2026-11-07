@@ -224,6 +224,10 @@ class BasePlugin:
         self._prefix_to_name = {}
         # node_name → last Unix timestamp we saw ANY activity from it
         self._node_last_activity: dict = {}
+        # Lazily loaded {sender: last local receive epoch} from the message store.
+        self._msg_last_recv: "dict | None" = None
+        # Exact integer counters keyed (device_id, unit); see _build_device_map.
+        self._exact_values: dict = {}
         # node_name → {"lat": float, "lon": float} from contact adv_lat/adv_lon
         self._node_locations: dict = {}
         # node_name → contact type int (1=Client/Contact, 2=Repeater, 3=Room Server, 4=Sensor)
@@ -508,7 +512,7 @@ class BasePlugin:
     # Prune at most once every N inserts (cheap amortised cost).
     _MSG_STORE_PRUNE_EVERY = 200
     # Current schema version stored in the preferences table.
-    MSG_DB_SCHEMA_VERSION = 4
+    MSG_DB_SCHEMA_VERSION = 5
 
     # ── Elevation cache ───────────────────────────────────────────────────────
 
@@ -706,6 +710,32 @@ class BasePlugin:
                     )
                     self._msgdb.commit()
 
+                elif ver == 5:
+                    cur = self._msgdb.cursor()
+                    cur.execute("""
+                        CREATE TABLE IF NOT EXISTS ts_chan_hourly (
+                            hour_ts   INTEGER NOT NULL,
+                            chan_hash  TEXT    NOT NULL,
+                            count      INTEGER NOT NULL DEFAULT 0,
+                            PRIMARY KEY (hour_ts, chan_hash)
+                        )
+                    """)
+                    cur.execute("""
+                        CREATE TABLE IF NOT EXISTS chan_region_counts (
+                            chan_hash  TEXT NOT NULL,
+                            region     TEXT NOT NULL,
+                            count      INTEGER NOT NULL DEFAULT 0,
+                            PRIMARY KEY (chan_hash, region)
+                        )
+                    """)
+                    cur.execute("""
+                        CREATE TABLE IF NOT EXISTS chan_msg_totals (
+                            chan_hash  TEXT PRIMARY KEY,
+                            count      INTEGER NOT NULL DEFAULT 0
+                        )
+                    """)
+                    self._msgdb.commit()
+
             self._pref_set("db_version", str(self.MSG_DB_SCHEMA_VERSION))
 
             if from_ver < self.MSG_DB_SCHEMA_VERSION:
@@ -733,6 +763,76 @@ class BasePlugin:
             return None
         cleaned = "".join(c for c in str(pk).lower() if c in "0123456789abcdef")
         return cleaned[:12] or None
+
+    @staticmethod
+    def _meshcore_chan_hash(name: str) -> str:
+        """Compute the MeshCore 1-byte channel hash from a channel name.
+
+        Step 1: key = SHA256(name.utf8).digest()[0:16]
+        Step 2: hash = SHA256(key).digest()[0]
+        Returns lowercase 2-hex string e.g. "11".
+        """
+        import hashlib
+        key = hashlib.sha256(name.encode("utf-8")).digest()[:16]
+        h = hashlib.sha256(key).digest()[0]
+        return f"{h:02x}"
+
+    def _chan_hash_for_name(self, name: str) -> "str | None":
+        """Reverse-lookup a channel name to its 2-hex hash string.
+
+        Consults the inverted _chan_hash_to_name dict first (O(n) scan but
+        dict is small — at most 8 slots).  Falls back to computing the hash
+        directly from the name string when not found there.
+        Returns None only when name is empty/None.
+        """
+        if not name:
+            return None
+        # Scan the reverse map first.
+        for h, n in self._chan_hash_to_name.items():
+            if n == name:
+                return h
+        # Not in the map — compute directly.
+        return self._meshcore_chan_hash(name)
+
+    _NL_PROVINCE_CENTROIDS = [
+        (52.9843, 6.6687, "nl-dr"), (52.4462, 5.3544, "nl-fl"), (53.1893, 5.7949, "nl-fr"),
+        (52.0248, 5.8459, "nl-ge"), (53.2357, 6.5591, "nl-gr"), (50.9604, 5.8924, "nl-li"),
+        (51.5636, 5.1286, "nl-nb"), (52.4591, 4.8474, "nl-nh"), (52.2893, 6.5915, "nl-ov"),
+        (52.1245, 5.2081, "nl-ut"), (51.4998, 3.6402, "nl-ze"), (51.9992, 4.4849, "nl-zh"),
+    ]
+
+    @staticmethod
+    def _region_for_coord(lat, lon) -> str:
+        """Map (lat, lon) to a region tag.
+
+        Returns "nl-xx" (nearest NL province centroid, if inside NL bbox),
+        "eu" (inside Europe-ish bbox but outside NL), or "other".
+        (0, 0), None, or non-finite values → "other".
+        """
+        import math as _math
+        try:
+            lat = float(lat)
+            lon = float(lon)
+        except (TypeError, ValueError):
+            return "other"
+        if not (_math.isfinite(lat) and _math.isfinite(lon)):
+            return "other"
+        if lat == 0.0 and lon == 0.0:
+            return "other"
+        # NL bbox
+        if 50.6 <= lat <= 53.7 and 3.2 <= lon <= 7.3:
+            best_dist = None
+            best_tag = "nl-nh"
+            for clat, clon, tag in BasePlugin._NL_PROVINCE_CENTROIDS:
+                d = (lat - clat) ** 2 + (lon - clon) ** 2
+                if best_dist is None or d < best_dist:
+                    best_dist = d
+                    best_tag = tag
+            return best_tag
+        # EU bbox
+        if 35.0 <= lat <= 71.0 and -11.0 <= lon <= 40.0:
+            return "eu"
+        return "other"
 
     # ── Elevation cache helpers ───────────────────────────────────────────────
 
@@ -1123,6 +1223,58 @@ class BasePlugin:
         except Exception as exc:
             Domoticz.Debug(f"_ts_hops_record failed (non-fatal): {exc!r}")
 
+    def _ts_chan_observed(self, chan_hash: str, t: int):
+        """Upsert hourly bucket + lifetime total for one channel hash.
+
+        Never raises into callers.
+        """
+        if self._msgdb is None:
+            return
+        if not chan_hash:
+            return
+        try:
+            hour_ts = int(t) - (int(t) % 3600)
+            with self._msgdb_lock:
+                self._msgdb.execute(
+                    "INSERT INTO ts_chan_hourly (hour_ts, chan_hash, count)"
+                    " VALUES (?,?,1)"
+                    " ON CONFLICT(hour_ts, chan_hash) DO UPDATE SET"
+                    "   count = count + 1",
+                    (hour_ts, chan_hash),
+                )
+                self._msgdb.execute(
+                    "INSERT INTO chan_msg_totals (chan_hash, count)"
+                    " VALUES (?,1)"
+                    " ON CONFLICT(chan_hash) DO UPDATE SET count = count + 1",
+                    (chan_hash,),
+                )
+                self._msgdb.commit()
+            self._ts_dirty_panels.update({"chan_activity", "chan_regions"})
+        except Exception as exc:
+            Domoticz.Debug(f"_ts_chan_observed failed (non-fatal): {exc!r}")
+
+    def _chan_region_observed(self, chan_hash: str, region: str):
+        """Upsert region count for one channel hash.
+
+        Never raises into callers.
+        """
+        if self._msgdb is None:
+            return
+        if not chan_hash or not region:
+            return
+        try:
+            with self._msgdb_lock:
+                self._msgdb.execute(
+                    "INSERT INTO chan_region_counts (chan_hash, region, count)"
+                    " VALUES (?,?,1)"
+                    " ON CONFLICT(chan_hash, region) DO UPDATE SET count = count + 1",
+                    (chan_hash, region),
+                )
+                self._msgdb.commit()
+            self._ts_dirty_panels.add("chan_regions")
+        except Exception as exc:
+            Domoticz.Debug(f"_chan_region_observed failed (non-fatal): {exc!r}")
+
     def _ts_prune(self):
         """Delete rows older than each table's retention window.
 
@@ -1132,6 +1284,7 @@ class BasePlugin:
           ts_hops:          14 days
           ts_relay_keys:    30 days (only rows with count < 100)
           ts_packets_hourly: kept indefinitely (small table)
+          ts_chan_hourly:   7 days
         Never raises into callers.
         """
         if self._msgdb is None:
@@ -1139,15 +1292,19 @@ class BasePlugin:
         try:
             now = int(time.time())
             cutoffs = {
-                "ts_radio":      now - 14 * 86400,
+                "ts_radio":       now - 14 * 86400,
                 "ts_packets_min": now - 48 * 3600,
-                "ts_hops":       now - 14 * 86400,
+                "ts_hops":        now - 14 * 86400,
             }
+            chan_hourly_cutoff = now - 7 * 86400
             with self._msgdb_lock:
                 for tbl, cutoff in cutoffs.items():
                     self._msgdb.execute(
                         f"DELETE FROM {tbl} WHERE ts < ?", (cutoff,)
                     )
+                self._msgdb.execute(
+                    "DELETE FROM ts_chan_hourly WHERE hour_ts < ?", (chan_hourly_cutoff,)
+                )
                 relay_cutoff = now - 30 * 86400
                 self._msgdb.execute(
                     "DELETE FROM ts_relay_keys"
@@ -1435,16 +1592,98 @@ class BasePlugin:
             Domoticz.Debug(f"_q_top_relays failed (non-fatal): {exc!r}")
             return {"rows": []}
 
+    def _q_chan_activity(self, panel: str, t_from: int, t_to: int,
+                         bucket_s: int, nodes_tuple: tuple) -> dict:
+        """Return per-channel-hash hourly time-series within [t_from, t_to].
+
+        Shape:
+          {
+            "series": [{"hash": <str>, "name": <str|null>,
+                        "data": [[hour_ts, count], ...]}, ...]
+          }
+        Series sorted by total count desc, non-zero hours only.
+        """
+        if self._msgdb is None:
+            return {"series": []}
+        try:
+            sql = (
+                "SELECT chan_hash, hour_ts, SUM(count) AS cnt"
+                " FROM ts_chan_hourly"
+                " WHERE hour_ts >= ? AND hour_ts < ?"
+                " GROUP BY chan_hash, hour_ts"
+                " ORDER BY chan_hash, hour_ts"
+            )
+            with self._msgdb_lock:
+                rows = self._msgdb.execute(sql, (t_from, t_to)).fetchall()
+            by_hash: dict = {}
+            totals: dict = {}
+            for ch, hr, cnt in rows:
+                by_hash.setdefault(ch, []).append([hr, cnt])
+                totals[ch] = totals.get(ch, 0) + cnt
+            series = []
+            for ch in sorted(totals, key=lambda x: totals[x], reverse=True):
+                name = self._chan_hash_to_name.get(ch)
+                series.append({"hash": ch, "name": name, "data": by_hash[ch]})
+            return {"series": series}
+        except Exception as exc:
+            Domoticz.Debug(f"_q_chan_activity failed (non-fatal): {exc!r}")
+            return {"series": []}
+
+    def _q_chan_regions(self, panel: str, t_from: int, t_to: int,
+                        bucket_s: int, nodes_tuple: tuple) -> dict:
+        """Return lifetime per-channel totals and region breakdown.
+
+        Shape:
+          {
+            "channels": [{"hash": <str>, "name": <str|null>, "total": <int>,
+                          "regions": [{"region": <str>, "count": <int>}, ...]},
+                         ...]
+          }
+        Channels sorted by total desc; regions within a channel sorted by count desc.
+        t_from/t_to/bucket_s ignored (lifetime query, like _q_top_relays).
+        """
+        if self._msgdb is None:
+            return {"channels": []}
+        try:
+            with self._msgdb_lock:
+                total_rows = self._msgdb.execute(
+                    "SELECT chan_hash, count FROM chan_msg_totals ORDER BY count DESC"
+                ).fetchall()
+                region_rows = self._msgdb.execute(
+                    "SELECT chan_hash, region, count FROM chan_region_counts"
+                ).fetchall()
+            # Build region map
+            reg_by_hash: dict = {}
+            for ch, reg, cnt in region_rows:
+                reg_by_hash.setdefault(ch, []).append({"region": reg, "count": cnt})
+            for ch in reg_by_hash:
+                reg_by_hash[ch].sort(key=lambda r: r["count"], reverse=True)
+            channels = []
+            for ch, total in total_rows:
+                name = self._chan_hash_to_name.get(ch)
+                channels.append({
+                    "hash": ch,
+                    "name": name,
+                    "total": total,
+                    "regions": reg_by_hash.get(ch, []),
+                })
+            return {"channels": channels}
+        except Exception as exc:
+            Domoticz.Debug(f"_q_chan_regions failed (non-fatal): {exc!r}")
+            return {"channels": []}
+
     # Dispatch table for analytics panels.
     _ANALYTICS_PANELS = {
-        "rssi":     "_q_rssi_snr",
-        "snr":      "_q_rssi_snr",
-        "noise":    "_q_noise",
-        "packets":  "_q_packets",
-        "channels": "_q_msg_per_channel",
-        "hourly":   "_q_packets_hourly",
-        "relays":   "_q_top_relays",
-        "hops":     "_q_hop_histogram",
+        "rssi":          "_q_rssi_snr",
+        "snr":           "_q_rssi_snr",
+        "noise":         "_q_noise",
+        "packets":       "_q_packets",
+        "channels":      "_q_msg_per_channel",
+        "hourly":        "_q_packets_hourly",
+        "relays":        "_q_top_relays",
+        "hops":          "_q_hop_histogram",
+        "chan_activity":  "_q_chan_activity",
+        "chan_regions":   "_q_chan_regions",
     }
 
     def _handle_analytics_query(self, panel: str, t_from, t_to,
@@ -1548,6 +1787,33 @@ class BasePlugin:
         except Exception as exc:
             Domoticz.Error(f"Message store insert failed (non-fatal): {exc!r}")
             return None
+
+    def _msg_store_last_recv_by_sender(self) -> dict:
+        """Return {sender: newest local receive epoch} for incoming messages.
+
+        recv_ts is OUR clock at reception (UTC text), so it is a trustworthy
+        "last heard" source after a restart, unlike the node's advertised time.
+        Never raises; returns {} on error.
+        """
+        if self._msgdb is None:
+            return {}
+        try:
+            with self._msgdb_lock:
+                rows = self._msgdb.execute(
+                    "SELECT sender, MAX(recv_ts) FROM messages"
+                    " WHERE direction='in' GROUP BY sender"
+                ).fetchall()
+            out = {}
+            for sender, ts in rows:
+                try:
+                    out[sender] = int(calendar.timegm(
+                        time.strptime(ts, '%Y-%m-%d %H:%M:%S')))
+                except (TypeError, ValueError):
+                    continue
+            return out
+        except Exception as exc:
+            Domoticz.Error(f"Message store last-heard lookup failed (non-fatal): {exc!r}")
+            return {}
 
     def _msg_store_set_ack(self, rowid: int, delivered: bool):
         """Update the ack column for a row by id. Silently no-ops on error."""
@@ -2842,9 +3108,12 @@ class BasePlugin:
             d = self._dev(did, unit)
             if not d:
                 return None
+            # Domoticz re-formats Custom sensor values as floats ("1.36716e+06"),
+            # losing integer precision. Prefer the exact value we wrote.
+            _val = self._exact_values.get((did, unit)) or d.sValue
             return {
                 "idx":    d.ID,
-                "value":  d.sValue if d.sValue else None,
+                "value":  _val if _val else None,
                 "online": d.nValue == 1,
             }
 
@@ -4143,6 +4412,7 @@ class BasePlugin:
             if ch:
                 p["chan_hash"] = ch
                 self._chan_hash_counts[ch] = self._chan_hash_counts.get(ch, 0) + 1
+                self._ts_chan_observed(ch, t)
             self._packet_times.append(t)
             # Per-contact signal history. We key by the first 12 hex chars of
             # the originating contact's public key (a.k.a. pubkey_prefix), so
@@ -5920,6 +6190,16 @@ class BasePlugin:
                 if prev_advert != 0:
                     self._node_last_activity[node_name] = max(
                         self._node_last_activity.get(node_name, 0), now)
+            # After a restart there is no in-memory reception time yet. Seed it
+            # from the message store (our own receive clock) so a node that
+            # recently posted in a channel does not fall back to its possibly
+            # wrong advertised clock.
+            if not self._node_last_activity.get(node_name, 0):
+                if self._msg_last_recv is None:
+                    self._msg_last_recv = self._msg_store_last_recv_by_sender()
+                _seed = self._msg_last_recv.get(node_name, 0)
+                if _seed:
+                    self._node_last_activity[node_name] = _seed
             last_activity = self._node_last_activity.get(node_name, 0)
             advert_online = last_activity > 0 and (now - last_activity) < ONLINE_THRESHOLD_S
 
@@ -6267,6 +6547,33 @@ class BasePlugin:
                 _rb = _clean[_i:_i + _tok]
                 self._ts_relay_observed(_rb, name=self._resolve_relay_key(_rb))
 
+        # Channel region tally (decrypted channel messages only).
+        if msg_type in ("CHAN", "channel_message") and chan_tag != "P":
+            _chan_hash = self._chan_hash_for_name(chan_tag) if not chan_tag.startswith("C") else None
+            if _chan_hash:
+                # Method 1: sender has known GPS coordinates.
+                _region = None
+                if node_name:
+                    _loc = self._node_locations.get(node_name)
+                    if _loc and (_loc.get("lat") or _loc.get("lon")):
+                        _region = self._region_for_coord(_loc.get("lat"), _loc.get("lon"))
+                # Method 2: first path-hop token resolves to a node with GPS.
+                if _region is None and _msg_path:
+                    _clean2 = re.sub(r"[^0-9a-fA-F]", "", str(_msg_path)).lower()
+                    _tok2 = self._path_token_chars()
+                    if len(_clean2) >= _tok2:
+                        _first_tok = _clean2[:_tok2]
+                        _relay_name = self._resolve_relay_key(_first_tok)
+                        if _relay_name:
+                            _rloc = self._node_locations.get(_relay_name)
+                            if _rloc and (_rloc.get("lat") or _rloc.get("lon")):
+                                _region = self._region_for_coord(
+                                    _rloc.get("lat"), _rloc.get("lon")
+                                )
+                if _region is None:
+                    _region = "unknown"
+                self._chan_region_observed(_chan_hash, _region)
+
         # Persist private (DM) messages to the sender's per-contact Messages
         # device so a favourite's conversation history is never lost.
         if chan_tag == "P" and node_name:
@@ -6416,10 +6723,12 @@ class BasePlugin:
         pkt_sent = stats.get("sent")
         if pkt_sent is not None:
             _upd(OFF_MSGS_SENT, 0, str(pkt_sent))
+            self._exact_values[(did, OFF_MSGS_SENT)] = str(int(pkt_sent))
 
         pkt_recv = stats.get("recv")
         if pkt_recv is not None:
             _upd(OFF_MSGS_RECV, 0, str(pkt_recv))
+            self._exact_values[(did, OFF_MSGS_RECV)] = str(int(pkt_recv))
 
         # Last seen = now (we just got data from it)
         _upd(OFF_LASTSEEN, 0, time.strftime("%Y-%m-%d %H:%M:%S"))

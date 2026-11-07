@@ -2079,6 +2079,105 @@
         .chan-row .cnt   { text-align: right; font-variant-numeric: tabular-nums; }
         .chan-row.known  .name { color: var(--text); opacity: 1; font-style: normal; }
 
+        /* Channel activity chart section */
+        .chan-activity-section {
+            margin-bottom: 6px;
+            flex: none;
+        }
+        .chan-activity-section-head {
+            font-size: 0.78rem;
+            color: var(--accent);
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            border-bottom: 1px solid var(--accent);
+            padding-bottom: 4px;
+            margin-bottom: 6px;
+        }
+        #chan-activity-chart-slot {
+            min-height: 180px;
+            width: 100%;
+            overflow: hidden;
+        }
+        .chan-activity-empty {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            gap: 6px;
+            min-height: 140px;
+            opacity: 0.55;
+            font-size: 0.8rem;
+            color: var(--muted);
+        }
+        .chan-activity-empty i { font-size: 1.4rem; }
+
+        /* Channel regions table */
+        .chan-regions-section {
+            flex: none;
+        }
+        .chan-regions-section-head {
+            font-size: 0.78rem;
+            color: var(--accent);
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            border-bottom: 1px solid var(--accent);
+            padding-bottom: 4px;
+            margin-bottom: 4px;
+        }
+        .chan-regions-table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 0.78rem;
+        }
+        .chan-regions-table th {
+            text-align: left;
+            color: var(--accent);
+            font-weight: 600;
+            font-size: 0.65rem;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            padding: 3px 4px;
+            border-bottom: 1px solid var(--border);
+        }
+        .chan-regions-table th:nth-child(2),
+        .chan-regions-table th:nth-child(3) { text-align: right; }
+        .chan-regions-table td {
+            padding: 4px 4px;
+            vertical-align: top;
+            border-bottom: 1px solid var(--border);
+            color: var(--text);
+        }
+        .chan-regions-table td:nth-child(2),
+        .chan-regions-table td:nth-child(3) { text-align: right; font-variant-numeric: tabular-nums; }
+        .chan-regions-table tr:last-child td { border-bottom: none; }
+        .chan-hash-chip {
+            font-family: ui-monospace, monospace;
+            font-size: 0.72rem;
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: 4px;
+            padding: 1px 5px;
+            color: var(--accent);
+            cursor: default;
+        }
+        .chan-region-chips { display: flex; flex-wrap: wrap; gap: 3px; }
+        .chan-region-chip {
+            display: inline-flex;
+            align-items: center;
+            gap: 3px;
+            border-radius: 4px;
+            padding: 1px 6px;
+            font-size: 0.68rem;
+            font-variant-numeric: tabular-nums;
+            white-space: nowrap;
+        }
+        .chan-region-chip.known  { background: rgba(138,99,210,0.22); color: var(--heard); border: 1px solid rgba(138,99,210,0.4); }
+        .chan-region-chip.unknown { background: rgba(240,168,50,0.15); color: var(--yellow); border: 1px solid rgba(240,168,50,0.35); }
+        .chan-region-chip.overflow { background: var(--surface); color: var(--muted); border: 1px solid var(--border); }
+        .chan-regions-empty { color: var(--muted); opacity: 0.7; padding: 8px 0; font-size: 0.8rem; }
+
         /* Heard-nodes list */
         .heard-list {
             display: flex;
@@ -3308,6 +3407,7 @@
                     if (!_rxLogFirehosePaused) _renderFirehoseIfOpen();
                     _renderTrafficIfOpen();
                     _renderChannelsIfOpen();
+                    if (_isOpen("channels")) _chanAnalyticsRefreshDebounced();
                     _refreshCardSparklines();
                     if (_topoGet("heatmap", false) && _isOpen("topology")) _renderActivityHeatmap();
                 }
@@ -3341,6 +3441,7 @@
                 if (!_rxLogFirehosePaused) _renderFirehoseIfOpen();
                 _renderTrafficIfOpen();
                 _renderChannelsIfOpen();
+                if (_isOpen("channels")) _chanAnalyticsRefreshDebounced();
                 _refreshCardSparklines();
                 // Throttled heatmap redraw: ≤ 1 Hz while the heatmap is active.
                 if (_topoGet("heatmap", false) && _isOpen("topology")) {
@@ -4057,7 +4158,10 @@
                 const devIdx = slot ? slot.idx : null;
                 const liveDev = devIdx ? byIdx[devIdx] : null;
                 if (!liveDev) continue;
-                const raw = liveDev.Data || "";
+                // Domoticz re-formats big Custom values as floats ("1.36716e+06").
+                // The plugin snapshot carries the exact integer, so prefer it.
+                const exactVal = (slot && /^\d+$/.test(String(slot.value || ""))) ? String(slot.value) : "";
+                const raw = (key.startsWith("pkts_") && exactVal) ? exactVal : (liveDev.Data || "");
                 const numVal = raw.replace(/\s*(dBm|dB|%|V|°C|hops|min|s|pkts)$/i, "").trim();
                 cell.innerHTML = special === "battery"
                     ? (() => { const pct = parseInt(numVal, 10); return isNaN(pct) ? renderMetricHtml(label, null, unit, devIdx) : renderBatteryHtml(pct, devIdx); })()
@@ -6116,6 +6220,9 @@
                 const _mp = document.getElementById("map-panel");
                 if (_mp) _mp.classList.remove("panel-analytics-wide");
             }
+            if (_prevView === "channels" && view !== "channels") {
+                _chanAnalyticsTeardown();
+            }
             // Mark the panel open BEFORE dispatching the per-view render.
             // The render helpers gate on _isOpen(view), which requires the
             // "open" class; with the migration the renders are synchronous
@@ -6171,6 +6278,15 @@
                 coords.textContent = "Known + unknown chan_hashes heard";
                 body.innerHTML = `<div class="panel-view" id="channels-view"></div>`;
                 _renderChannelsIfOpen();
+                // Kick off Highcharts + analytics once the WS is ready.
+                Promise.all([_loadHighcharts(), _waitForWSOpen(10_000)]).then(() => {
+                    if (!_isOpen("channels")) return;
+                    _chanAnalyticsRefresh();
+                    _chanAnalyticsStartTimer();
+                }).catch(() => {
+                    // WS or Highcharts not available yet — the timer will retry on the
+                    // next 60-second tick once connectivity is restored.
+                });
             } else if (view === "topology") {
                 title.textContent  = "Mesh topology";
                 coords.textContent = "All contacts with a known location";
@@ -6531,6 +6647,293 @@
             }).catch(() => { /* highcharts unavailable — bar list still shown */ });
         }
 
+        // ── Channels-panel analytics state ───────────────────────────────────
+        // Separate from _analyticsPanels which targets the analytics side-panel.
+        let _chanActivityChart    = null;   // Highcharts instance for the spline
+        let _chanActivityData     = null;   // last good chan_activity response
+        let _chanRegionsData      = null;   // last good chan_regions response
+        let _chanAnalyticsGen     = 0;      // generation counter — drop stale responses
+        let _chanAnalyticsCmdId   = 1;      // monotonic command-id counter
+        let _chanAnalyticsUnsub   = null;   // onPluginMessage unsubscribe handle
+        let _chanAnalyticsTimer   = null;   // setInterval for auto-refresh
+        let _chanAnalyticsDebounce = null;  // debounce timer for rxlog-triggered refresh
+
+        // Fire both chan_activity and chan_regions analytics commands.
+        // Guards: channels panel must be open and WS must be ready.
+        function _chanAnalyticsRefresh() {
+            if (!_isOpen("channels")) return;
+            if (!_pluginWS.isOpen || !_pluginWS.isOpen()) return;
+            const gen = ++_chanAnalyticsGen;
+            const now = Math.floor(Date.now() / 1000);
+            const from = now - 86400;   // always last 24 h for the activity chart
+            const bucket = 3600;         // hourly buckets
+
+            // Register the new listener before tearing down the old one so a
+            // throw in the old unsubscribe can never leak the fresh handler.
+            const newUnsub = _pluginWS.onPluginMessage(msg => {
+                if (msg.t !== 'cmd_result') return;
+                if (msg.analytics_gen !== undefined && msg.analytics_gen !== gen) return;
+                const p = msg.panel;
+                if (p === 'chan_activity') {
+                    if (!_isOpen("channels")) return;
+                    _chanActivityData = msg;
+                    _renderChanActivityChart();
+                } else if (p === 'chan_regions') {
+                    if (!_isOpen("channels")) return;
+                    _chanRegionsData = msg;
+                    _renderChanRegionsTable();
+                }
+            });
+            if (_chanAnalyticsUnsub) { try { _chanAnalyticsUnsub(); } catch (_) {} }
+            _chanAnalyticsUnsub = newUnsub;
+
+            const actId = _chanAnalyticsCmdId++;
+            _pluginWS.sendPluginCommand({
+                t: 'cmd', cmd: 'analytics', id: actId,
+                panel: 'chan_activity', analytics_id: 'chan_activity',
+                analytics_gen: gen, from, to: now, bucket
+            });
+            const regId = _chanAnalyticsCmdId++;
+            _pluginWS.sendPluginCommand({
+                t: 'cmd', cmd: 'analytics', id: regId,
+                panel: 'chan_regions', analytics_id: 'chan_regions',
+                analytics_gen: gen, from, to: now, bucket
+            });
+        }
+
+        // Debounced wrapper — called from rxlog delta path to avoid spamming requests.
+        function _chanAnalyticsRefreshDebounced() {
+            if (_chanAnalyticsDebounce) { clearTimeout(_chanAnalyticsDebounce); }
+            _chanAnalyticsDebounce = setTimeout(() => {
+                _chanAnalyticsDebounce = null;
+                _chanAnalyticsRefresh();
+            }, 2000);
+        }
+
+        // Start/stop the 60-second auto-refresh timer while the channels panel is open.
+        function _chanAnalyticsStartTimer() {
+            _chanAnalyticsStopTimer();
+            _chanAnalyticsTimer = setInterval(_chanAnalyticsRefresh, 60000);
+        }
+        function _chanAnalyticsStopTimer() {
+            if (_chanAnalyticsTimer) { clearInterval(_chanAnalyticsTimer); _chanAnalyticsTimer = null; }
+            if (_chanAnalyticsDebounce) { clearTimeout(_chanAnalyticsDebounce); _chanAnalyticsDebounce = null; }
+        }
+
+        // Teardown: stop timer, unsub WS listener, destroy chart — called when leaving.
+        function _chanAnalyticsTeardown() {
+            _chanAnalyticsStopTimer();
+            if (_chanAnalyticsUnsub) { try { _chanAnalyticsUnsub(); } catch (_) {} _chanAnalyticsUnsub = null; }
+            if (_chanActivityChart) { try { _chanActivityChart.destroy(); } catch (_) {} _chanActivityChart = null; }
+            _chanActivityData = null;
+            _chanRegionsData  = null;
+        }
+
+        // Render the Channel Activity spline chart into #chan-activity-chart-slot.
+        function _renderChanActivityChart() {
+            const slot = document.getElementById('chan-activity-chart-slot');
+            if (!slot) return;
+            const data = _chanActivityData;
+            const rawSeries = (data && data.ok && Array.isArray(data.series)) ? data.series : [];
+
+            if (!rawSeries.length) {
+                if (_chanActivityChart) { try { _chanActivityChart.destroy(); } catch (_) {} _chanActivityChart = null; }
+                slot.innerHTML = `<div class="chan-activity-empty">
+                    <i class="fa-solid fa-chart-line"></i>
+                    <span>No channel activity in the last 24 h</span>
+                </div>`;
+                return;
+            }
+
+            // Cap to top-8 series + "Other" aggregate. Series here are keyed by
+            // hash, not node_key, so resolve via hashToName then _escAnalyticsName.
+            const hashToName = Object.assign({}, _rxLog.chan_hash_names || {});
+            for (const e of (_rxLog.entries || [])) {
+                if (e.chan_hash && e.chan_name) hashToName[e.chan_hash] = e.chan_name;
+            }
+
+            const MAX_SERIES = 8;
+            const named = rawSeries.map(s => {
+                const displayName = (s.name) || (hashToName[s.hash]) || ('0x' + String(s.hash || '').toUpperCase());
+                return Object.assign({}, s, { _display: displayName });
+            });
+            // Sort by total count descending for cap selection.
+            named.sort((a, b) => {
+                const sa = (a.data || []).reduce((acc, [, v]) => acc + (v || 0), 0);
+                const sb = (b.data || []).reduce((acc, [, v]) => acc + (v || 0), 0);
+                return sb - sa;
+            });
+            const top  = named.slice(0, MAX_SERIES);
+            const rest = named.slice(MAX_SERIES);
+
+            const buildSeries = (s) => ({
+                name: _escAnalyticsName(s._display),
+                data: (s.data || []).map(([ts, v]) => [ts * 1000, v]),
+                color: _nodePalette(s._display || s.hash || ''),
+                type: 'spline',
+                lineWidth: 1.5,
+                marker: { enabled: false }
+            });
+
+            const hcSeries = top.map(buildSeries);
+
+            if (rest.length) {
+                const otherMap = {}, otherCount = {};
+                for (const s of rest) {
+                    for (const [ts, v] of (s.data || [])) {
+                        if (v === null || v === undefined) continue;
+                        otherMap[ts]   = (otherMap[ts]   || 0) + v;
+                        otherCount[ts] = (otherCount[ts] || 0) + 1;
+                    }
+                }
+                const otherData = Object.keys(otherMap).sort((a, b) => a - b)
+                    .map(ts => [parseInt(ts, 10) * 1000, otherMap[ts]]);
+                if (otherData.length) {
+                    hcSeries.push({
+                        name: 'Other',
+                        data: otherData,
+                        color: '#888888',
+                        type: 'spline',
+                        lineWidth: 1,
+                        dashStyle: 'ShortDash',
+                        marker: { enabled: false }
+                    });
+                }
+            }
+
+            // In-place update when series composition hasn't changed.
+            if (_chanActivityChart && _chanActivityChart.series &&
+                _chanActivityChart.series.length === hcSeries.length &&
+                _chanActivityChart.series.every((s, i) => s.name === hcSeries[i].name)) {
+                hcSeries.forEach((s, i) => _chanActivityChart.series[i].setData(s.data, true, false, false));
+                return;
+            }
+            if (_chanActivityChart) { try { _chanActivityChart.destroy(); } catch (_) {} _chanActivityChart = null; }
+
+            slot.innerHTML = '<div id="chan-activity-hc" style="width:100%;height:200px"></div>';
+            try {
+                _chanActivityChart = Highcharts.chart('chan-activity-hc', {
+                    chart: {
+                        backgroundColor: 'transparent',
+                        style: { fontFamily: 'inherit', color: 'var(--text)' },
+                        animation: false,
+                        marginRight: 10,
+                    },
+                    time: { useUTC: false },
+                    title: {
+                        text: 'Channel activity (last 24 h)',
+                        style: { color: 'var(--text)', fontSize: '0.78rem', fontWeight: '600' },
+                        align: 'left',
+                        margin: 6,
+                    },
+                    credits: { enabled: false },
+                    exporting: { enabled: false },
+                    xAxis: {
+                        type: 'datetime',
+                        lineColor: 'var(--border)',
+                        tickColor: 'var(--border)',
+                        labels: { style: { color: 'var(--muted)', fontSize: '0.65rem' } },
+                        crosshair: { color: 'rgba(255,255,255,0.15)', dashStyle: 'Solid' },
+                    },
+                    yAxis: {
+                        title: { text: 'msgs/h', style: { color: 'var(--muted)', fontSize: '0.65rem' } },
+                        gridLineColor: 'rgba(255,255,255,0.06)',
+                        labels: { style: { color: 'var(--muted)', fontSize: '0.65rem' } },
+                        allowDecimals: false,
+                        min: 0,
+                    },
+                    tooltip: {
+                        backgroundColor: 'var(--surface)',
+                        borderColor: 'var(--border)',
+                        style: { color: 'var(--text)', fontSize: '0.73rem' },
+                        xDateFormat: '%H:%M, %e %b',
+                        shared: true,
+                    },
+                    legend: {
+                        enabled: true,
+                        itemStyle: { color: 'var(--text)', fontSize: '0.68rem', fontWeight: 'normal' },
+                        itemHoverStyle: { color: 'var(--accent)' },
+                        layout: 'horizontal',
+                        verticalAlign: 'bottom',
+                        align: 'center',
+                    },
+                    plotOptions: { series: { animation: false } },
+                    series: hcSeries,
+                });
+            } catch (_) {
+                slot.innerHTML = `<div class="chan-activity-empty">
+                    <i class="fa-solid fa-chart-line"></i>
+                    <span>Chart unavailable</span>
+                </div>`;
+            }
+        }
+
+        // Render the chan_regions table into #chan-regions-table-wrap.
+        function _renderChanRegionsTable() {
+            const wrap = document.getElementById('chan-regions-table-wrap');
+            if (!wrap) return;
+            const data = _chanRegionsData;
+            const channels = (data && data.ok && Array.isArray(data.channels)) ? data.channels : [];
+
+            const hashToName = Object.assign({}, _rxLog.chan_hash_names || {});
+            for (const e of (_rxLog.entries || [])) {
+                if (e.chan_hash && e.chan_name) hashToName[e.chan_hash] = e.chan_name;
+            }
+
+            if (!channels.length) {
+                wrap.innerHTML = `<div class="chan-regions-empty">No channel traffic recorded yet.</div>`;
+                return;
+            }
+
+            const grandTotal = channels.reduce((s, c) => s + (c.total || 0), 0);
+
+            // Classify a region tag: NL provinces are "known"; eu/other/unknown are muted.
+            function _regionChipClass(tag) {
+                if (!tag || tag === 'unknown' || tag === 'eu' || tag === 'other') return 'unknown';
+                return 'known';
+            }
+
+            const MAX_CHIPS = 8;
+
+            const rows = channels.map(ch => {
+                const name = ch.name || hashToName[ch.hash] || null;
+                const total = ch.total || 0;
+                const pct = grandTotal > 0 ? ((total / grandTotal) * 100).toFixed(2) : '0.00';
+
+                const chanCell = name
+                    ? `<span style="color:var(--text)">${escHtml(name)}</span>`
+                    : `<span class="chan-hash-chip" title="No key for this channel hash — volume only">0x${escHtml(String(ch.hash || '').toUpperCase())}</span>`;
+
+                const regions = Array.isArray(ch.regions) ? [...ch.regions] : [];
+                regions.sort((a, b) => (b.count || 0) - (a.count || 0));
+                const visible  = regions.slice(0, MAX_CHIPS);
+                const overflow = regions.slice(MAX_CHIPS);
+                const chipHtml = visible.map(r =>
+                    `<span class="chan-region-chip ${_regionChipClass(r.region)}">${escHtml(r.region)} <strong>${r.count}</strong></span>`
+                ).join('');
+                const overflowHtml = overflow.length
+                    ? `<span class="chan-region-chip overflow">+${overflow.length}</span>`
+                    : '';
+
+                return `<tr>
+                    <td>${chanCell}</td>
+                    <td>${total.toLocaleString()}</td>
+                    <td>${pct}%</td>
+                    <td><div class="chan-region-chips">${chipHtml}${overflowHtml}</div></td>
+                </tr>`;
+            }).join('');
+
+            wrap.innerHTML = `<table class="chan-regions-table">
+                <thead><tr>
+                    <th>Channel</th>
+                    <th>Messages</th>
+                    <th>% of total</th>
+                    <th>Regions</th>
+                </tr></thead>
+                <tbody>${rows}</tbody>
+            </table>`;
+        }
+
         function _renderChannelsIfOpen() {
             if (!_isOpen("channels")) return;
             const view = document.getElementById("channels-view");
@@ -6570,48 +6973,49 @@
                 </div>`;
             }).join("");
 
-            // Hashes heard on air (with packet counts), sorted by the channel
-            // hash value ascending (low → high) so the table reads in a stable
-            // numeric order regardless of packet counts.
-            const pairs = Object.entries(counts).sort(
-                (a, b) => (parseInt(a[0], 16) || 0) - (parseInt(b[0], 16) || 0)
-            );
-            const hashRows = pairs.map(([h, n]) => {
-                const name = hashToName[h] || "(unknown — no key)";
-                const isKnown = !!hashToName[h];
-                return `<div class="chan-row${isKnown ? " known" : ""}">
-                    <span class="chash">0x${escHtml(h)}</span>
-                    <span class="name">${escHtml(name)}</span>
-                    <span class="cnt">${n}</span>
-                </div>`;
-            }).join("");
+            // Determine whether the view skeleton already exists so we can
+            // do an incremental refresh (slot-list + chart + table) without
+            // blowing away the Highcharts SVG on every rxlog delta.
+            const viewExists = !!document.getElementById('chan-slots-list');
 
-            view.innerHTML = `
-                <div style="font-size:0.78rem;color:var(--accent);font-weight:600;text-transform:uppercase;letter-spacing:0.05em;border-bottom:1px solid var(--accent);padding-bottom:4px">
-                    Channel slots (${slots.filter(s => s.name).length} / ${slots.length})
-                </div>
-                <div style="font-size:0.78rem;color:var(--text);opacity:0.85;line-height:1.5">
-                    Slots on this device — fill an empty one to subscribe.
-                    Public-style names that start with <code>#</code>
-                    auto-derive their key from the name; private channels need
-                    a 16-byte secret too.
-                </div>
-                <div id="chan-slots-list">${slotRows}</div>
-                <div style="font-size:0.78rem;color:var(--accent);font-weight:600;text-transform:uppercase;letter-spacing:0.05em;border-bottom:1px solid var(--accent);padding-bottom:4px;margin-top:6px">
-                    Hashes heard on air
-                </div>
-                <div style="font-size:0.78rem;color:var(--text);opacity:0.85;line-height:1.5">
-                    Each row is a channel hash heard over the radio. Unknown
-                    rows are channels we have no key for — knowing the hash
-                    alone isn't enough to subscribe, you need the name (and
-                    secret for private channels).
-                </div>
-                ${hashRows ? `
-                    <div class="chan-row" style="color:var(--accent);font-weight:600;text-transform:uppercase;font-size:0.65rem;letter-spacing:0.05em;border-bottom:1px solid var(--accent)">
-                        <span title="MeshCore hashes a channel's name to a single byte; the firmware uses this hash to route encrypted group traffic. We see it on every GRP_TXT packet.">Chan hash</span>
-                        <span>Name</span>
-                        <span style="text-align:right">Pkts</span>
-                    </div>${hashRows}` : `<div style="color:var(--text);opacity:.7;padding-top:8px">No grouped traffic heard yet.</div>`}`;
+            if (!viewExists) {
+                view.innerHTML = `
+                    <div class="chan-activity-section">
+                        <div class="chan-activity-section-head">Channel activity (last 24 h)</div>
+                        <div id="chan-activity-chart-slot">
+                            <div class="chan-activity-empty">
+                                <i class="fa-solid fa-chart-line"></i>
+                                <span>Loading…</span>
+                            </div>
+                        </div>
+                    </div>
+                    <div style="font-size:0.78rem;color:var(--accent);font-weight:600;text-transform:uppercase;letter-spacing:0.05em;border-bottom:1px solid var(--accent);padding-bottom:4px;margin-top:6px">
+                        Channel slots (${slots.filter(s => s.name).length} / ${slots.length})
+                    </div>
+                    <div style="font-size:0.78rem;color:var(--text);opacity:0.85;line-height:1.5">
+                        Slots on this device — fill an empty one to subscribe.
+                        Public-style names that start with <code>#</code>
+                        auto-derive their key from the name; private channels need
+                        a 16-byte secret too.
+                    </div>
+                    <div id="chan-slots-list"></div>
+                    <div class="chan-regions-section" style="margin-top:8px">
+                        <div class="chan-regions-section-head">Channel traffic</div>
+                        <div style="font-size:0.78rem;color:var(--text);opacity:0.85;line-height:1.5;margin-bottom:4px">
+                            Each row is a channel hash heard over the radio. Unknown
+                            rows have no key — volume only. Region chips show inferred
+                            origin from sender/first-hop GPS.
+                        </div>
+                        <div id="chan-regions-table-wrap">
+                            <div class="chan-regions-empty">Waiting for data…</div>
+                        </div>
+                    </div>`;
+            }
+            // (slot-count heading in the skeleton only updates on panel reopen — acceptable)
+
+            // Always refresh the slot-list rows (cheap innerHTML, no chart impact).
+            const slotListEl = document.getElementById('chan-slots-list');
+            if (slotListEl) slotListEl.innerHTML = slotRows;
 
             // Wire up slot Add/Remove buttons
             view.querySelectorAll(".chan-slot-btn.add").forEach(btn => {
@@ -6620,6 +7024,10 @@
             view.querySelectorAll(".chan-slot-btn.clear").forEach(btn => {
                 btn.onclick = () => _clearChannelSlot(parseInt(btn.dataset.slot, 10), btn);
             });
+
+            // Re-render analytics sections from cached data (if any).
+            if (_chanActivityData)  _renderChanActivityChart();
+            if (_chanRegionsData)   _renderChanRegionsTable();
         }
 
         async function _addChannelSlot(slot) {
@@ -10885,6 +11293,9 @@ Larger = more reliable routing but smaller mesh diameter.">Path hash size</label
                 if (_analyticsResizeObs) { try { _analyticsResizeObs.disconnect(); } catch (_) {} _analyticsResizeObs = null; }
                 _analyticsDestroyCharts();
                 panel.classList.remove("panel-analytics-wide");
+            }
+            if (_sidePanelView === "channels") {
+                _chanAnalyticsTeardown();
             }
             _sidePanelView = null;
         }
