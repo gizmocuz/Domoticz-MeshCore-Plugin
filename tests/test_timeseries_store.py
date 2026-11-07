@@ -154,19 +154,157 @@ class TestMigrationV3ToV4(unittest.TestCase):
         db = self._open()
         self.assertIn("ix_ts_hops_ts", self._indices(db))
 
-    def test_db_version_is_4(self):
+    def test_db_version_is_5(self):
         _make_v3_db(self.path)
         self._p, _ = _open_db(self.path)
-        self.assertEqual(self._p._pref_get("db_version"), "4")
+        self.assertEqual(self._p._pref_get("db_version"), "5")
 
     def test_idempotent_on_fresh_db(self):
-        """A completely fresh DB (0->4) should have all ts_* tables without error."""
+        """A completely fresh DB (0->5) should have all ts_* tables without error."""
         self._p, db = _open_db(self.path)
         tables = self._tables(db)
         for tbl in ("ts_radio", "ts_packets_hourly", "ts_packets_min",
-                    "ts_relay_keys", "ts_hops"):
+                    "ts_relay_keys", "ts_hops",
+                    "ts_chan_hourly", "chan_region_counts", "chan_msg_totals"):
             self.assertIn(tbl, tables, f"{tbl} missing on fresh DB")
-        self.assertEqual(self._p._pref_get("db_version"), "4")
+        self.assertEqual(self._p._pref_get("db_version"), "5")
+
+
+def _make_v4_db(path):
+    """Create a DB that looks exactly like a v4 schema (has ts_* tables but not v5 tables)."""
+    con = sqlite3.connect(path)
+    con.execute("PRAGMA journal_mode=WAL")
+    con.execute("""
+        CREATE TABLE IF NOT EXISTS messages (
+            id        INTEGER PRIMARY KEY AUTOINCREMENT,
+            chan      TEXT    NOT NULL,
+            sender    TEXT    NOT NULL,
+            epoch     TEXT    NOT NULL,
+            bad       INTEGER NOT NULL DEFAULT 0,
+            body      TEXT    NOT NULL,
+            hops      INTEGER,
+            snr       REAL,
+            rssi      INTEGER,
+            path      TEXT,
+            ack       INTEGER,
+            direction TEXT    NOT NULL DEFAULT 'in',
+            recv_ts   TEXT    NOT NULL,
+            peer_key  TEXT
+        )
+    """)
+    con.execute("""
+        CREATE TABLE IF NOT EXISTS preferences (
+            key   TEXT PRIMARY KEY,
+            value TEXT
+        )
+    """)
+    con.execute("""
+        CREATE TABLE IF NOT EXISTS elevation_cache (
+            lat_q     INTEGER NOT NULL,
+            lon_q     INTEGER NOT NULL,
+            elev_m    REAL    NOT NULL,
+            last_used INTEGER NOT NULL,
+            PRIMARY KEY (lat_q, lon_q)
+        )
+    """)
+    con.execute("""
+        CREATE TABLE IF NOT EXISTS ts_radio (
+            ts        INTEGER NOT NULL,
+            node_key  TEXT    NOT NULL,
+            rssi      INTEGER,
+            snr       REAL,
+            noise     INTEGER,
+            path_len  INTEGER,
+            src       TEXT
+        )
+    """)
+    con.execute("""
+        CREATE TABLE IF NOT EXISTS ts_packets_hourly (
+            hour_ts   INTEGER PRIMARY KEY,
+            rx_count  INTEGER NOT NULL DEFAULT 0,
+            tx_count  INTEGER NOT NULL DEFAULT 0,
+            flood_rx  INTEGER NOT NULL DEFAULT 0,
+            flood_tx  INTEGER NOT NULL DEFAULT 0,
+            direct_rx INTEGER NOT NULL DEFAULT 0,
+            direct_tx INTEGER NOT NULL DEFAULT 0
+        )
+    """)
+    con.execute("""
+        CREATE TABLE IF NOT EXISTS ts_packets_min (
+            ts        INTEGER PRIMARY KEY,
+            rx_count  INTEGER NOT NULL DEFAULT 0,
+            tx_count  INTEGER NOT NULL DEFAULT 0
+        )
+    """)
+    con.execute("""
+        CREATE TABLE IF NOT EXISTS ts_relay_keys (
+            hex_key    TEXT PRIMARY KEY,
+            name       TEXT,
+            last_seen  INTEGER NOT NULL,
+            count      INTEGER NOT NULL DEFAULT 0
+        )
+    """)
+    con.execute("""
+        CREATE TABLE IF NOT EXISTS ts_hops (
+            ts    INTEGER NOT NULL,
+            hops  INTEGER NOT NULL
+        )
+    """)
+    con.execute(
+        "INSERT OR REPLACE INTO preferences VALUES ('db_version', '4')"
+    )
+    con.commit()
+    con.close()
+
+
+class TestMigrationV4ToV5(unittest.TestCase):
+    """Schema migration v4 -> v5 creates the three channel-analytics tables."""
+
+    def setUp(self):
+        fd, self.path = tempfile.mkstemp(suffix=".db")
+        os.close(fd)
+        os.unlink(self.path)
+
+    def tearDown(self):
+        _close(getattr(self, "_p", plugin.BasePlugin()), self.path)
+
+    def _open(self):
+        _make_v4_db(self.path)
+        self._p, db = _open_db(self.path)
+        return db
+
+    def _tables(self, db):
+        rows = db.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'"
+        ).fetchall()
+        return {r[0] for r in rows}
+
+    def test_ts_chan_hourly_created(self):
+        db = self._open()
+        self.assertIn("ts_chan_hourly", self._tables(db))
+
+    def test_chan_region_counts_created(self):
+        db = self._open()
+        self.assertIn("chan_region_counts", self._tables(db))
+
+    def test_chan_msg_totals_created(self):
+        db = self._open()
+        self.assertIn("chan_msg_totals", self._tables(db))
+
+    def test_db_version_is_5(self):
+        _make_v4_db(self.path)
+        self._p, _ = _open_db(self.path)
+        self.assertEqual(self._p._pref_get("db_version"), "5")
+
+    def test_idempotent_on_fresh_db(self):
+        """A completely fresh DB (0->5) should have all tables without error."""
+        self._p, db = _open_db(self.path)
+        tables = self._tables(db)
+        for tbl in ("ts_radio", "ts_packets_hourly", "ts_packets_min",
+                    "ts_relay_keys", "ts_hops",
+                    "ts_chan_hourly", "chan_region_counts", "chan_msg_totals"):
+            self.assertIn(tbl, tables, f"{tbl} missing on fresh DB")
+        self.assertEqual(self._p._pref_get("db_version"), "5")
 
 
 # ── _ts_ingest tests ──────────────────────────────────────────────────────────
@@ -757,6 +895,25 @@ class TestTsPrune(unittest.TestCase):
             self.db.commit()
         self.p._ts_prune()
         self.assertEqual(self._count("ts_packets_hourly"), 1)
+
+    def test_prune_removes_old_ts_chan_hourly(self):
+        now = int(time.time())
+        old_h = now - 8 * 86400   # 8 days ago — older than 7-day cutoff
+        old_h -= (old_h % 3600)
+        recent_h = now - 86400    # 1 day ago — within 7-day window
+        recent_h -= (recent_h % 3600)
+        with self.p._msgdb_lock:
+            self.db.execute(
+                "INSERT INTO ts_chan_hourly (hour_ts, chan_hash, count) VALUES (?,?,?)",
+                (old_h, "11", 5)
+            )
+            self.db.execute(
+                "INSERT INTO ts_chan_hourly (hour_ts, chan_hash, count) VALUES (?,?,?)",
+                (recent_h, "11", 3)
+            )
+            self.db.commit()
+        self.p._ts_prune()
+        self.assertEqual(self._count("ts_chan_hourly"), 1)
 
 
 # ── Dirty-flag / cache invalidation tests ────────────────────────────────────

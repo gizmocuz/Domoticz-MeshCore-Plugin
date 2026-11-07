@@ -20,5 +20,14 @@ meshcore_messages.db-shm
 meshcore_debug.log
 meshcore_debug.log.1
 
+# Third-party data downloaded by hand for discover_channel_name.py (simplemaps, not ours to redistribute)
+nl-cities.json
+
+# Generated compressed copies of bundled assets
+*.gz
+
+# Test tooling cache
+.pytest_cache/
+
 # Planning notes — local only, not part of source
 plans/

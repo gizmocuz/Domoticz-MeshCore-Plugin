@@ -46,7 +46,7 @@ def main():
     # Print in both decimal and hex formats
     print(f"Channel: {channel_name}")
     print(f"Hash byte (hex): 0x{hash_byte:02x}")
-    print(f"Hash byte (decimal): {hash_byte}")
+    # print(f"Hash byte (decimal): {hash_byte}")
 
 
 if __name__ == "__main__":

@@ -8,7 +8,13 @@ Domoticz plugin that integrates MeshCore LoRa mesh nodes as automation devices. 
 
 ## Development
 
-No build system or test framework is configured yet. The plugin runs inside the Domoticz Python plugin runtime — it cannot be executed standalone.
+There is no build system. The plugin runs inside the Domoticz Python plugin runtime, so it cannot be executed standalone, but its logic is covered by standalone unit tests (stdlib `unittest`, no third-party deps) in `tests/`:
+
+```
+python tests/run_tests.py
+```
+
+`tests/_stubs/DomoticzEx.py` stands in for the Domoticz runtime. `test_serial.py`, `test_rx_log.py` and `test_flood_scope.py` are manual hardware probe scripts (need a real device), excluded from the automated run.
 
 To test manually: copy `plugin.py` and `meshcore.html` into a Domoticz plugin folder (e.g. `domoticz/plugins/MeshCore/`) and restart Domoticz. Logs appear in the Domoticz log viewer.
 
